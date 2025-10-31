@@ -22,10 +22,10 @@ type InstructionState struct {
 }
 
 var (
-	windowsStates       = make(map[int64]*InstructionState)
-	androidStates       = make(map[int64]*InstructionState)
-	iosStates           = make(map[int64]*InstructionState)
-	showCertButton      = make(map[int64]bool) // Показывать ли кнопку "Получить сертификат"
+	windowsStates  = make(map[int64]*InstructionState)
+	androidStates  = make(map[int64]*InstructionState)
+	iosStates      = make(map[int64]*InstructionState)
+	showCertButton = make(map[int64]bool) // Показывать ли кнопку "Получить сертификат"
 )
 
 // EnableCertButton включает отображение кнопки "Получить сертификат" для данного чата
