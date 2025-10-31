@@ -492,12 +492,12 @@ func extractDaysFromCertName(name string) int {
 }
 
 type UserSession struct {
-	MessageID      int
-	State          SessionState
-	ContentType    string
-	PendingPlanID  string
-	CertFileName   string // Имя файла сертификата для повторной отправки
-	CertFileBytes  []byte // Данные сертификата для прикрепления к инструкциям
+	MessageID     int
+	State         SessionState
+	ContentType   string
+	PendingPlanID string
+	CertFileName  string // Имя файла сертификата для повторной отправки
+	CertFileBytes []byte // Данные сертификата для прикрепления к инструкциям
 }
 
 var userSessions = make(map[int64]*UserSession)
