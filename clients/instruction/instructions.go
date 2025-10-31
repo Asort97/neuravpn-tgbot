@@ -22,10 +22,16 @@ type InstructionState struct {
 }
 
 var (
-	windowsStates = make(map[int64]*InstructionState)
-	androidStates = make(map[int64]*InstructionState)
-	iosStates     = make(map[int64]*InstructionState)
+	windowsStates       = make(map[int64]*InstructionState)
+	androidStates       = make(map[int64]*InstructionState)
+	iosStates           = make(map[int64]*InstructionState)
+	showCertButton      = make(map[int64]bool) // Показывать ли кнопку "Получить сертификат"
 )
+
+// EnableCertButton включает отображение кнопки "Получить сертификат" для данного чата
+func EnableCertButton(chatID int64, enable bool) {
+	showCertButton[chatID] = enable
+}
 
 func SetInstructKeyboard(messageID int, chatID int64, instructType InstructType) {
 
@@ -88,6 +94,13 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) {
 		)
 
 		rows = append(rows, linkRow)
+	}
+
+	// Добавляем кнопку сертификата если включена
+	if showCertButton[chatID] {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_certificate"),
+		))
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -180,6 +193,13 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) {
 		)
 
 		rows = append(rows, linkRow)
+	}
+
+	// Добавляем кнопку сертификата если включена
+	if showCertButton[chatID] {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_certificate"),
+		))
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -275,6 +295,13 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
 			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://apps.apple.com/us/app/openvpn-connect/id590379981"),
 		)
 		rows = append(rows, linkRow)
+	}
+
+	// Добавляем кнопку сертификата если включена
+	if showCertButton[chatID] {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_certificate"),
+		))
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
