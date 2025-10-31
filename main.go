@@ -492,10 +492,12 @@ func extractDaysFromCertName(name string) int {
 }
 
 type UserSession struct {
-	MessageID     int
-	State         SessionState
-	ContentType   string
-	PendingPlanID string
+	MessageID      int
+	State          SessionState
+	ContentType    string
+	PendingPlanID  string
+	CertFileName   string // Имя файла сертификата для повторной отправки
+	CertFileBytes  []byte // Данные сертификата для прикрепления к инструкциям
 }
 
 var userSessions = make(map[int64]*UserSession)
@@ -983,16 +985,21 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pfsenseCli
 		handleEditEmail(bot, cq, session)
 	case data == "nav_referral":
 		handleReferralCallback(bot, cq, session)
+		sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d открыл реферальную программу", cq.From.ID), cq.From.UserName, bot, int64(cq.From.ID))
 	case data == "nav_support":
 		handleSupport(bot, cq, session)
 	case data == "nav_instructions":
 		handleInstructionsMenu(bot, cq, session)
+		sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d открыл меню инструкций", cq.From.ID), cq.From.UserName, bot, int64(cq.From.ID))
 	case data == "windows":
 		handleInstructionSelection(bot, cq, session, instruct.Windows)
+		sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d открыл инструкцию для Windows", cq.From.ID), cq.From.UserName, bot, int64(cq.From.ID))
 	case data == "android":
 		handleInstructionSelection(bot, cq, session, instruct.Android)
+		sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d открыл инструкцию для Android", cq.From.ID), cq.From.UserName, bot, int64(cq.From.ID))
 	case data == "ios":
 		handleInstructionSelection(bot, cq, session, instruct.IOS)
+		sendMessageToAdmin(fmt.Sprintf("Пользователь id:%d открыл инструкцию для iOS", cq.From.ID), cq.From.UserName, bot, int64(cq.From.ID))
 	case strings.HasPrefix(data, "win_prev_"):
 		step, _ := strconv.Atoi(strings.TrimPrefix(data, "win_prev_"))
 		instruct.InstructionWindows(chatID, bot, step-1)
@@ -1011,6 +1018,25 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pfsenseCli
 	case strings.HasPrefix(data, "ios_next_"):
 		step, _ := strconv.Atoi(strings.TrimPrefix(data, "ios_next_"))
 		instruct.InstructionIos(chatID, bot, step+1)
+	case data == "resend_certificate":
+		// Повторная отправка сертификата, если он есть в сессии
+		if session.CertFileBytes != nil && session.CertFileName != "" {
+			fileBytes := tgbotapi.FileBytes{
+				Name:  session.CertFileName,
+				Bytes: session.CertFileBytes,
+			}
+			doc := tgbotapi.NewDocument(chatID, fileBytes)
+			doc.Caption = "📥 <b>Ваш VPN-сертификат</b>\n\nИспользуйте его для подключения согласно инструкции."
+			doc.ParseMode = "HTML"
+			if _, err := bot.Send(doc); err != nil {
+				log.Printf("resend certificate error: %v", err)
+				ackText = "❌ Не удалось отправить сертификат"
+			} else {
+				ackText = "✅ Сертификат отправлен"
+			}
+		} else {
+			ackText = "❌ Сертификат не найден. Получите его через меню 'Подключить VPN'"
+		}
 	case data == "check_payment":
 		handleCheckPayment(bot, cq, session, pfsenseClient)
 	case strings.HasPrefix(data, "rate_"):
@@ -1366,6 +1392,13 @@ func handleInstructionSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery
 	chatID := cq.Message.Chat.ID
 	instruct.SetInstructKeyboard(session.MessageID, chatID, t)
 
+	// Включаем кнопку сертификата, если он есть в сессии
+	if session.CertFileBytes != nil && session.CertFileName != "" {
+		instruct.EnableCertButton(chatID, true)
+	} else {
+		instruct.EnableCertButton(chatID, false)
+	}
+
 	switch t {
 	case instruct.Windows:
 		instruct.InstructionWindows(chatID, bot, 0)
@@ -1457,6 +1490,10 @@ func sendCertificate(certRefID, telegramUserID string, chatID int64, days int, u
 		Bytes: ovpnData,
 	}
 
+	// Сохраняем данные сертификата в сессии для повторного использования в инструкциях
+	session.CertFileName = certName + ".ovpn"
+	session.CertFileBytes = ovpnData
+
 	caption := fmt.Sprintf("🔐 <b>VPN-конфигурация готова!</b>\n\n🪪 ID: <code>%d</code>", userID)
 
 	if days > 0 {
@@ -1472,7 +1509,15 @@ func sendCertificate(certRefID, telegramUserID string, chatID int64, days int, u
 	caption += "• При пополнении баланса <b>ничего менять не нужно</b> — VPN продолжит работать автоматически\n"
 	caption += "━━━━━━━━━━━━━━━━━━━━"
 
-	return replaceSessionWithDocument(bot, chatID, session, stateMenu, fileBytes, caption, "HTML", singleBackKeyboard("nav_menu"))
+	// Добавляем кнопку Инструкции рядом с "Назад в меню"
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📚 Инструкции", "nav_instructions"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад в меню", "nav_menu"),
+		),
+	)
+
+	return replaceSessionWithDocument(bot, chatID, session, stateMenu, fileBytes, caption, "HTML", keyboard)
 }
 
 func buildStatusText(pfsenseClient *pfsense.PfSenseClient, userID int) (string, error) {
