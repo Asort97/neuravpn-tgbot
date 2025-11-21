@@ -99,7 +99,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) {
 	// Добавляем кнопку сертификата если включена
 	if showCertButton[chatID] {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_certificate"),
+			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_access"),
 		))
 	}
 
@@ -198,7 +198,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) {
 	// Добавляем кнопку сертификата если включена
 	if showCertButton[chatID] {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_certificate"),
+			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_access"),
 		))
 	}
 
@@ -300,7 +300,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
 	// Добавляем кнопку сертификата если включена
 	if showCertButton[chatID] {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_certificate"),
+			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_access"),
 		))
 	}
 
