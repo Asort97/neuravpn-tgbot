@@ -118,6 +118,23 @@ func (s *Store) GetDays(userID string) (int64, error) {
 	}
 }
 
+// SetDays overwrites day balance without running daily deductions (used when syncing with server expiry).
+func (s *Store) SetDays(userID string, days int64) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	userData := db[userID]
+	userData.Days = days
+	if userData.LastDeduct == "" {
+		userData.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	db[userID] = userData
+
+	return s.saveUsersLocked()
+}
+
 func (s *Store) GetCertRef(userID string) (string, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
