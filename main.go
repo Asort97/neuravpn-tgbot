@@ -16,7 +16,20 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const startText = "Привет! Это HappyCat VPN. Нажимай кнопки ниже, чтобы получить доступ или пополнить дни."
+const startText = `Привет! <b>Добро пожаловать в HappyCat VPN</b> 😺🔒
+
+Здесь ты можешь:
+• Получить или продлить доступ к VPN
+• Оплатить дни и сразу активировать
+• Узнать статус и остаток
+• Пригласить друзей и получать бонусы
+• Открыть подробные инструкции
+• Связаться с поддержкой 24/7
+
+Выбирай нужный раздел ниже 👇`
+
+// throttling map (keyed by user id and action key)
+var lastActionKey = make(map[int64]map[string]time.Time)
 
 type SessionState string
 
@@ -57,8 +70,11 @@ var ratePlanByID = func() map[string]RatePlan {
 type UserSession struct {
 	MessageID     int
 	State         SessionState
+	ContentType   string
 	PendingPlanID string
 	LastAccess    string
+	CertFileName  string
+	CertFileBytes []byte
 }
 
 type xraySettings struct {
@@ -84,8 +100,23 @@ var (
 	sqliteClient   *sqlite.Store
 	xrayCfg        *xraySettings
 	privacyURL     string
+	adminIDs       []int64
 	userSessions   = make(map[int64]*UserSession)
 )
+
+func canProceedKey(userID int64, key string, interval time.Duration) bool {
+	now := time.Now()
+	if lastActionKey[userID] == nil {
+		lastActionKey[userID] = make(map[string]time.Time)
+	}
+	if t, ok := lastActionKey[userID][key]; ok {
+		if now.Sub(t) < interval {
+			return false
+		}
+	}
+	lastActionKey[userID][key] = now
+	return true
+}
 
 func getSession(chatID int64) *UserSession {
 	if s, ok := userSessions[chatID]; ok {
@@ -182,11 +213,11 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 	}
 
 	text := fmt.Sprintf(
-		"Твой доступ готов!\nСсылка: %s\nОсталось дней: %d\nДействует до: %s\nID: <code>%d</code>",
+		"🔐 <b>Доступ готов!</b>\n🔗 Ссылка: %s\n📆 Осталось дней: %d\n⏳ Действует до: %s\n🆔 ID: <code>%d</code>",
 		linkLine, info.daysLeft, exp, userID,
 	)
 	if addedDays > 0 {
-		text += fmt.Sprintf("\nНачислено: +%d дн.", addedDays)
+		text += fmt.Sprintf("\n🎁 Начислено: +%d дн.", addedDays)
 	}
 
 	session.LastAccess = text
@@ -194,11 +225,11 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Ссылка ещё раз", "resend_access"),
-			tgbotapi.NewInlineKeyboardButtonData("Инструкции", "nav_instructions"),
+			tgbotapi.NewInlineKeyboardButtonData("🔁 Ссылка ещё раз", "resend_access"),
+			tgbotapi.NewInlineKeyboardButtonData("📚 Инструкции", "nav_instructions"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("🏠 Меню", "nav_menu"),
 		),
 	)
 	return updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
@@ -213,6 +244,27 @@ func issuePlanAccess(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, p
 }
 
 func updateSessionText(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, state SessionState, text string, parseMode string, keyboard tgbotapi.InlineKeyboardMarkup) error {
+	if session.MessageID != 0 {
+		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, session.MessageID, text, keyboard)
+		if parseMode != "" {
+			edit.ParseMode = parseMode
+		}
+		edit.DisableWebPagePreview = true
+		if _, err := bot.Send(edit); err == nil {
+			instruct.ResetState(chatID)
+			session.State = state
+			session.ContentType = "text"
+			return nil
+		}
+	}
+	return replaceSessionWithText(bot, chatID, session, state, text, parseMode, keyboard)
+}
+
+func replaceSessionWithText(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, state SessionState, text string, parseMode string, keyboard tgbotapi.InlineKeyboardMarkup) error {
+	if session.MessageID != 0 {
+		_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, session.MessageID))
+	}
+	instruct.ResetState(chatID)
 	msg := tgbotapi.NewMessage(chatID, text)
 	if parseMode != "" {
 		msg.ParseMode = parseMode
@@ -224,29 +276,68 @@ func updateSessionText(bot *tgbotapi.BotAPI, chatID int64, session *UserSession,
 	if err != nil {
 		return err
 	}
+
 	session.MessageID = sent.MessageID
 	session.State = state
+	session.ContentType = "text"
 	return nil
 }
 
-func mainMenuKeyboard() tgbotapi.InlineKeyboardMarkup {
+func replaceSessionWithDocument(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, state SessionState, file tgbotapi.FileBytes, caption string, parseMode string, keyboard tgbotapi.InlineKeyboardMarkup) error {
+	if session.MessageID != 0 {
+		_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, session.MessageID))
+	}
+	instruct.ResetState(chatID)
+
+	doc := tgbotapi.NewDocument(chatID, file)
+	doc.Caption = caption
+	if parseMode != "" {
+		doc.ParseMode = parseMode
+	}
+	doc.ReplyMarkup = keyboard
+
+	sent, err := bot.Send(doc)
+	if err != nil {
+		return err
+	}
+
+	session.MessageID = sent.MessageID
+	session.State = state
+	session.ContentType = "document"
+	return nil
+}
+
+func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Получить VPN", "nav_get_vpn"),
-			tgbotapi.NewInlineKeyboardButtonData("Пополнить дни", "nav_topup"),
+			tgbotapi.NewInlineKeyboardButtonData("🔐 Подключить VPN", "nav_get_vpn"),
+			tgbotapi.NewInlineKeyboardButtonData("💰 Пополнить баланс", "nav_topup"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Статус", "nav_status"),
-			tgbotapi.NewInlineKeyboardButtonData("Инструкции", "nav_instructions"),
+			tgbotapi.NewInlineKeyboardButtonData("👤 Профиль", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("🎁 Рефералы", "nav_referral"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📚 Инструкции", "nav_instructions"),
+			tgbotapi.NewInlineKeyboardButtonData("📞 Поддержка", "nav_support"),
 		),
 	)
+}
+
+func composeMenuText() string {
+	trimmed := strings.TrimSpace(startText)
+	if trimmed == "" {
+		return "Выберите действие в меню ниже."
+	}
+	return trimmed + "\n\n<b>Меню:</b>"
 }
 
 func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
 	for _, p := range ratePlans {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%s", p.Title), "rate_"+p.ID))
+		label := fmt.Sprintf("💸 %.0f₽", p.Amount)
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, "rate_"+p.ID))
 		if len(row) == 3 {
 			rows = append(rows, row)
 			row = nil
@@ -256,7 +347,7 @@ func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
 		rows = append(rows, row)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("В меню", "nav_menu"),
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_menu"),
 	))
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
@@ -266,6 +357,17 @@ func main() {
 	yookassaStoreID := os.Getenv("YOOKASSA_STORE_ID")
 	botToken := os.Getenv("TG_BOT_TOKEN")
 	privacyURL = os.Getenv("PRIVACY_URL")
+
+	// Parse admin IDs
+	adminIDsStr := os.Getenv("ADMIN_IDS")
+	if adminIDsStr != "" {
+		for _, idStr := range strings.Split(adminIDsStr, ",") {
+			idStr = strings.TrimSpace(idStr)
+			if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+				adminIDs = append(adminIDs, id)
+			}
+		}
+	}
 
 	xrayUser := os.Getenv("XRAY_USERNAME")
 	xrayPass := os.Getenv("XRAY_PASSWORD")
@@ -324,7 +426,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 	if msg.SuccessfulPayment != nil {
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
-			_ = updateSessionText(bot, chatID, session, stateTopUp, "Платеж есть, но тариф не ясен. Напиши в поддержку.", "", mainMenuKeyboard())
+			_ = updateSessionText(bot, chatID, session, stateTopUp, "Платёж есть, но тариф не ясен. Напиши в поддержку.", "", mainMenuInlineKeyboard())
 			return
 		}
 		if err := handleSuccessfulPayment(bot, msg, xrCfg, plan, session); err != nil {
@@ -348,7 +450,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		userID := strconv.FormatInt(msg.From.ID, 10)
 		addr, err := mail.ParseAddress(strings.TrimSpace(msg.Text))
 		if err != nil || addr.Address == "" || !strings.Contains(addr.Address, "@") {
-			_ = updateSessionText(bot, chatID, session, stateCollectEmail, "Неверный e-mail, пример: name@example.com", "HTML", mainMenuKeyboard())
+			_ = updateSessionText(bot, chatID, session, stateCollectEmail, "Неверный e-mail, пример: name@example.com", "HTML", mainMenuInlineKeyboard())
 			return
 		}
 		_ = sqliteClient.SetEmail(userID, addr.Address)
@@ -361,7 +463,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		}
 		if err := startPaymentForPlan(bot, chatID, session, plan); err != nil {
 			log.Printf("startPaymentForPlan error: %v", err)
-			_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось создать платеж.", "", mainMenuKeyboard())
+			_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось создать платёж.", "", mainMenuInlineKeyboard())
 		}
 		return
 	}
@@ -370,7 +472,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		userID := strconv.FormatInt(msg.From.ID, 10)
 		addr, err := mail.ParseAddress(strings.TrimSpace(msg.Text))
 		if err != nil || addr.Address == "" || !strings.Contains(addr.Address, "@") {
-			_ = updateSessionText(bot, chatID, session, stateEditEmail, "Неверный e-mail.", "HTML", mainMenuKeyboard())
+			_ = updateSessionText(bot, chatID, session, stateEditEmail, "Неверный e-mail.", "HTML", mainMenuInlineKeyboard())
 			return
 		}
 		_ = sqliteClient.SetEmail(userID, addr.Address)
@@ -381,15 +483,35 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 
 func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSession, xrCfg *xraySettings) {
 	chatID := msg.Chat.ID
-	telegramUser := strconv.FormatInt(msg.From.ID, 10)
+	userID := strconv.FormatInt(msg.From.ID, 10)
+	args := msg.CommandArguments()
+	referrerID := ""
+	if args != "" && strings.HasPrefix(args, "ref_") {
+		referrerID = strings.TrimPrefix(args, "ref_")
+	}
 
-	if sqliteClient.IsNewUser(telegramUser) {
-		_ = sqliteClient.AddDays(telegramUser, 7)
-		_, _ = ensureXrayAccess(xrayCfg, telegramUser, fallbackEmail(telegramUser), 7, true)
+	isNew := sqliteClient.IsNewUser(userID)
+	if isNew {
+		_ = sqliteClient.AddDays(userID, 7)
+		_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 7, true)
+		if referrerID != "" && referrerID != userID {
+			if err := sqliteClient.RecordReferral(userID, referrerID); err == nil {
+				_ = sqliteClient.AddDays(referrerID, 15)
+				_, _ = ensureXrayAccess(xrayCfg, referrerID, fallbackEmail(referrerID), 15, true)
+				if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
+					refDays, _ := sqliteClient.GetDays(referrerID)
+					refCount := sqliteClient.GetReferralsCount(referrerID)
+					notify := fmt.Sprintf("🎉 По твоей реферальной ссылке пришёл новый пользователь!\n🎁 Начислено: +15 дней\n👥 Всего рефералов: %d\n⏱ Баланс: %d дн.", refCount, refDays)
+					nmsg := tgbotapi.NewMessage(refChatID, notify)
+					nmsg.ParseMode = "HTML"
+					_, _ = bot.Send(nmsg)
+				}
+			}
+		}
 	}
 
 	session.PendingPlanID = ""
-	_ = updateSessionText(bot, chatID, session, stateMenu, startText, "HTML", mainMenuKeyboard())
+	_ = updateSessionText(bot, chatID, session, stateMenu, composeMenuText(), "HTML", mainMenuInlineKeyboard())
 }
 
 func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
@@ -409,19 +531,78 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	data := cq.Data
 	ackText := ""
 
+	// Логирование действия для админов
+	username := cq.From.UserName
+	userID := int64(cq.From.ID)
+	actionName := getActionName(data)
+	notifyAdmins(bot, userID, username, actionName)
+
 	switch {
 	case data == "nav_menu":
-		_ = updateSessionText(bot, chatID, session, stateMenu, startText, "HTML", mainMenuKeyboard())
+		_ = updateSessionText(bot, chatID, session, stateMenu, composeMenuText(), "HTML", mainMenuInlineKeyboard())
 	case data == "nav_get_vpn":
 		handleGetVPN(bot, cq, session, xrCfg)
 	case data == "nav_topup":
 		handleTopUp(bot, cq, session)
 	case data == "nav_status":
 		handleStatus(bot, cq, session, xrCfg)
+	case data == "nav_referral":
+		handleReferral(bot, cq, session)
+	case data == "nav_support":
+		handleSupport(bot, cq, session)
 	case data == "edit_email":
 		handleEditEmail(bot, cq, session)
 	case data == "nav_instructions":
 		handleInstructionsMenu(bot, cq, session)
+	case data == "windows":
+		instruct.InstructionWindows(chatID, bot, 0)
+	case data == "android":
+		instruct.InstructionAndroid(chatID, bot, 0)
+	case data == "ios":
+		instruct.InstructionIos(chatID, bot, 0)
+	case strings.HasPrefix(data, "win_prev_"):
+		// win_prev_<currentStep>
+		parts := strings.Split(data, "win_prev_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				instruct.InstructionWindows(chatID, bot, n-1)
+			}
+		}
+	case strings.HasPrefix(data, "win_next_"):
+		parts := strings.Split(data, "win_next_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				instruct.InstructionWindows(chatID, bot, n+1)
+			}
+		}
+	case strings.HasPrefix(data, "android_prev_"):
+		parts := strings.Split(data, "android_prev_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				instruct.InstructionAndroid(chatID, bot, n-1)
+			}
+		}
+	case strings.HasPrefix(data, "android_next_"):
+		parts := strings.Split(data, "android_next_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				instruct.InstructionAndroid(chatID, bot, n+1)
+			}
+		}
+	case strings.HasPrefix(data, "ios_prev_"):
+		parts := strings.Split(data, "ios_prev_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				instruct.InstructionIos(chatID, bot, n-1)
+			}
+		}
+	case strings.HasPrefix(data, "ios_next_"):
+		parts := strings.Split(data, "ios_next_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				instruct.InstructionIos(chatID, bot, n+1)
+			}
+		}
 	case strings.HasPrefix(data, "rate_"):
 		id := strings.TrimPrefix(data, "rate_")
 		if p, ok := ratePlanByID[id]; ok {
@@ -456,7 +637,8 @@ func ackCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, text string) 
 func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
 	session.PendingPlanID = ""
-	_ = updateSessionText(bot, chatID, session, stateTopUp, "Выбери тариф:", "HTML", rateKeyboard())
+	header := "💰 <b>Выбор тарифа</b>\nЧем больше период — тем выгоднее. Выбери вариант ниже:"
+	_ = updateSessionText(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboard())
 }
 
 func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, plan RatePlan) {
@@ -465,10 +647,10 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 
 	userID := strconv.FormatInt(cq.From.ID, 10)
 	if email, _ := sqliteClient.GetEmail(userID); strings.TrimSpace(email) == "" {
-		text := "Нужен e-mail для счёта. Отправь e-mail сообщением."
+		text := "📧 Нужен e-mail для счёта. Отправь e-mail сообщением."
 		kb := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("Меню", "nav_menu"),
+				tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
 			),
 		)
 		_ = updateSessionText(bot, chatID, session, stateCollectEmail, text, "HTML", kb)
@@ -478,12 +660,12 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 
 	if err := startPaymentForPlan(bot, chatID, session, plan); err != nil {
 		log.Printf("startPaymentForPlan error: %v", err)
-		_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось создать платеж.", "", mainMenuKeyboard())
+		_ = updateSessionText(bot, chatID, session, stateTopUp, "❌ Не удалось создать платёж.", "", mainMenuInlineKeyboard())
 		ackCallback(bot, cq, "Ошибка платежа")
 		return
 	}
 
-	ackCallback(bot, cq, fmt.Sprintf("Счёт на %s создан", plan.Title))
+	ackCallback(bot, cq, fmt.Sprintf("✅ Счёт на %s создан", plan.Title))
 }
 
 func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan) error {
@@ -560,13 +742,13 @@ func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	info, err := ensureXrayAccess(xrCfg, telegramUser, fallbackEmail(telegramUser), bonus, true)
 	if err != nil {
 		log.Printf("ensureXrayAccess error: %v", err)
-		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось получить доступ. Напиши в поддержку.", "", mainMenuKeyboard())
+		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось получить доступ. Напиши в поддержку.", "", mainMenuInlineKeyboard())
 		return
 	}
 
 	if err := sendAccess(info, telegramUser, chatID, int(bonus), userID, xrCfg, bot, session); err != nil {
 		log.Printf("sendAccess error: %v", err)
-		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не получилось отправить ссылку.", "", mainMenuKeyboard())
+		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не получилось отправить ссылку.", "", mainMenuInlineKeyboard())
 		return
 	}
 
@@ -579,20 +761,22 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	text, err := buildStatusText(xrayCfg, int(userID))
 	if err != nil {
-		text = "Не удалось получить статус"
+		text = "❌ Не удалось получить статус"
 	}
 	email, _ := sqliteClient.GetEmail(strconv.Itoa(int(userID)))
 	if strings.TrimSpace(email) == "" {
 		email = "-"
 	}
-	statusText := fmt.Sprintf("<b>Твой профиль:</b>\n• TG ID: <code>%d</code>\n• Mail: %s\n%s", userID, email, text)
+	refCount := sqliteClient.GetReferralsCount(strconv.FormatInt(userID, 10))
+	refBonus := refCount * 15
+	statusText := fmt.Sprintf("👤 <b>Профиль</b>\n🆔 TG ID: <code>%d</code>\n📧 Mail: %s\n%s\n\n🎁 Рефералы: %d (дней: %d)", userID, email, text, refCount, refBonus)
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Изменить e-mail", "edit_email"),
+			tgbotapi.NewInlineKeyboardButtonData("✏️ Изменить e-mail", "edit_email"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
 		),
 	)
 
@@ -606,27 +790,29 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	if info != nil && info.daysLeft > 0 {
 		days = info.daysLeft
 	}
-	status := "Не активна"
+	statusEmoji := "❌"
+	statusText := "Не активна"
 	if days > 0 {
-		status = "Активна"
+		statusEmoji = "✅"
+		statusText = "Активна"
 	}
 	exp := "-"
 	if info != nil && !info.expireAt.IsZero() {
-		exp = info.expireAt.UTC().Format("02.01.2006 15:04 MST")
+		exp = info.expireAt.Format("02.01.2006 15:04")
 	}
 	linkLine := ""
 	if info != nil && strings.TrimSpace(info.link) != "" {
-		linkLine = fmt.Sprintf("\n<b>Ссылка:</b> <code>%s</code>", info.link)
+		linkLine = fmt.Sprintf("\n🔗 <b>Ссылка:</b> <code>%s</code>", info.link)
 	}
-	return fmt.Sprintf("<b>Статус:</b> %s\n<b>Остаток:</b> %d дн.\n<b>Действует до:</b> %s%s", status, days, exp, linkLine), nil
+	return fmt.Sprintf("🔐 <b>Подписка:</b> %s %s\n⏱ <b>Остаток:</b> %d дн.\n📅 <b>Действует до:</b> %s%s", statusEmoji, statusText, days, exp, linkLine), nil
 }
 
 func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "Отправь новый e-mail сообщением."
+	text := "✏️ Отправь новый e-mail сообщением."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Назад", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_status"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateEditEmail, text, "HTML", kb)
@@ -636,17 +822,17 @@ func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *
 func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
 	instruct.ResetState(chatID)
-	text := "Выбери платформу для инструкции"
+	text := "📚 <b>Инструкции</b>\nВыбери платформу:"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Windows", "windows"),
-			tgbotapi.NewInlineKeyboardButtonData("Android", "android"),
+			tgbotapi.NewInlineKeyboardButtonData("🖥 Windows", "windows"),
+			tgbotapi.NewInlineKeyboardButtonData("🤖 Android", "android"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("iOS", "ios"),
+			tgbotapi.NewInlineKeyboardButtonData("🍎 iOS", "ios"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateInstructions, text, "", kb)
@@ -658,7 +844,7 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg 
 	telegramUser := fmt.Sprint(userID)
 
 	waitingText := fmt.Sprintf("Готовлю доступ по тарифу %s...", plan.Title)
-	_ = updateSessionText(bot, chatID, session, stateTopUp, waitingText, "HTML", mainMenuKeyboard())
+	_ = updateSessionText(bot, chatID, session, stateTopUp, waitingText, "HTML", mainMenuInlineKeyboard())
 
 	if err := issuePlanAccess(bot, chatID, session, plan, xrCfg, telegramUser, userID); err != nil {
 		return err
@@ -734,4 +920,91 @@ func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id i
 	msg := tgbotapi.NewMessage(623290294, newText)
 	msg.ParseMode = "HTML"
 	bot.Send(msg)
+}
+
+func getActionName(data string) string {
+	actionMap := map[string]string{
+		"nav_menu":         "🏠 Главное меню",
+		"nav_get_vpn":      "🔐 Получить VPN",
+		"nav_topup":        "💰 Пополнить баланс",
+		"nav_status":       "👤 Профиль",
+		"nav_referral":     "🎁 Рефералы",
+		"nav_support":      "📞 Поддержка",
+		"nav_instructions": "📚 Инструкции",
+		"edit_email":       "✏️ Изменить e-mail",
+		"windows":          "🖥 Инструкция Windows",
+		"android":          "🤖 Инструкция Android",
+		"ios":              "🍎 Инструкция iOS",
+		"resend_access":    "🔁 Повторная отправка ссылки",
+		"check_payment":    "💳 Проверка платежа",
+	}
+
+	// Префиксы для динамических действий
+	if strings.HasPrefix(data, "rate_") {
+		return "💸 Выбор тарифа"
+	}
+	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") {
+		return "⬅️ Предыдущий шаг инструкции"
+	}
+	if strings.HasPrefix(data, "win_next_") || strings.HasPrefix(data, "android_next_") || strings.HasPrefix(data, "ios_next_") {
+		return "➡️ Следующий шаг инструкции"
+	}
+
+	// Если действие найдено в карте
+	if name, ok := actionMap[data]; ok {
+		return name
+	}
+
+	// По умолчанию возвращаем сырое значение
+	return data
+}
+
+func notifyAdmins(bot *tgbotapi.BotAPI, userID int64, username, action string) {
+	if len(adminIDs) == 0 {
+		return
+	}
+	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">ID:%d</a>`, userID, userID)
+	if username != "" {
+		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, username, username, userID)
+	}
+	text := fmt.Sprintf("📊 Действие: <b>%s</b>\nПользователь: %s", action, userLink)
+	for _, adminID := range adminIDs {
+		if adminID == userID {
+			continue // не уведомляем админа о его же действиях
+		}
+		msg := tgbotapi.NewMessage(adminID, text)
+		msg.ParseMode = "HTML"
+		msg.DisableWebPagePreview = true
+		_, _ = bot.Send(msg)
+	}
+}
+
+// Simple referral stats screen
+func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
+	chatID := cq.Message.Chat.ID
+	userID := strconv.FormatInt(cq.From.ID, 10)
+	link := fmt.Sprintf("https://t.me/%s?start=ref_%s", bot.Self.UserName, userID)
+	count := sqliteClient.GetReferralsCount(userID)
+	bonus := count * 15
+	text := fmt.Sprintf("🎁 <b>Рефералы</b>\n\nТвоя ссылка:\n<code>%s</code>\n\nПривлечено: %d\nБонус дней: %d\n\nПриглашай друзей и получай +15 дней!", link, count, bonus)
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_menu"),
+		),
+	)
+	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
+	ackCallback(bot, cq, "Рефералы")
+}
+
+// Simple support screen
+func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
+	chatID := cq.Message.Chat.ID
+	text := "📞 <b>Поддержка</b>\n\nЕсть вопросы? Пиши: @happycat_support\nРаботаем 24/7. Обычно отвечаем 5–15 минут."
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_menu"),
+		),
+	)
+	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
+	ackCallback(bot, cq, "Поддержка")
 }
