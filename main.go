@@ -404,18 +404,29 @@ func main() {
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
 
+	log.Println("🚀 Бот запущен в асинхронном режиме")
+
 	for update := range updates {
-		if update.PreCheckoutQuery != nil {
-			handlePreCheckout(bot, update.PreCheckoutQuery)
-			continue
-		}
-		if msg := update.Message; msg != nil {
-			handleIncomingMessage(bot, msg, xrayCfg)
-			continue
-		}
-		if cq := update.CallbackQuery; cq != nil && cq.Message != nil {
-			handleCallback(bot, cq, xrayCfg)
-		}
+		// Обрабатываем каждый update в отдельной горутине для параллельности
+		go func(upd tgbotapi.Update) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("❌ Panic в обработчике update: %v", r)
+				}
+			}()
+
+			if upd.PreCheckoutQuery != nil {
+				handlePreCheckout(bot, upd.PreCheckoutQuery)
+				return
+			}
+			if msg := upd.Message; msg != nil {
+				handleIncomingMessage(bot, msg, xrayCfg)
+				return
+			}
+			if cq := upd.CallbackQuery; cq != nil && cq.Message != nil {
+				handleCallback(bot, cq, xrayCfg)
+			}
+		}(update)
 	}
 }
 
