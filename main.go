@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/mail"
@@ -11,6 +12,7 @@ import (
 
 	xray "github.com/Asort97/vpnBot/clients/Xray"
 	instruct "github.com/Asort97/vpnBot/clients/instruction"
+	pgstore "github.com/Asort97/vpnBot/clients/postgres"
 	sqlite "github.com/Asort97/vpnBot/clients/sqLite"
 	yookassa "github.com/Asort97/vpnBot/clients/yooKassa"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -48,6 +50,18 @@ type RatePlan struct {
 	Title  string
 	Amount float64
 	Days   int
+}
+
+type DataStore interface {
+	AddDays(userID string, days int64) error
+	GetDays(userID string) (int64, error)
+	SetDays(userID string, days int64) error
+	GetEmail(userID string) (string, error)
+	SetEmail(userID, email string) error
+	AcceptPrivacy(userID string, at time.Time) error
+	IsNewUser(userID string) bool
+	RecordReferral(newUserID, referrerID string) error
+	GetReferralsCount(userID string) int
 }
 
 var ratePlans = []RatePlan{
@@ -97,7 +111,7 @@ type accessInfo struct {
 
 var (
 	yookassaClient *yookassa.YooKassaClient
-	sqliteClient   *sqlite.Store
+	userStore      DataStore
 	xrayCfg        *xraySettings
 	privacyURL     string
 	adminIDs       []int64
@@ -175,7 +189,7 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 			daysLeft = int64(remain.Hours()/24 + 0.999)
 		}
 	}
-	_ = sqliteClient.SetDays(telegramUser, daysLeft)
+	_ = userStore.SetDays(telegramUser, daysLeft)
 
 	link := ""
 	if cfg.serverAddress != "" && cfg.publicKey != "" && cfg.serverName != "" && cfg.shortID != "" && cfg.serverPort > 0 {
@@ -191,7 +205,10 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 }
 
 func fallbackEmail(userID string) string {
-	if email, err := sqliteClient.GetEmail(userID); err == nil && strings.TrimSpace(email) != "" {
+	if userStore == nil {
+		return fmt.Sprintf("%s@happycat", userID)
+	}
+	if email, err := userStore.GetEmail(userID); err == nil && strings.TrimSpace(email) != "" {
 		return email
 	}
 	return fmt.Sprintf("%s@happycat", userID)
@@ -357,6 +374,7 @@ func main() {
 	yookassaStoreID := os.Getenv("YOOKASSA_STORE_ID")
 	botToken := os.Getenv("TG_BOT_TOKEN")
 	privacyURL = os.Getenv("PRIVACY_URL")
+	dbDSN := strings.TrimSpace(os.Getenv("DB_DSN"))
 
 	// Parse admin IDs
 	adminIDsStr := os.Getenv("ADMIN_IDS")
@@ -393,7 +411,28 @@ func main() {
 	}
 
 	yookassaClient = yookassa.New(yookassaStoreID, yookassaApiKey)
-	sqliteClient = sqlite.New("database/data.json")
+	var storeCloser func()
+	if dbDSN != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		pgStore, err := pgstore.New(ctx, dbDSN)
+		if err != nil {
+			log.Fatalf("postgres store init failed: %v", err)
+		}
+		userStore = pgStore
+		storeCloser = pgStore.Close
+		log.Println("📦 Storage: PostgreSQL")
+	} else {
+		path := "database/data.json"
+		userStore = sqlite.New(path)
+		log.Printf("📦 Storage: JSON (%s)", path)
+	}
+	if storeCloser != nil {
+		defer storeCloser()
+	}
+	if userStore == nil {
+		log.Fatal("storage is not configured")
+	}
 
 	bot, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -464,8 +503,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			_ = updateSessionText(bot, chatID, session, stateCollectEmail, "Неверный e-mail, пример: name@example.com", "HTML", mainMenuInlineKeyboard())
 			return
 		}
-		_ = sqliteClient.SetEmail(userID, addr.Address)
-		_ = sqliteClient.AcceptPrivacy(userID, time.Now())
+		_ = userStore.SetEmail(userID, addr.Address)
+		_ = userStore.AcceptPrivacy(userID, time.Now())
 
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
@@ -486,7 +525,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			_ = updateSessionText(bot, chatID, session, stateEditEmail, "Неверный e-mail.", "HTML", mainMenuInlineKeyboard())
 			return
 		}
-		_ = sqliteClient.SetEmail(userID, addr.Address)
+		_ = userStore.SetEmail(userID, addr.Address)
 		handleStatus(bot, &tgbotapi.CallbackQuery{Message: msg}, session, xrCfg)
 		return
 	}
@@ -501,17 +540,17 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		referrerID = strings.TrimPrefix(args, "ref_")
 	}
 
-	isNew := sqliteClient.IsNewUser(userID)
+	isNew := userStore.IsNewUser(userID)
 	if isNew {
-		_ = sqliteClient.AddDays(userID, 7)
+		_ = userStore.AddDays(userID, 7)
 		_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 7, true)
 		if referrerID != "" && referrerID != userID {
-			if err := sqliteClient.RecordReferral(userID, referrerID); err == nil {
-				_ = sqliteClient.AddDays(referrerID, 15)
+			if err := userStore.RecordReferral(userID, referrerID); err == nil {
+				_ = userStore.AddDays(referrerID, 15)
 				_, _ = ensureXrayAccess(xrayCfg, referrerID, fallbackEmail(referrerID), 15, true)
 				if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
-					refDays, _ := sqliteClient.GetDays(referrerID)
-					refCount := sqliteClient.GetReferralsCount(referrerID)
+					refDays, _ := userStore.GetDays(referrerID)
+					refCount := userStore.GetReferralsCount(referrerID)
 					notify := fmt.Sprintf("🎉 По твоей реферальной ссылке пришёл новый пользователь!\n🎁 Начислено: +15 дней\n👥 Всего рефералов: %d\n⏱ Баланс: %d дн.", refCount, refDays)
 					nmsg := tgbotapi.NewMessage(refChatID, notify)
 					nmsg.ParseMode = "HTML"
@@ -529,7 +568,7 @@ func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
 	userID := strconv.FormatInt(msg.From.ID, 10)
 	link := fmt.Sprintf("https://t.me/%s?start=ref_%s", bot.Self.UserName, userID)
-	count := sqliteClient.GetReferralsCount(userID)
+	count := userStore.GetReferralsCount(userID)
 	text := fmt.Sprintf("Твоя ссылка:\n%s\n\nПривлёк: %d\nБонусов: %d дней", link, count, count*15)
 	reply := tgbotapi.NewMessage(chatID, text)
 	reply.ParseMode = "HTML"
@@ -657,7 +696,7 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 	session.PendingPlanID = plan.ID
 
 	userID := strconv.FormatInt(cq.From.ID, 10)
-	if email, _ := sqliteClient.GetEmail(userID); strings.TrimSpace(email) == "" {
+	if email, _ := userStore.GetEmail(userID); strings.TrimSpace(email) == "" {
 		text := "📧 Нужен e-mail для счёта. Отправь e-mail сообщением."
 		kb := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
@@ -687,7 +726,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 		"plan_amount": plan.Amount,
 	}
 
-	email, _ := sqliteClient.GetEmail(strconv.FormatInt(chatID, 10))
+	email, _ := userStore.GetEmail(strconv.FormatInt(chatID, 10))
 	newID, _, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, metadata, email)
 	if err != nil {
 		return err
@@ -746,7 +785,7 @@ func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	telegramUser := fmt.Sprint(userID)
 
 	bonus := int64(0)
-	if sqliteClient.IsNewUser(telegramUser) {
+	if userStore.IsNewUser(telegramUser) {
 		bonus = 7
 	}
 
@@ -774,11 +813,11 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	if err != nil {
 		text = "❌ Не удалось получить статус"
 	}
-	email, _ := sqliteClient.GetEmail(strconv.Itoa(int(userID)))
+	email, _ := userStore.GetEmail(strconv.Itoa(int(userID)))
 	if strings.TrimSpace(email) == "" {
 		email = "-"
 	}
-	refCount := sqliteClient.GetReferralsCount(strconv.FormatInt(userID, 10))
+	refCount := userStore.GetReferralsCount(strconv.FormatInt(userID, 10))
 	refBonus := refCount * 15
 	statusText := fmt.Sprintf("👤 <b>Профиль</b>\n🆔 TG ID: <code>%d</code>\n📧 Mail: %s\n%s\n\n🎁 Рефералы: %d (дней: %d)", userID, email, text, refCount, refBonus)
 
@@ -797,7 +836,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	telegramUser := fmt.Sprint(userID)
 	info, _ := ensureXrayAccess(cfg, telegramUser, fallbackEmail(telegramUser), 0, true)
-	days, _ := sqliteClient.GetDays(strconv.Itoa(userID))
+	days, _ := userStore.GetDays(strconv.Itoa(userID))
 	if info != nil && info.daysLeft > 0 {
 		days = info.daysLeft
 	}
@@ -995,7 +1034,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 	chatID := cq.Message.Chat.ID
 	userID := strconv.FormatInt(cq.From.ID, 10)
 	link := fmt.Sprintf("https://t.me/%s?start=ref_%s", bot.Self.UserName, userID)
-	count := sqliteClient.GetReferralsCount(userID)
+	count := userStore.GetReferralsCount(userID)
 	bonus := count * 15
 	text := fmt.Sprintf("🎁 <b>Рефералы</b>\n\nТвоя ссылка:\n<code>%s</code>\n\nПривлечено: %d\nБонус дней: %d\n\nПриглашай друзей и получай +15 дней!", link, count, bonus)
 	kb := tgbotapi.NewInlineKeyboardMarkup(
