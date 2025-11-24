@@ -87,6 +87,7 @@ type UserSession struct {
 	ContentType   string
 	PendingPlanID string
 	LastAccess    string
+	LastLink      string
 	CertFileName  string
 	CertFileBytes []byte
 }
@@ -238,11 +239,10 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 	}
 
 	session.LastAccess = text
-	instruct.EnableCertButton(chatID, true)
+	session.LastLink = info.link
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔁 Ссылка ещё раз", "resend_access"),
 			tgbotapi.NewInlineKeyboardButtonData("📚 Инструкции", "nav_instructions"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
@@ -353,7 +353,7 @@ func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
 	for _, p := range ratePlans {
-		label := fmt.Sprintf("💸 %.0f₽", p.Amount)
+		label := fmt.Sprintf("💸 %.0f₽ · %d дн.", p.Amount, p.Days)
 		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, "rate_"+p.ID))
 		if len(row) == 3 {
 			rows = append(rows, row)
@@ -605,52 +605,97 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	case data == "nav_instructions":
 		handleInstructionsMenu(bot, cq, session)
 	case data == "windows":
-		instruct.InstructionWindows(chatID, bot, 0)
+		if err := startInstructionFlow(bot, chatID, session, instruct.Windows, 0); err != nil {
+			log.Printf("windows instruction error: %v", err)
+			ackText = "Не удалось открыть инструкцию"
+		}
 	case data == "android":
-		instruct.InstructionAndroid(chatID, bot, 0)
+		if err := startInstructionFlow(bot, chatID, session, instruct.Android, 0); err != nil {
+			log.Printf("android instruction error: %v", err)
+			ackText = "Не удалось открыть инструкцию"
+		}
 	case data == "ios":
-		instruct.InstructionIos(chatID, bot, 0)
+		if err := startInstructionFlow(bot, chatID, session, instruct.IOS, 0); err != nil {
+			log.Printf("ios instruction error: %v", err)
+			ackText = "Не удалось открыть инструкцию"
+		}
 	case strings.HasPrefix(data, "win_prev_"):
 		// win_prev_<currentStep>
 		parts := strings.Split(data, "win_prev_")
 		if len(parts) == 2 {
 			if n, err := strconv.Atoi(parts[1]); err == nil {
-				instruct.InstructionWindows(chatID, bot, n-1)
+				if msgID, err := instruct.InstructionWindows(chatID, bot, n-1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("windows prev step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
 			}
 		}
 	case strings.HasPrefix(data, "win_next_"):
 		parts := strings.Split(data, "win_next_")
 		if len(parts) == 2 {
 			if n, err := strconv.Atoi(parts[1]); err == nil {
-				instruct.InstructionWindows(chatID, bot, n+1)
+				if msgID, err := instruct.InstructionWindows(chatID, bot, n+1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("windows next step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
 			}
 		}
 	case strings.HasPrefix(data, "android_prev_"):
 		parts := strings.Split(data, "android_prev_")
 		if len(parts) == 2 {
 			if n, err := strconv.Atoi(parts[1]); err == nil {
-				instruct.InstructionAndroid(chatID, bot, n-1)
+				if msgID, err := instruct.InstructionAndroid(chatID, bot, n-1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("android prev step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
 			}
 		}
 	case strings.HasPrefix(data, "android_next_"):
 		parts := strings.Split(data, "android_next_")
 		if len(parts) == 2 {
 			if n, err := strconv.Atoi(parts[1]); err == nil {
-				instruct.InstructionAndroid(chatID, bot, n+1)
+				if msgID, err := instruct.InstructionAndroid(chatID, bot, n+1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("android next step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
 			}
 		}
 	case strings.HasPrefix(data, "ios_prev_"):
 		parts := strings.Split(data, "ios_prev_")
 		if len(parts) == 2 {
 			if n, err := strconv.Atoi(parts[1]); err == nil {
-				instruct.InstructionIos(chatID, bot, n-1)
+				if msgID, err := instruct.InstructionIos(chatID, bot, n-1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("ios prev step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
 			}
 		}
 	case strings.HasPrefix(data, "ios_next_"):
 		parts := strings.Split(data, "ios_next_")
 		if len(parts) == 2 {
 			if n, err := strconv.Atoi(parts[1]); err == nil {
-				instruct.InstructionIos(chatID, bot, n+1)
+				if msgID, err := instruct.InstructionIos(chatID, bot, n+1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("ios next step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
 			}
 		}
 	case strings.HasPrefix(data, "rate_"):
@@ -661,15 +706,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		}
 	case data == "check_payment":
 		handleCheckPayment(bot, cq, session, xrCfg)
-	case data == "resend_access":
-		if strings.TrimSpace(session.LastAccess) != "" {
-			msg := tgbotapi.NewMessage(chatID, session.LastAccess)
-			msg.ParseMode = "HTML"
-			msg.DisableWebPagePreview = true
-			bot.Send(msg)
-		} else {
-			ackText = "Данных нет, запроси VPN заново"
-		}
+
 	}
 
 	ackCallback(bot, cq, ackText)
@@ -687,7 +724,12 @@ func ackCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, text string) 
 func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
 	session.PendingPlanID = ""
-	header := "💰 <b>Выбор тарифа</b>\nЧем больше период — тем выгоднее. Выбери вариант ниже:"
+	var builder strings.Builder
+	builder.WriteString("💰 <b>Выбор тарифа</b>\nЧем больше период — тем выгоднее.\n\nДоступные варианты:\n")
+	for _, plan := range ratePlans {
+		builder.WriteString(fmt.Sprintf("• %.0f₽ — %d дней\n", plan.Amount, plan.Days))
+	}
+	header := strings.TrimSuffix(builder.String(), "\n")
 	_ = updateSessionText(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboard())
 }
 
@@ -888,7 +930,40 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
 		),
 	)
-	_ = updateSessionText(bot, chatID, session, stateInstructions, text, "", kb)
+	_ = updateSessionText(bot, chatID, session, stateInstructions, text, "HTML", kb)
+}
+
+func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, platform instruct.InstructType, step int) error {
+	prevMessageID := session.MessageID
+	instruct.ResetState(chatID)
+
+	var (
+		msgID int
+		err   error
+	)
+
+	switch platform {
+	case instruct.Windows:
+		msgID, err = instruct.InstructionWindows(chatID, bot, step)
+	case instruct.Android:
+		msgID, err = instruct.InstructionAndroid(chatID, bot, step)
+	case instruct.IOS:
+		msgID, err = instruct.InstructionIos(chatID, bot, step)
+	default:
+		return fmt.Errorf("unsupported instruction platform: %v", platform)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if prevMessageID != 0 {
+		_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, prevMessageID))
+	}
+	session.MessageID = msgID
+	session.State = stateInstructions
+	session.ContentType = "photo"
+	return nil
 }
 
 func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings, plan RatePlan, session *UserSession) error {
@@ -988,7 +1063,6 @@ func getActionName(data string) string {
 		"windows":          "🖥 Инструкция Windows",
 		"android":          "🤖 Инструкция Android",
 		"ios":              "🍎 Инструкция iOS",
-		"resend_access":    "🔁 Повторная отправка ссылки",
 		"check_payment":    "💳 Проверка платежа",
 	}
 

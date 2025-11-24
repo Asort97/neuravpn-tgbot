@@ -3,6 +3,7 @@ package instruct
 import (
 	"fmt"
 	"log"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -19,19 +20,14 @@ type InstructionState struct {
 	CurrentStep int
 	MessageID   int
 	ChatID      int64
+	HasImage    bool
 }
 
 var (
-	windowsStates  = make(map[int64]*InstructionState)
-	androidStates  = make(map[int64]*InstructionState)
-	iosStates      = make(map[int64]*InstructionState)
-	showCertButton = make(map[int64]bool) // Показывать ли кнопку "Получить сертификат"
+	windowsStates = make(map[int64]*InstructionState)
+	androidStates = make(map[int64]*InstructionState)
+	iosStates     = make(map[int64]*InstructionState)
 )
-
-// EnableCertButton включает отображение кнопки "Получить сертификат" для данного чата
-func EnableCertButton(chatID int64, enable bool) {
-	showCertButton[chatID] = enable
-}
 
 func SetInstructKeyboard(messageID int, chatID int64, instructType InstructType) {
 
@@ -41,31 +37,35 @@ func SetInstructKeyboard(messageID int, chatID int64, instructType InstructType)
 			CurrentStep: -1,
 			MessageID:   messageID,
 			ChatID:      chatID,
+			HasImage:    false,
 		}
 	case Android:
 		androidStates[chatID] = &InstructionState{
 			CurrentStep: -1,
 			MessageID:   messageID,
 			ChatID:      chatID,
+			HasImage:    false,
 		}
 	case IOS:
 		iosStates[chatID] = &InstructionState{
 			CurrentStep: -1,
 			MessageID:   messageID,
 			ChatID:      chatID,
+			HasImage:    false,
 		}
 	}
 }
 
-func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) {
+func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	steps := []struct {
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Windows/1.png", `Скачайте <a href="https://openvpn.net/community/">OpenVPN</a> с официального сайта`},
-		{"InstructionPhotos/Windows/2.png", "После скачивания откройте трей в правом нижнем углу"},
-		{"InstructionPhotos/Windows/3.png", "ПКМ по значку OpenVPN → Импорт → «Импорт файла конфигурации». Выберите файл, который мы вам отправим"},
-		{"InstructionPhotos/Windows/4.png", "Снова ПКМ по значку и нажмите «Подключиться»"},
+		{"", `Скачайте <a href="https://github.com/Mahdi-zarei/nekoray/releases/download/4.3.5/nekoray-4.3.5-2025-05-16-windows64.zip">Nekoray</a>`},
+		{"", "После завершения загрузки выполните следующие действия:\n1) Найдите загруженный файл nekoray-windows64.zip.\n2) Щелкните правой кнопкой мыши на файле и выберите 'Извлечь все…' или воспользуйтесь архиватором, например, WinRAR или 7-Zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
+		{"", "Откройте папку с распакованными файлами. Найдите файл nekobox.exe. Дважды щелкните по нему, чтобы запустить программу."},
+		{"InstructionPhotos/Windows/0.png", "В программе нажмите на кнопку 'Сервера' и далее 'Добавить профиль из буфера обмена' (Предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
+		{"InstructionPhotos/Windows/1.png", "Активируйте режим TUN и запустите конфигурацию, нажав по конфигу правой кнопкой мыши и выбрав опцию Запуск. VPN работает!"},
 	}
 
 	// Границы
@@ -90,17 +90,10 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) {
 
 	if step == 0 {
 		linkRow := tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://swupdate.openvpn.org/community/releases/OpenVPN-2.6.15-I001-amd64.msi"),
+			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://github.com/Mahdi-zarei/nekoray/releases/download/4.3.5/nekoray-4.3.5-2025-05-16-windows64.zip"),
 		)
 
 		rows = append(rows, linkRow)
-	}
-
-	// Добавляем кнопку сертификата если включена
-	if showCertButton[chatID] {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_access"),
-		))
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -109,61 +102,87 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) {
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
-	// Если есть предыдущее сообщение — редактируем его медиа
-	if state, exists := windowsStates[chatID]; exists && state.MessageID != 0 {
+	needsImage := strings.TrimSpace(steps[step].photoPath) != ""
+	state, exists := windowsStates[chatID]
+	if !exists || state == nil {
+		state = &InstructionState{ChatID: chatID}
+	}
 
-		image := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
-		image.Caption = steps[step].caption
-		image.ParseMode = "HTML"
+	if state.MessageID != 0 {
+		switch {
+		case needsImage && state.HasImage:
+			image := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
+			image.Caption = steps[step].caption
+			image.ParseMode = "HTML"
 
-		edit := tgbotapi.EditMessageMediaConfig{
-			BaseEdit: tgbotapi.BaseEdit{
-				ChatID:      chatID,
-				MessageID:   state.MessageID,
-				ReplyMarkup: &kb,
-			},
-			Media: image,
+			edit := tgbotapi.EditMessageMediaConfig{
+				BaseEdit: tgbotapi.BaseEdit{
+					ChatID:      chatID,
+					MessageID:   state.MessageID,
+					ReplyMarkup: &kb,
+				},
+				Media: image,
+			}
+
+			if _, err := bot.Send(edit); err != nil {
+				log.Printf("windows edit media failed: %v", err)
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = true
+				windowsStates[chatID] = state
+				return state.MessageID, nil
+			}
+		case !needsImage && !state.HasImage:
+			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, steps[step].caption, kb)
+			edit.ParseMode = "HTML"
+			if _, err := bot.Send(edit); err != nil {
+				log.Printf("windows edit text failed: %v", err)
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = false
+				windowsStates[chatID] = state
+				return state.MessageID, nil
+			}
+		default:
+			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+			state.MessageID = 0
 		}
+	}
 
-		if _, err := bot.Send(edit); err != nil {
-			log.Printf("edit media failed: %v", err)
-			return
+	var (
+		msgID int
+		err   error
+	)
+	if needsImage {
+		msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		if err != nil {
+			return 0, err
 		}
-
-		// Обновляем состояние
-		state.CurrentStep = step
-		windowsStates[chatID] = state
-		return
+		state.HasImage = true
+	} else {
+		msgID, err = sendInstructionText(bot, chatID, steps[step].caption, kb)
+		if err != nil {
+			return 0, err
+		}
+		state.HasImage = false
 	}
 
-	// Иначе — первая отправка
-	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(steps[step].photoPath))
-	photo.Caption = steps[step].caption
-	photo.ParseMode = "HTML"
-	photo.ReplyMarkup = kb
-
-	msg, err := bot.Send(photo)
-	if err != nil {
-		log.Printf("send photo failed: %v", err)
-		return
-	}
-
-	windowsStates[chatID] = &InstructionState{
-		CurrentStep: step,
-		MessageID:   msg.MessageID,
-		ChatID:      chatID,
-	}
+	state.CurrentStep = step
+	state.MessageID = msgID
+	windowsStates[chatID] = state
+	return msgID, nil
 }
 
-func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) {
+func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	steps := []struct {
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Android/0.jpg", `Скачайте <a href="https://play.google.com/store/apps/details?id=net.openvpn.openvpn">OpenVPN</a> из Google Play`},
-		{"InstructionPhotos/Android/1.jpg", "Откройте файловый менеджер и найдите файл сертификата"},
-		{"InstructionPhotos/Android/2.jpg", "Нажмите на файл и выберите в меню OpenVPN"},
-		{"InstructionPhotos/Android/3.jpg", "Нажмите OK и подключитесь"},
+		{"InstructionPhotos/Android/0.jpg", `Скачайте <a href="https://play.google.com/store/apps/details?id=com.happproxy">Happ - Proxy Utility</a> из Google Play`},
+		{"InstructionPhotos/Android/1.jpg", "Заходим в приложение и вставляем ключ из буфера обмена (Предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
+		{"InstructionPhotos/Android/2.jpg", "Далее жмём на кнопку включения и VPN работает!:"},
 	}
 
 	// Границы
@@ -189,17 +208,10 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) {
 
 	if step == 0 {
 		linkRow := tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://play.google.com/store/apps/details?id=net.openvpn.openvpn"),
+			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://play.google.com/store/apps/details?id=com.happproxy"),
 		)
 
 		rows = append(rows, linkRow)
-	}
-
-	// Добавляем кнопку сертификата если включена
-	if showCertButton[chatID] {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_access"),
-		))
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -208,65 +220,87 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) {
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
-	// Если есть сообщение — редактируем
-	if state, ok := androidStates[chatID]; ok && state.MessageID != 0 {
-		media := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
-		media.Caption = steps[step].caption
-		media.ParseMode = "HTML"
-
-		edit := tgbotapi.EditMessageMediaConfig{
-			BaseEdit: tgbotapi.BaseEdit{
-				ChatID:      chatID,
-				MessageID:   state.MessageID,
-				ReplyMarkup: &kb,
-			},
-			Media: media,
-		}
-		if _, err := bot.Send(edit); err != nil {
-			log.Printf("android edit media failed: %v", err)
-			return
-		}
-		state.CurrentStep = step
-		androidStates[chatID] = state
-		return
+	needsImage := strings.TrimSpace(steps[step].photoPath) != ""
+	state, ok := androidStates[chatID]
+	if !ok || state == nil {
+		state = &InstructionState{ChatID: chatID}
 	}
 
-	// Первичная отправка
-	if step == 0 {
-		msg := tgbotapi.NewMessage(chatID, steps[step].caption)
-		msg.ParseMode = "HTML"
-		msg.ReplyMarkup = kb
-		sent, err := bot.Send(msg)
+	if state.MessageID != 0 {
+		switch {
+		case needsImage && state.HasImage:
+			media := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
+			media.Caption = steps[step].caption
+			media.ParseMode = "HTML"
+
+			edit := tgbotapi.EditMessageMediaConfig{
+				BaseEdit: tgbotapi.BaseEdit{
+					ChatID:      chatID,
+					MessageID:   state.MessageID,
+					ReplyMarkup: &kb,
+				},
+				Media: media,
+			}
+			if _, err := bot.Send(edit); err != nil {
+				log.Printf("android edit media failed: %v", err)
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = true
+				androidStates[chatID] = state
+				return state.MessageID, nil
+			}
+		case !needsImage && !state.HasImage:
+			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, steps[step].caption, kb)
+			edit.ParseMode = "HTML"
+			if _, err := bot.Send(edit); err != nil {
+				log.Printf("android edit text failed: %v", err)
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = false
+				androidStates[chatID] = state
+				return state.MessageID, nil
+			}
+		default:
+			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+			state.MessageID = 0
+		}
+	}
+
+	var (
+		msgID int
+		err   error
+	)
+	if needsImage {
+		msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
 		if err != nil {
-			log.Printf("android send text failed: %v", err)
-			return
+			return 0, err
 		}
-		androidStates[chatID] = &InstructionState{CurrentStep: step, MessageID: sent.MessageID, ChatID: chatID}
-		return
+		state.HasImage = true
+	} else {
+		msgID, err = sendInstructionText(bot, chatID, steps[step].caption, kb)
+		if err != nil {
+			return 0, err
+		}
+		state.HasImage = false
 	}
 
-	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(steps[step].photoPath))
-	photo.Caption = steps[step].caption
-	photo.ParseMode = "HTML"
-	photo.ReplyMarkup = kb
-	sent, err := bot.Send(photo)
-	if err != nil {
-		log.Printf("android send photo failed: %v", err)
-		return
-	}
-	androidStates[chatID] = &InstructionState{CurrentStep: step, MessageID: sent.MessageID, ChatID: chatID}
+	state.CurrentStep = step
+	state.MessageID = msgID
+	androidStates[chatID] = state
+	return msgID, nil
 }
 
-func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
+func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	steps := []struct {
 		photoPath string
 		caption   string
 	}{
 		{"InstructionPhotos/Ios/0.png", `Скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">V2RayTun</a> из App Store`},
-		{"InstructionPhotos/Ios/1.png", "Скопируйте ключ который вы получили (начинается на vless://...)"},
+		{"InstructionPhotos/Ios/1.png", "Скопируйте ключ, который получили (начинается на vless://...)"},
 		{"InstructionPhotos/Ios/2.png", "Откройте V2RayTun и нажмите на + в правом верхнем углу"},
-		{"InstructionPhotos/Ios/4.png", "Нажмите Импорт из буфера"},
-		{"InstructionPhotos/Ios/5.png", "Далее нажмите кнопку подключиться и все работает."},
+		{"InstructionPhotos/Ios/3.png", "Выберите 'Импорт из буфера', подтвердите и нажмите 'Подключиться'"},
 	}
 
 	// Границы
@@ -297,67 +331,107 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
 		rows = append(rows, linkRow)
 	}
 
-	// Добавляем кнопку сертификата если включена
-	if showCertButton[chatID] {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📥 Получить сертификат", "resend_access"),
-		))
-	}
-
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ Выйти", "nav_instructions"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
-	// Если есть сообщение — редактируем
-	if state, ok := iosStates[chatID]; ok && state.MessageID != 0 {
-		media := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
-		media.Caption = steps[step].caption
-		media.ParseMode = "HTML"
-
-		edit := tgbotapi.EditMessageMediaConfig{
-			BaseEdit: tgbotapi.BaseEdit{
-				ChatID:      chatID,
-				MessageID:   state.MessageID,
-				ReplyMarkup: &kb,
-			},
-			Media: media,
-		}
-		if _, err := bot.Send(edit); err != nil {
-			log.Printf("ios edit media failed: %v", err)
-			return
-		}
-
-		state.CurrentStep = step
-		iosStates[chatID] = state
-		return
+	needsImage := strings.TrimSpace(steps[step].photoPath) != ""
+	state, ok := iosStates[chatID]
+	if !ok || state == nil {
+		state = &InstructionState{ChatID: chatID}
 	}
 
-	// Первичная отправка
-	if step == 0 {
-		msg := tgbotapi.NewMessage(chatID, steps[step].caption)
-		msg.ParseMode = "HTML"
-		msg.ReplyMarkup = kb
-		sent, err := bot.Send(msg)
+	if state.MessageID != 0 {
+		switch {
+		case needsImage && state.HasImage:
+			media := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
+			media.Caption = steps[step].caption
+			media.ParseMode = "HTML"
+
+			edit := tgbotapi.EditMessageMediaConfig{
+				BaseEdit: tgbotapi.BaseEdit{
+					ChatID:      chatID,
+					MessageID:   state.MessageID,
+					ReplyMarkup: &kb,
+				},
+				Media: media,
+			}
+			if _, err := bot.Send(edit); err != nil {
+				log.Printf("ios edit media failed: %v", err)
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = true
+				iosStates[chatID] = state
+				return state.MessageID, nil
+			}
+		case !needsImage && !state.HasImage:
+			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, steps[step].caption, kb)
+			edit.ParseMode = "HTML"
+			if _, err := bot.Send(edit); err != nil {
+				log.Printf("ios edit text failed: %v", err)
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = false
+				iosStates[chatID] = state
+				return state.MessageID, nil
+			}
+		default:
+			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+			state.MessageID = 0
+		}
+	}
+
+	var (
+		msgID int
+		err   error
+	)
+	if needsImage {
+		msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
 		if err != nil {
-			log.Printf("ios send text failed: %v", err)
-			return
+			return 0, err
 		}
-		iosStates[chatID] = &InstructionState{CurrentStep: step, MessageID: sent.MessageID, ChatID: chatID}
-		return
+		state.HasImage = true
+	} else {
+		msgID, err = sendInstructionText(bot, chatID, steps[step].caption, kb)
+		if err != nil {
+			return 0, err
+		}
+		state.HasImage = false
 	}
 
-	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(steps[step].photoPath))
-	photo.Caption = steps[step].caption
+	state.CurrentStep = step
+	state.MessageID = msgID
+	iosStates[chatID] = state
+	return msgID, nil
+}
+
+func sendInstructionPhoto(bot *tgbotapi.BotAPI, chatID int64, photoPath, caption string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(photoPath))
+	photo.Caption = caption
 	photo.ParseMode = "HTML"
 	photo.ReplyMarkup = kb
 	sent, err := bot.Send(photo)
 	if err != nil {
-		log.Printf("ios send photo failed: %v", err)
-		return
+		log.Printf("send photo failed: %v", err)
+		return 0, err
 	}
-	iosStates[chatID] = &InstructionState{CurrentStep: step, MessageID: sent.MessageID, ChatID: chatID}
+	return sent.MessageID, nil
+}
+
+func sendInstructionText(bot *tgbotapi.BotAPI, chatID int64, text string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = kb
+	sent, err := bot.Send(msg)
+	if err != nil {
+		log.Printf("send text failed: %v", err)
+		return 0, err
+	}
+	return sent.MessageID, nil
 }
 
 func ResetState(chatID int64) {
