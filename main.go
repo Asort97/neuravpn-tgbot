@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/mail"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -1113,14 +1114,30 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 	link := fmt.Sprintf("https://t.me/%s?start=ref_%s", bot.Self.UserName, userID)
 	count := userStore.GetReferralsCount(userID)
 	bonus := count * 15
-	text := fmt.Sprintf("🎁 <b>Рефералы</b>\n\nТвоя ссылка:\n<code>%s</code>\n\nПривлечено: %d\nБонус дней: %d\n\nПриглашай друзей и получай +15 дней!", link, count, bonus)
+	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(link), url.QueryEscape("Подключайся к HappyCat VPN и получай бонусы!"))
+
+	text := fmt.Sprintf(
+		"🎁 <b>Реферальная программа</b>\n\n"+
+			"<b>🔗 Твоя ссылка</b>\n<code>%s</code>\n\n"+
+			"<b>📊 Статистика</b>\n"+
+			"├ 👥 Приглашено: %d\n"+
+			"└ 🎉 Бонус: %d дн.\n\n"+
+			"<b>⚙️ Как получить +15 дней</b>\n"+
+			"• Поделись ссылкой с другом\n"+
+			"• Он переходит и активирует VPN\n"+
+			"• Ты автоматически получаешь +15 дней",
+		link, count, bonus,
+	)
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonURL("📤 Поделиться", shareURL),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
-	ackCallback(bot, cq, "Рефералы")
+	// ackCallback(bot, cq, "Рефералы")
 }
 
 // Simple support screen
