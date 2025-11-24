@@ -262,11 +262,11 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Ios/0.jpg", `Скачайте <a href="https://apps.apple.com/au/app/openvpn-connect/id590379981">OpenVPN</a> из App Store`},
-		{"InstructionPhotos/Ios/1.jpg", "Откройте файловый менеджер на устройстве"},
-		{"InstructionPhotos/Ios/2.jpg", "Найдите файл сертификата"},
-		{"InstructionPhotos/Ios/4.png", "Откройте файл через OpenVPN"},
-		{"InstructionPhotos/Ios/5.jpg", "Нажмите «ADD» и подключайтесь"},
+		{"InstructionPhotos/Ios/0.png", `Скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">V2RayTun</a> из App Store`},
+		{"InstructionPhotos/Ios/1.png", "Скопируйте ключ который вы получили (начинается на vless://...)"},
+		{"InstructionPhotos/Ios/2.png", "Откройте V2RayTun и нажмите на + в правом верхнем углу"},
+		{"InstructionPhotos/Ios/4.png", "Нажмите Импорт из буфера"},
+		{"InstructionPhotos/Ios/5.png", "Далее нажмите кнопку подключиться и все работает."},
 	}
 
 	// Границы
@@ -292,7 +292,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) {
 
 	if step == 0 {
 		linkRow := tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://apps.apple.com/us/app/openvpn-connect/id590379981"),
+			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://apps.apple.com/kz/app/v2raytun/id6476628951"),
 		)
 		rows = append(rows, linkRow)
 	}
