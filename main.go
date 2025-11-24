@@ -819,7 +819,10 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	}
 	refCount := userStore.GetReferralsCount(strconv.FormatInt(userID, 10))
 	refBonus := refCount * 15
-	statusText := fmt.Sprintf("👤 <b>Профиль</b>\n🆔 TG ID: <code>%d</code>\n📧 Mail: %s\n%s\n\n🎁 Рефералы: %d (дней: %d)", userID, email, text, refCount, refBonus)
+	statusText := fmt.Sprintf(
+		"👤 <b>Профиль</b>\n<b>├ 🪪 ID:</b> <code>%d</code>\n<b>├ 📧 Mail:</b> %s\n<b>└ 🎁 Рефералы</b>: %d (дней: %d)\n\n%s",
+		userID, email, refCount, refBonus, text,
+	)
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -840,10 +843,10 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	if info != nil && info.daysLeft > 0 {
 		days = info.daysLeft
 	}
-	statusEmoji := "❌"
+	statusEmoji := "🔴"
 	statusText := "Не активна"
 	if days > 0 {
-		statusEmoji = "✅"
+		statusEmoji = "🟢"
 		statusText = "Активна"
 	}
 	exp := "-"
@@ -852,9 +855,9 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	}
 	linkLine := ""
 	if info != nil && strings.TrimSpace(info.link) != "" {
-		linkLine = fmt.Sprintf("\n🔗 <b>Ссылка:</b> <code>%s</code>", info.link)
+		linkLine = fmt.Sprintf("\n\n<b>🔗 Ключ-подключение</b>\n<code>%s</code>", info.link)
 	}
-	return fmt.Sprintf("🔐 <b>Подписка:</b> %s %s\n⏱ <b>Остаток:</b> %d дн.\n📅 <b>Действует до:</b> %s%s", statusEmoji, statusText, days, exp, linkLine), nil
+	return fmt.Sprintf("💳 <b>Подписка</b>\n<b>├ %s Статус:</b> %s\n<b>├ ⏱ Остаток:</b> %d дн.\n<b>└ 📅 Действует до:</b> %s%s", statusEmoji, statusText, days, exp, linkLine), nil
 }
 
 func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
