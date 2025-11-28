@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
 	"net/mail"
 	"net/url"
@@ -1119,19 +1120,24 @@ func resolvePlanFromMetadata(meta map[string]interface{}, session *UserSession) 
 }
 
 func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id int64) {
-	if id == 623290294 {
+	if id == 623290294 || id == 6365653009 {
 		return
 	}
 	var userLink string
 	if username != "" {
-		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a>`, username, username)
+		userLink = fmt.Sprintf("<a href=\"https://t.me/%s\">@%s</a>", html.EscapeString(username), html.EscapeString(username))
 	} else {
-		userLink = fmt.Sprintf(`<a href="tg://user?id=%d">user</a>`, id)
+		userLink = fmt.Sprintf("<a href=\"tg://user?id=%d\">Профиль пользователя</a>", id)
 	}
-	newText := fmt.Sprintf("%s:\n%s", userLink, text)
+	newText := fmt.Sprintf("%s:\n%s", userLink, html.EscapeString(text))
 	msg := tgbotapi.NewMessage(623290294, newText)
 	msg.ParseMode = "HTML"
+
+	msg2 := tgbotapi.NewMessage(6365653009, newText)
+	msg2.ParseMode = "HTML"
 	bot.Send(msg)
+	bot.Send(msg2)
+
 }
 
 func getActionName(data string) string {
