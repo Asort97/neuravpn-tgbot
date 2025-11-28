@@ -205,3 +205,26 @@ func (s *Store) GetReferralsCount(userID string) int {
 	}
 	return count
 }
+
+// GetAllUserIDs возвращает список всех user id из таблицы users
+func (s *Store) GetAllUserIDs() ([]string, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `SELECT id FROM users`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
