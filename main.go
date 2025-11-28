@@ -1122,9 +1122,11 @@ func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id i
 	if id == 623290294 {
 		return
 	}
-	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">user</a>`, id)
+	var userLink string
 	if username != "" {
 		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a>`, username, username)
+	} else {
+		userLink = fmt.Sprintf(`<a href="tg://user?id=%d">user</a>`, id)
 	}
 	newText := fmt.Sprintf("%s:\n%s", userLink, text)
 	msg := tgbotapi.NewMessage(623290294, newText)
