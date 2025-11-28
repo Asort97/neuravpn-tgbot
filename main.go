@@ -476,6 +476,73 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 	chatID := msg.Chat.ID
 	session := getSession(chatID)
 
+	// Команда рассылки для админа
+	if msg.IsCommand() && msg.Command() == "notify" {
+		isAdmin := false
+		for _, id := range adminIDs {
+			if id == msg.From.ID {
+				isAdmin = true
+				break
+			}
+		}
+		if !isAdmin {
+			_ = updateSessionText(bot, chatID, session, stateMenu, "⛔️ Только для админа", "HTML", mainMenuInlineKeyboard())
+			return
+		}
+		text := strings.TrimSpace(msg.CommandArguments())
+		if text == "" {
+			_ = updateSessionText(bot, chatID, session, stateMenu, "Укажите текст для рассылки: /notify <текст>", "HTML", mainMenuInlineKeyboard())
+			return
+		}
+
+		go func() {
+			var userIDs []string
+			var err error
+			// Для Postgres
+			if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
+				userIDs, err = pg.GetAllUserIDs()
+			} else if sq, ok := userStore.(interface{ GetAllUsers() map[string]interface{} }); ok {
+				for id := range sq.GetAllUsers() {
+					userIDs = append(userIDs, id)
+				}
+			} else if sq, ok := userStore.(interface {
+				GetAllUsers() map[string]sqlite.UserData
+			}); ok {
+				for id := range sq.GetAllUsers() {
+					userIDs = append(userIDs, id)
+				}
+			} else {
+				err = fmt.Errorf("userStore не поддерживает массовое получение id")
+			}
+			if err != nil {
+				msg := tgbotapi.NewMessage(chatID, "Ошибка получения пользователей: "+err.Error())
+				msg.ParseMode = "HTML"
+				_, _ = bot.Send(msg)
+				return
+			}
+			count := 0
+			for _, uid := range userIDs {
+				id, err := strconv.ParseInt(uid, 10, 64)
+				if err != nil {
+					continue
+				}
+				m := tgbotapi.NewMessage(id, text)
+				m.ParseMode = "HTML"
+				_, err = bot.Send(m)
+				if err == nil {
+					count++
+				}
+				// Не спамим слишком быстро
+				time.Sleep(30 * time.Millisecond)
+			}
+			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Рассылка завершена. Доставлено: %d", count))
+			msg.ParseMode = "HTML"
+			_, _ = bot.Send(msg)
+		}()
+		_ = updateSessionText(bot, chatID, session, stateMenu, "Рассылка запущена", "HTML", mainMenuInlineKeyboard())
+		return
+	}
+
 	if msg.SuccessfulPayment != nil {
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
