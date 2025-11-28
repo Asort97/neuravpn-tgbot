@@ -29,6 +29,8 @@ const startText = `Привет! <b>Добро пожаловать в HappyCat 
 • Открыть подробные инструкции
 • Связаться с поддержкой 24/7
 
+<a href="https://t.me/happycatvpn">Наш новостной канал</a> 📰
+
 Выбирай нужный раздел ниже 👇`
 
 // throttling map (keyed by user id and action key)
@@ -740,7 +742,8 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 
 	userID := strconv.FormatInt(cq.From.ID, 10)
 	if email, _ := userStore.GetEmail(userID); strings.TrimSpace(email) == "" {
-		text := "📧 Нужен e-mail для счёта. Отправь e-mail сообщением."
+		text := "📧 Нужен e-mail для счёта. Отправь e-mail сообщением.\n\n" +
+			"<b>Продолжая и вводя e-mail, вы соглашаетесь с <a href=\"https://telegra.ph/POLZOVATELSKOE-SOGLASHENIE-PUBLICHNAYA-OFERTA-SERVISA-HAPPY-CAT-VPN-10-27\">пользовательским соглашением</a>.</b>"
 		kb := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
