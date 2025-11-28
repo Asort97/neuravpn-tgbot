@@ -492,9 +492,20 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		switch msg.Command() {
 		case "start":
 			handleStart(bot, msg, session, xrCfg)
-		case "referral":
-			handleReferralStats(bot, msg)
+		case "topup", "пополнить", "пополнить_баланс":
+			handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
+		case "getvpn", "vpn", "подключить", "получитьvpn":
+			handleGetVPN(bot, &tgbotapi.CallbackQuery{Message: msg, From: msg.From}, session, xrCfg)
+		case "status", "profile", "профиль":
+			handleStatus(bot, &tgbotapi.CallbackQuery{Message: msg, From: msg.From}, session, xrCfg)
+		case "instructions", "инструкции":
+			handleInstructionsMenu(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
+		case "referral", "рефералы":
+			handleReferral(bot, &tgbotapi.CallbackQuery{Message: msg, From: msg.From}, session)
+		case "support", "поддержка":
+			handleSupport(bot, &tgbotapi.CallbackQuery{Message: msg, From: msg.From}, session)
 		default:
+			_ = updateSessionText(bot, chatID, session, stateMenu, composeMenuText(), "HTML", mainMenuInlineKeyboard())
 		}
 		return
 	}
