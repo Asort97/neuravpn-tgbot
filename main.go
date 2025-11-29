@@ -1247,7 +1247,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 // Simple support screen
 func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "📞 <b>Поддержка</b>\n\nЕсть вопросы? Пиши: @happycat_support\nРаботаем 24/7. Обычно отвечаем 5–15 минут."
+	text := "📞 <b>Поддержка</b>\n\nЕсть вопросы? Пиши: @asortiment97 либо сюда https://t.me/HappyVPNchat\nОтвечаем в течении дня."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_menu"),
