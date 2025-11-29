@@ -403,6 +403,19 @@ func main() {
 	if err := xClient.LoginToServer(); err != nil {
 		log.Fatalf("login to xray failed: %v", err)
 	}
+
+	// Профилактический re-login к XRAY раз в час
+	go func() {
+		for {
+			time.Sleep(1 * time.Hour)
+			if err := xClient.LoginToServer(); err != nil {
+				log.Printf("[XRAY] re-login failed: %v", err)
+			} else {
+				log.Printf("[XRAY] re-login success")
+			}
+		}
+	}()
+
 	xrayCfg = &xraySettings{
 		client:        xClient,
 		inboundID:     inboundID,
