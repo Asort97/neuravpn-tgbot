@@ -404,18 +404,6 @@ func main() {
 		log.Fatalf("login to xray failed: %v", err)
 	}
 
-	// Профилактический re-login к XRAY раз в час
-	go func() {
-		for {
-			time.Sleep(1 * time.Hour)
-			if err := xClient.LoginToServer(); err != nil {
-				log.Printf("[XRAY] re-login failed: %v", err)
-			} else {
-				log.Printf("[XRAY] re-login success")
-			}
-		}
-	}()
-
 	xrayCfg = &xraySettings{
 		client:        xClient,
 		inboundID:     inboundID,
@@ -455,6 +443,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("bot init error: %v", err)
 	}
+
+	// Профилактический re-login к XRAY раз в час
+	go func() {
+		for {
+			time.Sleep(1 * time.Hour)
+			if err := xClient.LoginToServer(); err != nil {
+				sendMessageToAdmin("Релогин завершился ошибкой...", "bot", bot, 1234)
+				log.Printf("[XRAY] re-login failed: %v", err)
+			} else {
+				sendMessageToAdmin("Релогин прошел успешно!", "bot", bot, 1234)
+				log.Printf("[XRAY] re-login success")
+			}
+		}
+	}()
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
