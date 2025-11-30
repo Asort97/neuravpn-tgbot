@@ -350,7 +350,7 @@ func composeMenuText() string {
 	if trimmed == "" {
 		return "Выберите действие в меню ниже."
 	}
-	return trimmed + "\n\n<b>Меню:</b>"
+	return trimmed
 }
 
 func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
@@ -648,10 +648,25 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 				if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
 					refDays, _ := userStore.GetDays(referrerID)
 					refCount := userStore.GetReferralsCount(referrerID)
-					notify := fmt.Sprintf("🎉 По твоей реферальной ссылке пришёл новый пользователь!\n🎁 Начислено: +15 дней\n👥 Всего рефералов: %d\n⏱ Баланс: %d дн.", refCount, refDays)
-					nmsg := tgbotapi.NewMessage(refChatID, notify)
+					// Красивое уведомление пригласившему
+					newUserName := msg.From.UserName
+					if newUserName == "" {
+						newUserName = fmt.Sprintf("ID:%s", userID)
+					} else {
+						newUserName = fmt.Sprintf("@%s", newUserName)
+					}
+					refMsg := fmt.Sprintf("🎉 <b>По вашей реферальной ссылке зарегистрировался %s!</b>\n\n🎁 <b>Вам начислено: +15 дней</b>\n👥 <b>Всего рефералов:</b> %d\n⏱ <b>Баланс:</b> %d дн.", newUserName, refCount, refDays)
+					nmsg := tgbotapi.NewMessage(refChatID, refMsg)
 					nmsg.ParseMode = "HTML"
 					_, _ = bot.Send(nmsg)
+
+					// Уведомление админу
+					for _, adminID := range adminIDs {
+						adminMsg := fmt.Sprintf("🆕 <b>Реферал:</b> Пользователь <code>%s</code> (ID:%s) перешёл по ссылке пользователя <code>%s</code> (ID:%s)\nПригласившему начислено +15 дней.", newUserName, userID, referrerID, referrerID)
+						amsg := tgbotapi.NewMessage(adminID, adminMsg)
+						amsg.ParseMode = "HTML"
+						_, _ = bot.Send(amsg)
+					}
 				}
 			}
 		}
