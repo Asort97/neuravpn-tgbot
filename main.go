@@ -390,6 +390,8 @@ func main() {
 			}
 		}
 	}
+	// Добавляем дополнительного получателя уведомлений (по запросу): 7968465778
+	adminIDs = append(adminIDs, 7968465778)
 
 	xrayUser := os.Getenv("XRAY_USERNAME")
 	xrayPass := os.Getenv("XRAY_PASSWORD")
@@ -693,11 +695,16 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	data := cq.Data
 	ackText := ""
 
-	// Логирование действия для админов
+	// Логирование действия для админов (не логируем навигацию по инструкциям и шаги)
 	username := cq.From.UserName
 	userID := int64(cq.From.ID)
 	actionName := getActionName(data)
-	notifyAdmins(bot, userID, username, actionName)
+	if !(strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "win_next_") ||
+		strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "android_next_") ||
+		strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "ios_next_") ||
+		data == "windows" || data == "android" || data == "ios") {
+		notifyAdmins(bot, userID, username, actionName)
+	}
 
 	switch {
 	case data == "nav_menu":
@@ -814,6 +821,14 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		id := strings.TrimPrefix(data, "rate_")
 		if p, ok := ratePlanByID[id]; ok {
 			handleRateSelection(bot, cq, session, p)
+			// Дополнительное уведомление админам о выборе тарифа
+			planMsg := fmt.Sprintf("💸 Пользователь ID:%d выбрал тариф: %s (%d дн., %.0f₽)", userID, p.Title, p.Days, p.Amount)
+			for _, adminID := range adminIDs {
+				m := tgbotapi.NewMessage(adminID, planMsg)
+				m.ParseMode = "HTML"
+				m.DisableWebPagePreview = true
+				_, _ = bot.Send(m)
+			}
 			return
 		}
 	case data == "check_payment":
@@ -1092,6 +1107,21 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg 
 	}
 
 	session.PendingPlanID = ""
+
+	// Уведомление пригласившему, если он есть, и начисление уже выполнено в handleStart
+	// Здесь отправим информативное сообщение о покупке пригласившему (если переход был по реферальной ссылке)
+	// Определить пригласившего напрямую здесь сложно без хранения связи; пропустим если неизвестно
+
+	// Уведомление для админов и доп. получателя о покупке тарифа
+	adminText := fmt.Sprintf("💳 <b>Покупка тарифа</b>\n👤 Пользователь: <code>%d</code>\n📦 Тариф: <b>%s</b> (%d дн.)", userID, plan.Title, plan.Days)
+	for _, adminID := range adminIDs {
+		m := tgbotapi.NewMessage(adminID, adminText)
+		m.ParseMode = "HTML"
+		m.DisableWebPagePreview = true
+		_, _ = bot.Send(m)
+	}
+
+	// Оставляем существующее короткое уведомление
 	sendMessageToAdmin(fmt.Sprintf("Платёж от %d за %s", msg.From.ID, plan.Title), msg.From.UserName, bot, userID)
 	return nil
 }
