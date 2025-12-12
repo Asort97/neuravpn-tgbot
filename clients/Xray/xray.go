@@ -563,7 +563,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		// Prepare client data with same UUID and expiry from primary
 		clientData := &Client{
 			ID:         primaryClient.ID, // keep same UUID across inbounds
-			Email:      email,
+			Email:      tagEmailForInbound(email, inboundID),
 			Enable:     true,
 			Flow:       "xtls-rprx-vision",
 			LimitIP:    0,
@@ -592,4 +592,19 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 	}
 
 	return primaryClient, exp, nil
+}
+
+// tagEmailForInbound returns a unique email per inbound to avoid duplicate email errors.
+// If email contains '@', inserts "+inb<id>" before domain. Otherwise appends suffix.
+func tagEmailForInbound(email string, inboundID int) string {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Sprintf("user_inb%d@happycat", inboundID)
+	}
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) == 2 {
+		local, domain := parts[0], parts[1]
+		return fmt.Sprintf("%s+inb%d@%s", local, inboundID, domain)
+	}
+	return fmt.Sprintf("%s_inb%d@happycat", strings.ReplaceAll(email, "@", "_"), inboundID)
 }
