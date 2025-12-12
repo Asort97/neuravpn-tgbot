@@ -133,7 +133,16 @@ func New(username, password, host, port, webBasePath string) *XRayClient {
 	if webBasePath != "" && !strings.HasPrefix(webBasePath, "/") {
 		webBasePath = "/" + webBasePath
 	}
-	serverURL := fmt.Sprintf("http://%s:%s%s", host, port, webBasePath)
+
+	// Auto-detect protocol: use https for common secure ports or if host starts with https://
+	protocol := "http"
+	if port == "443" || port == "8080" || port == "8443" || strings.HasPrefix(host, "https://") {
+		protocol = "https"
+		host = strings.TrimPrefix(host, "https://")
+	}
+	host = strings.TrimPrefix(host, "http://")
+
+	serverURL := fmt.Sprintf("%s://%s:%s%s", protocol, host, port, webBasePath)
 
 	jar, _ := cookiejar.New(nil)
 
