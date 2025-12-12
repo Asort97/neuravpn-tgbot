@@ -939,19 +939,42 @@ func handleMigrateExpiryFromOld(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		if daysLeft <= 0 {
 			skipped++
 		} else {
-			// Update days in new DB
+			// Update days in new DB (replace, not add)
 			if err := userStore.SetDays(tgID, daysLeft); err != nil {
 				log.Printf("failed to update days for user %s: %v", tgID, err)
 				failed++
-			} else {
-				// Also update expiryTime on new Xray server for all inbounds
-				_, _, err := xrayCfg.client.EnsureClientAcrossInbounds(xrayCfg.inboundIDs, tgID, fallbackEmail(tgID), daysLeft)
-				if err != nil {
-					log.Printf("failed to update expiry on new server for user %s: %v", tgID, err)
-					failed++
-				} else {
-					updated++
+				continue
+			}
+
+			// Also update expiryTime on new Xray server for all inbounds (SET exact expiry, not ADD days)
+			newInboundIDs := xrayCfg.inboundIDs
+			if len(newInboundIDs) == 0 {
+				// fallback to first inbound if not configured
+				if xrayCfg.inboundID > 0 {
+					newInboundIDs = []int{xrayCfg.inboundID}
 				}
+			}
+
+			expireAt := time.Now().Add(time.Duration(daysLeft) * 24 * time.Hour)
+			success := true
+			for _, inboundID := range newInboundIDs {
+				// Get existing client
+				c, err := xrayCfg.client.GetClientByTelegram(inboundID, tgID)
+				if err != nil || c == nil {
+					continue // client may not exist on this inbound yet
+				}
+				// Set exact expiryTime (don't add, replace)
+				c.ExpiryTime = expireAt.UnixMilli()
+				if err := xrayCfg.client.UpdateClient(inboundID, *c); err != nil {
+					log.Printf("failed to update expiry on inbound %d for user %s: %v", inboundID, tgID, err)
+					success = false
+				}
+			}
+
+			if success {
+				updated++
+			} else {
+				failed++
 			}
 		}
 
