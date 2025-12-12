@@ -502,7 +502,7 @@ func (x *XRayClient) EnsureExpiry(inboundID int, client *Client, daysToAdd int64
 // EnsureClientAcrossInbounds ensures a client with given Telegram ID exists across all provided inbound IDs.
 // It will set SubID in each inbound to "sub"+tgID, enable client, and extend expiry by daysToAdd.
 // Returns the primary client (from first inbound) and its expiry.
-func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, email string, daysToAdd int64) (*Client, time.Time, error) {
+func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, email string, daysToAdd int64, subID string) (*Client, time.Time, error) {
 	if len(inboundIDs) == 0 {
 		return nil, time.Time{}, fmt.Errorf("no inbound IDs provided")
 	}
@@ -524,7 +524,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 			LimitIP: 0,
 			TotalGB: 0,
 			TgID:    tgID,
-			SubID:   "sub" + tgID,
+			SubID:   strings.TrimSpace(subID),
 			Comment: "tg:" + tgID,
 		}
 		if _, err := x.AddClientWithData(primaryID, *primaryClient); err != nil {
@@ -538,7 +538,11 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		primaryClient.Enable = true
 		primaryClient.Flow = "xtls-rprx-vision"
 		primaryClient.TgID = tgID
-		primaryClient.SubID = "sub" + tgID
+		if strings.TrimSpace(subID) != "" {
+			primaryClient.SubID = strings.TrimSpace(subID)
+		} else {
+			primaryClient.SubID = "sub" + tgID
+		}
 		if strings.TrimSpace(primaryClient.Comment) == "" {
 			primaryClient.Comment = "tg:" + tgID
 		}
@@ -570,7 +574,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 			TotalGB:    0,
 			ExpiryTime: exp.UnixMilli(), // use expiry from primary
 			TgID:       tgID,
-			SubID:      "sub" + tgID,
+			SubID:      primaryClient.SubID,
 			Comment:    "tg:" + tgID,
 		}
 

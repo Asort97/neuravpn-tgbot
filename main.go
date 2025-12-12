@@ -62,6 +62,8 @@ type DataStore interface {
 	SetDays(userID string, days int64) error
 	GetEmail(userID string) (string, error)
 	SetEmail(userID, email string) error
+	EnsureSubscriptionID(userID string) (string, error)
+	GetSubscriptionID(userID string) (string, error)
 	AcceptPrivacy(userID string, at time.Time) error
 	IsNewUser(userID string) bool
 	RecordReferral(newUserID, referrerID string) error
@@ -204,7 +206,9 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 		return info, nil
 	}
 
-	primaryClient, expireAt, err := cfg.client.EnsureClientAcrossInbounds(inboundIDs, telegramUser, email, addDays)
+	// Secure subscription id per user
+	subID, _ := userStore.EnsureSubscriptionID(telegramUser)
+	primaryClient, expireAt, err := cfg.client.EnsureClientAcrossInbounds(inboundIDs, telegramUser, email, addDays, subID)
 	if err != nil {
 		return nil, err
 	}
@@ -663,7 +667,9 @@ func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 	for _, uid := range userIDs {
 		email := fallbackEmail(uid)
 		// Ensure client across all inbounds without changing expiry (daysToAdd=0)
-		c, _, err := xrCfg.client.EnsureClientAcrossInbounds(inboundIDs, uid, email, 0)
+		// ensure secure subID per user
+		subID, _ := userStore.EnsureSubscriptionID(uid)
+		c, _, err := xrCfg.client.EnsureClientAcrossInbounds(inboundIDs, uid, email, 0, subID)
 		if err != nil {
 			failed++
 			continue
@@ -790,7 +796,8 @@ func handleMigrateUsers(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 		email := fallbackEmail(uid)
 
 		// Create client on new server with their current days balance
-		_, _, err = xrCfg.client.EnsureClientAcrossInbounds(inboundIDs, uid, email, days)
+		subID, _ := userStore.EnsureSubscriptionID(uid)
+		_, _, err = xrCfg.client.EnsureClientAcrossInbounds(inboundIDs, uid, email, days, subID)
 		if err != nil {
 			log.Printf("migration failed for user %s: %v", uid, err)
 			failed++
@@ -1543,9 +1550,14 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	if info != nil && !info.expireAt.IsZero() {
 		exp = info.expireAt.Format("02.01.2006 15:04")
 	}
+	// Always show subscription URL instead of raw VLESS
+	subURL := ""
+	if info != nil && info.client != nil {
+		subURL = generateSubscriptionURL(cfg, info.client)
+	}
 	linkLine := ""
-	if info != nil && strings.TrimSpace(info.link) != "" {
-		linkLine = fmt.Sprintf("\n\n<b>🔗 Ключ-подключение</b>\n<code>%s</code>", info.link)
+	if strings.TrimSpace(subURL) != "" {
+		linkLine = fmt.Sprintf("\n\n<b>🔗 Подписка</b>\n<code>%s</code>", subURL)
 	}
 	return fmt.Sprintf("💳 <b>Подписка</b>\n<b>├ %s Статус:</b> %s\n<b>├ ⏱ Остаток:</b> %d дн.\n<b>└ 📅 Действует до:</b> %s%s", statusEmoji, statusText, days, exp, linkLine), nil
 }

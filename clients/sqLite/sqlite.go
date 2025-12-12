@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	colorfulprint "github.com/Asort97/vpnBot/clients/colorfulPrint"
+	"github.com/google/uuid"
 )
 
 type Store struct {
@@ -22,6 +24,7 @@ type UserData struct {
 	ReferralUsed   bool   `json:"referral_used"`   // использовал ли свой реферальный бонус
 	ReferralsCount int    `json:"referrals_count"` // сколько человек пригласил
 	Email          string `json:"email"`
+	SubscriptionID string `json:"subscription_id"`
 	ConsentAt      string `json:"consent_at"` // ISO8601 timestamp, когда принял политику
 }
 
@@ -249,6 +252,42 @@ func (s *Store) GetEmail(userID string) (string, error) {
 		return "", fmt.Errorf("user %s not found", userID)
 	}
 	return ud.Email, nil
+}
+
+// EnsureSubscriptionID returns existing subscription_id or creates UUIDv4 and stores it.
+func (s *Store) EnsureSubscriptionID(userID string) (string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud := db[userID]
+	if strings.TrimSpace(ud.SubscriptionID) != "" {
+		return ud.SubscriptionID, nil
+	}
+	ud.SubscriptionID = uuid.New().String()
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	db[userID] = ud
+	if err := s.saveUsersLocked(); err != nil {
+		return "", err
+	}
+	return ud.SubscriptionID, nil
+}
+
+// GetSubscriptionID returns subscription_id or empty string.
+func (s *Store) GetSubscriptionID(userID string) (string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return "", fmt.Errorf("user %s not found", userID)
+	}
+	return ud.SubscriptionID, nil
 }
 
 // AcceptPrivacy помечает, что пользователь принял политику конфиденциальности

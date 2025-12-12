@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS users (
     referral_used BOOLEAN NOT NULL DEFAULT FALSE,
     referrals_count INT NOT NULL DEFAULT 0,
     email TEXT,
+	subscription_id TEXT,
     consent_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -131,6 +133,47 @@ func (s *Store) GetEmail(userID string) (string, error) {
 		return "", err
 	}
 	return email, nil
+}
+
+// EnsureSubscriptionID returns existing subscription_id or creates a new UUIDv4 and stores it.
+func (s *Store) EnsureSubscriptionID(userID string) (string, error) {
+	ctx := context.Background()
+	// Try get existing
+	var subID string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(subscription_id, '') FROM users WHERE id = $1`, userID).Scan(&subID)
+	if err != nil && err != pgx.ErrNoRows {
+		return "", err
+	}
+	if strings.TrimSpace(subID) != "" {
+		return subID, nil
+	}
+	// Create new
+	newID := uuid.New().String()
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO users (id, subscription_id, last_deduct, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (id) DO UPDATE SET
+			subscription_id = EXCLUDED.subscription_id,
+			updated_at = NOW()
+	`, userID, newID)
+	if err != nil {
+		return "", err
+	}
+	return newID, nil
+}
+
+// GetSubscriptionID returns subscription_id or empty string if not set.
+func (s *Store) GetSubscriptionID(userID string) (string, error) {
+	ctx := context.Background()
+	var subID string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(subscription_id, '') FROM users WHERE id = $1`, userID).Scan(&subID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", fmt.Errorf("user %s not found", userID)
+		}
+		return "", err
+	}
+	return subID, nil
 }
 
 func (s *Store) AcceptPrivacy(userID string, at time.Time) error {
