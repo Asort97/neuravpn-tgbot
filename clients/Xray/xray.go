@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"strconv"
@@ -505,6 +506,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 	if len(inboundIDs) == 0 {
 		return nil, time.Time{}, fmt.Errorf("no inbound IDs provided")
 	}
+	log.Printf("[XRAY] ensure across inbounds=%v tg=%s daysToAdd=%d", inboundIDs, tgID, daysToAdd)
 
 	// First ensure on primary inbound, capturing UUID and expiry
 	primaryID := inboundIDs[0]
@@ -552,6 +554,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 
 	// Mirror client to other inbounds using the same UUID
 	for _, inboundID := range inboundIDs[1:] {
+		log.Printf("[XRAY] sync client tg=%s to inbound=%d", tgID, inboundID)
 		c, err := x.GetClientByTelegram(inboundID, tgID)
 		if err != nil {
 			return nil, time.Time{}, err
@@ -574,6 +577,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		if c == nil {
 			// Client doesn't exist on this inbound, create it
 			if _, err := x.AddClientWithData(inboundID, *clientData); err != nil {
+				log.Printf("[XRAY] add client failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
 				return nil, time.Time{}, err
 			}
 		} else {
@@ -581,6 +585,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 			clientData.CreatedAt = c.CreatedAt
 			clientData.UpdatedAt = c.UpdatedAt
 			if err := x.UpdateClient(inboundID, *clientData); err != nil {
+				log.Printf("[XRAY] update client failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
 				return nil, time.Time{}, err
 			}
 		}
