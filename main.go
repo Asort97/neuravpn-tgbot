@@ -120,6 +120,7 @@ var (
 	yookassaClient *yookassa.YooKassaClient
 	userStore      DataStore
 	xrayCfg        *xraySettings
+	oldXrayCfg     *xraySettings
 	privacyURL     string
 	adminIDs       []int64
 	userSessions   = make(map[int64]*UserSession)
@@ -460,6 +461,40 @@ func main() {
 		subBaseURL:    strings.TrimSpace(os.Getenv("SUB_BASE_URL")),
 	}
 
+	// Setup old Xray connection for migration
+	oldXrayHost := os.Getenv("OLD_XRAY_HOST")
+	if strings.TrimSpace(oldXrayHost) != "" {
+		oldXrayUser := os.Getenv("OLD_XRAY_USERNAME")
+		oldXrayPass := os.Getenv("OLD_XRAY_PASSWORD")
+		oldXrayPort := os.Getenv("OLD_XRAY_PORT")
+		oldXrayBasePath := os.Getenv("OLD_XRAY_WEB_BASE_PATH")
+		oldInboundIDsStr := strings.TrimSpace(os.Getenv("OLD_XRAY_INBOUND_IDS"))
+		var oldInboundIDs []int
+		if oldInboundIDsStr != "" {
+			for _, p := range strings.Split(oldInboundIDsStr, ",") {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				if id, err := strconv.Atoi(p); err == nil {
+					oldInboundIDs = append(oldInboundIDs, id)
+				}
+			}
+		}
+
+		oldXClient := xray.New(oldXrayUser, oldXrayPass, oldXrayHost, oldXrayPort, oldXrayBasePath)
+		if err := oldXClient.LoginToServer(); err != nil {
+			log.Printf("⚠️  old xray connection failed (migration unavailable): %v", err)
+		} else {
+			oldXrayCfg = &xraySettings{
+				client:     oldXClient,
+				inboundID:  0,
+				inboundIDs: oldInboundIDs,
+			}
+			log.Println("✅ Old Xray server connected for migration")
+		}
+	}
+
 	yookassaClient = yookassa.New(yookassaStoreID, yookassaApiKey)
 	var storeCloser func()
 	if dbDSN != "" {
@@ -791,6 +826,161 @@ func handleMigrateUsers(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 	_, _ = bot.Send(finalMsg)
 }
 
+// Admin-only: migrate expiry times from old Xray server to update days in new DB.
+func handleMigrateExpiryFromOld(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	// Admin check
+	isAdmin := false
+	for _, id := range adminIDs {
+		if id == msg.From.ID {
+			isAdmin = true
+			break
+		}
+	}
+	if !isAdmin {
+		m := tgbotapi.NewMessage(chatID, "⛔️ Только для админа")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	if oldXrayCfg == nil || oldXrayCfg.client == nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Старый Xray сервер не настроен (переменные OLD_XRAY_* отсутствуют)")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	initialMsg := tgbotapi.NewMessage(chatID, "🔄 Загружаю данные об истечении доступа со старого сервера...")
+	initialMsg.ParseMode = "HTML"
+	sentMsg, _ := bot.Send(initialMsg)
+
+	// Determine target inbounds on old server
+	oldInboundIDs := oldXrayCfg.inboundIDs
+	if len(oldInboundIDs) == 0 {
+		inbounds, err := oldXrayCfg.client.GetAllInbounds()
+		if err != nil {
+			msg := tgbotapi.NewMessage(chatID, "❌ Ошибка загрузки инбаундов старого сервера: "+err.Error())
+			msg.ParseMode = "HTML"
+			_, _ = bot.Send(msg)
+			return
+		}
+		for _, ib := range inbounds {
+			if ib.Enable && strings.EqualFold(strings.TrimSpace(ib.Protocol), "vless") {
+				oldInboundIDs = append(oldInboundIDs, ib.ID)
+			}
+		}
+	}
+
+	if len(oldInboundIDs) == 0 {
+		m := tgbotapi.NewMessage(chatID, "❌ Не найдены инбаунды на старом сервере")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	// Collect all clients with their expiryTime from old server
+	type oldClientInfo struct {
+		tgID       string
+		expiryTime int64
+	}
+	oldClientsMap := make(map[string]oldClientInfo) // key: tgID
+
+	for _, inboundID := range oldInboundIDs {
+		clients, err := oldXrayCfg.client.GetInboundById(inboundID)
+		if err != nil {
+			log.Printf("failed to load old inbound %d: %v", inboundID, err)
+			continue
+		}
+		for _, c := range clients {
+			tgID := strings.TrimSpace(c.TgID)
+			if tgID == "" {
+				continue
+			}
+			// Keep the client with latest expiry for each tgID
+			if old, exists := oldClientsMap[tgID]; !exists || c.ExpiryTime > old.expiryTime {
+				oldClientsMap[tgID] = oldClientInfo{
+					tgID:       tgID,
+					expiryTime: c.ExpiryTime,
+				}
+			}
+		}
+	}
+
+	if len(oldClientsMap) == 0 {
+		m := tgbotapi.NewMessage(chatID, "❌ Клиенты не найдены на старом сервере")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	progressMsg := fmt.Sprintf("📊 Миграция сроков:\nВсего клиентов: %d\nОбработано: 0", len(oldClientsMap))
+	edit := tgbotapi.NewEditMessageText(chatID, sentMsg.MessageID, progressMsg)
+	edit.ParseMode = "HTML"
+	_, _ = bot.Send(edit)
+
+	updated := 0
+	skipped := 0
+	failed := 0
+	idx := 0
+
+	for _, oldClient := range oldClientsMap {
+		idx++
+		tgID := oldClient.tgID
+
+		// Calculate days remaining
+		expireAt := time.UnixMilli(oldClient.expiryTime)
+		remain := time.Until(expireAt)
+		daysLeft := int64(0)
+		if remain > 0 {
+			daysLeft = int64(remain.Hours()/24 + 0.999)
+		}
+
+		if daysLeft <= 0 {
+			skipped++
+		} else {
+			// Update days in new DB
+			if err := userStore.SetDays(tgID, daysLeft); err != nil {
+				log.Printf("failed to update days for user %s: %v", tgID, err)
+				failed++
+			} else {
+				// Also update expiryTime on new Xray server for all inbounds
+				_, _, err := xrayCfg.client.EnsureClientAcrossInbounds(xrayCfg.inboundIDs, tgID, fallbackEmail(tgID), daysLeft)
+				if err != nil {
+					log.Printf("failed to update expiry on new server for user %s: %v", tgID, err)
+					failed++
+				} else {
+					updated++
+				}
+			}
+		}
+
+		// Update progress every 20 users
+		if idx%20 == 0 || idx == len(oldClientsMap) {
+			progressMsg = fmt.Sprintf("📊 Миграция сроков:\nВсего: %d | Обработано: %d\n✅ Обновлено: %d | ⏭ Истекло: %d | ❌ Ошибок: %d",
+				len(oldClientsMap), idx, updated, skipped, failed)
+			edit := tgbotapi.NewEditMessageText(chatID, sentMsg.MessageID, progressMsg)
+			edit.ParseMode = "HTML"
+			_, _ = bot.Send(edit)
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	finalText := fmt.Sprintf("✅ <b>Миграция сроков завершена!</b>\n\n"+
+		"📊 <b>Статистика:</b>\n"+
+		"├ Всего клиентов на старом сервере: %d\n"+
+		"├ ✅ Успешно обновлено дней в БД: %d\n"+
+		"├ ⏭ Истекло (срок ≤ 0): %d\n"+
+		"└ ❌ Ошибок: %d\n\n"+
+		"Дни в новой БД синхронизированы со старого сервера.",
+		len(oldClientsMap), updated, skipped, failed)
+
+	finalMsg := tgbotapi.NewEditMessageText(chatID, sentMsg.MessageID, finalText)
+	finalMsg.ParseMode = "HTML"
+	_, _ = bot.Send(finalMsg)
+}
+
 func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
 	chatID := msg.Chat.ID
 	session := getSession(chatID)
@@ -882,6 +1072,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleSyncInbounds(bot, msg, xrCfg)
 		case "migrate_users":
 			handleMigrateUsers(bot, msg, xrCfg)
+		case "migrate_expiry_from_old":
+			handleMigrateExpiryFromOld(bot, msg)
 		case "topup", "пополнить", "пополнить_баланс":
 			handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
 		case "getvpn", "vpn", "подключить", "получитьvpn":
