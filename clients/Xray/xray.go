@@ -556,36 +556,33 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		if err != nil {
 			return nil, time.Time{}, err
 		}
+
+		// Prepare client data with same UUID and expiry from primary
+		clientData := &Client{
+			ID:         primaryClient.ID, // keep same UUID across inbounds
+			Email:      email,
+			Enable:     true,
+			Flow:       "xtls-rprx-vision",
+			LimitIP:    0,
+			TotalGB:    0,
+			ExpiryTime: exp.UnixMilli(), // use expiry from primary
+			TgID:       tgID,
+			SubID:      "sub" + tgID,
+			Comment:    "tg:" + tgID,
+		}
+
 		if c == nil {
-			c = &Client{
-				ID:      primaryClient.ID, // keep same UUID across inbounds
-				Email:   email,
-				Enable:  true,
-				Flow:    "xtls-rprx-vision",
-				LimitIP: 0,
-				TotalGB: 0,
-				TgID:    tgID,
-				SubID:   "sub" + tgID,
-				Comment: "tg:" + tgID,
-			}
-			if _, err := x.AddClientWithData(inboundID, *c); err != nil {
+			// Client doesn't exist on this inbound, create it
+			if _, err := x.AddClientWithData(inboundID, *clientData); err != nil {
 				return nil, time.Time{}, err
 			}
 		} else {
-			c.Email = email
-			c.Enable = true
-			c.Flow = "xtls-rprx-vision"
-			c.TgID = tgID
-			c.SubID = "sub" + tgID
-			if strings.TrimSpace(c.Comment) == "" {
-				c.Comment = "tg:" + tgID
-			}
-			if err := x.UpdateClient(inboundID, *c); err != nil {
+			// Client exists, update all fields
+			clientData.CreatedAt = c.CreatedAt
+			clientData.UpdatedAt = c.UpdatedAt
+			if err := x.UpdateClient(inboundID, *clientData); err != nil {
 				return nil, time.Time{}, err
 			}
-		}
-		if _, err := x.EnsureExpiry(inboundID, c, daysToAdd); err != nil {
-			return nil, time.Time{}, err
 		}
 	}
 
