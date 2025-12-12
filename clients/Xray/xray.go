@@ -232,6 +232,46 @@ func (x *XRayClient) GetInboundById(id int) ([]Client, error) {
 	return settings.Clients, nil
 }
 
+// GetAllInbounds retrieves all inbound objects from 3X-UI.
+func (x *XRayClient) GetAllInbounds() ([]InboundData, error) {
+	url := fmt.Sprintf("%s/panel/api/inbounds/list", x.serverURL)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		colorfulprint.PrintError("Failed request", err)
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := x.httpClient.Do(req)
+	if err != nil {
+		colorfulprint.PrintError("Failed response", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		colorfulprint.PrintError("Failed to read response body", err)
+		return nil, err
+	}
+
+	// 3X-UI returns { success, obj: [ ... ] }
+	var raw struct {
+		Success bool          `json:"success"`
+		Msg     string        `json:"msg"`
+		Obj     []InboundData `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		colorfulprint.PrintError("Failed to unmarshal inbounds list", err)
+		return nil, err
+	}
+	if !raw.Success {
+		return nil, fmt.Errorf("API returned success=false: %s", raw.Msg)
+	}
+	return raw.Obj, nil
+}
+
 func (x *XRayClient) GetClientByEmail(inboundID int, email string) (*Client, error) {
 	clients, err := x.GetInboundById(inboundID)
 	if err != nil {
@@ -447,4 +487,98 @@ func (x *XRayClient) EnsureExpiry(inboundID int, client *Client, daysToAdd int64
 	}
 
 	return expireAt, err
+}
+
+// EnsureClientAcrossInbounds ensures a client with given Telegram ID exists across all provided inbound IDs.
+// It will set SubID in each inbound to "sub"+tgID, enable client, and extend expiry by daysToAdd.
+// Returns the primary client (from first inbound) and its expiry.
+func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, email string, daysToAdd int64) (*Client, time.Time, error) {
+	if len(inboundIDs) == 0 {
+		return nil, time.Time{}, fmt.Errorf("no inbound IDs provided")
+	}
+
+	// First ensure on primary inbound, capturing UUID and expiry
+	primaryID := inboundIDs[0]
+	primaryClient, err := x.GetClientByTelegram(primaryID, tgID)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	if primaryClient == nil {
+		primaryClient = &Client{
+			ID:      uuid.New().String(),
+			Email:   email,
+			Enable:  true,
+			Flow:    "xtls-rprx-vision",
+			LimitIP: 0,
+			TotalGB: 0,
+			TgID:    tgID,
+			SubID:   "sub" + tgID,
+			Comment: "tg:" + tgID,
+		}
+		if _, err := x.AddClientWithData(primaryID, *primaryClient); err != nil {
+			return nil, time.Time{}, err
+		}
+	} else {
+		// normalize fields
+		if strings.TrimSpace(primaryClient.Email) == "" || primaryClient.Email != email {
+			primaryClient.Email = email
+		}
+		primaryClient.Enable = true
+		primaryClient.Flow = "xtls-rprx-vision"
+		primaryClient.TgID = tgID
+		primaryClient.SubID = "sub" + tgID
+		if strings.TrimSpace(primaryClient.Comment) == "" {
+			primaryClient.Comment = "tg:" + tgID
+		}
+		if err := x.UpdateClient(primaryID, *primaryClient); err != nil {
+			return nil, time.Time{}, err
+		}
+	}
+
+	exp, err := x.EnsureExpiry(primaryID, primaryClient, daysToAdd)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	// Mirror client to other inbounds using the same UUID
+	for _, inboundID := range inboundIDs[1:] {
+		c, err := x.GetClientByTelegram(inboundID, tgID)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		if c == nil {
+			c = &Client{
+				ID:      primaryClient.ID, // keep same UUID across inbounds
+				Email:   email,
+				Enable:  true,
+				Flow:    "xtls-rprx-vision",
+				LimitIP: 0,
+				TotalGB: 0,
+				TgID:    tgID,
+				SubID:   "sub" + tgID,
+				Comment: "tg:" + tgID,
+			}
+			if _, err := x.AddClientWithData(inboundID, *c); err != nil {
+				return nil, time.Time{}, err
+			}
+		} else {
+			c.Email = email
+			c.Enable = true
+			c.Flow = "xtls-rprx-vision"
+			c.TgID = tgID
+			c.SubID = "sub" + tgID
+			if strings.TrimSpace(c.Comment) == "" {
+				c.Comment = "tg:" + tgID
+			}
+			if err := x.UpdateClient(inboundID, *c); err != nil {
+				return nil, time.Time{}, err
+			}
+		}
+		if _, err := x.EnsureExpiry(inboundID, c, daysToAdd); err != nil {
+			return nil, time.Time{}, err
+		}
+	}
+
+	return primaryClient, exp, nil
 }

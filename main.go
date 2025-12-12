@@ -99,12 +99,14 @@ type UserSession struct {
 type xraySettings struct {
 	client        *xray.XRayClient
 	inboundID     int
+	inboundIDs    []int
 	serverAddress string
 	serverPort    int
 	serverName    string
 	publicKey     string
 	shortID       string
 	spiderX       string
+	subBaseURL    string
 }
 
 type accessInfo struct {
@@ -150,39 +152,58 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 	if cfg == nil || cfg.client == nil {
 		return nil, fmt.Errorf("xray not configured")
 	}
-
-	client, err := cfg.client.GetClientByTelegram(cfg.inboundID, telegramUser)
-	if err != nil {
-		return nil, err
+	// Determine target inbound IDs: if list is empty, try to load all inbounds dynamically
+	inboundIDs := cfg.inboundIDs
+	if len(inboundIDs) == 0 {
+		inbounds, err := cfg.client.GetAllInbounds()
+		if err != nil {
+			return nil, err
+		}
+		for _, ib := range inbounds {
+			// Only include enabled VLESS protocol inbounds
+			if ib.Enable && strings.EqualFold(strings.TrimSpace(ib.Protocol), "vless") {
+				inboundIDs = append(inboundIDs, ib.ID)
+			}
+		}
+		// Fallback to single configured inbound if nothing matched
+		if len(inboundIDs) == 0 && cfg.inboundID > 0 {
+			inboundIDs = append(inboundIDs, cfg.inboundID)
+		}
 	}
 
-	if client == nil {
-		if !createIfMissing && addDays == 0 {
+	if len(inboundIDs) == 0 {
+		return nil, fmt.Errorf("no inbounds available to ensure client")
+	}
+
+	if !createIfMissing && addDays == 0 {
+		// Still attempt to read primary client without creating on others
+		c, err := cfg.client.GetClientByTelegram(inboundIDs[0], telegramUser)
+		if err != nil {
+			return nil, err
+		}
+		if c == nil {
 			return nil, nil
 		}
-		client = &xray.Client{
-			Enable:  true,
-			Flow:    "xtls-rprx-vision",
-			LimitIP: 0,
-			TotalGB: 0,
-			TgID:    telegramUser,
-			Email:   telegramUser,
-			Comment: "tg:" + telegramUser,
+		// Normalize minimal fields
+		if strings.TrimSpace(c.Email) == "" {
+			c.Email = telegramUser
 		}
-	} else {
-		if strings.TrimSpace(client.Email) == "" || client.Email != telegramUser {
-			client.Email = telegramUser
+		exp := time.UnixMilli(c.ExpiryTime)
+		info := &accessInfo{client: c, expireAt: exp}
+		if !exp.IsZero() {
+			remain := time.Until(exp)
+			if remain > 0 {
+				info.daysLeft = int64(remain.Hours()/24 + 0.999)
+			}
 		}
-		if strings.TrimSpace(client.TgID) == "" {
-			client.TgID = telegramUser
+		if cfg.serverAddress != "" && cfg.publicKey != "" && cfg.serverName != "" && cfg.shortID != "" && cfg.serverPort > 0 {
+			info.link = cfg.client.GenerateVLESSLink(c, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
 		}
-		if client.Comment == "" {
-			client.Comment = "tg:" + telegramUser
-		}
-		client.Enable = true
+		_ = userStore.SetDays(telegramUser, info.daysLeft)
+		return info, nil
 	}
 
-	expireAt, err := cfg.client.EnsureExpiry(cfg.inboundID, client, addDays)
+	primaryClient, expireAt, err := cfg.client.EnsureClientAcrossInbounds(inboundIDs, telegramUser, email, addDays)
 	if err != nil {
 		return nil, err
 	}
@@ -198,11 +219,11 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 
 	link := ""
 	if cfg.serverAddress != "" && cfg.publicKey != "" && cfg.serverName != "" && cfg.shortID != "" && cfg.serverPort > 0 {
-		link = cfg.client.GenerateVLESSLink(client, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
+		link = cfg.client.GenerateVLESSLink(primaryClient, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
 	}
 
 	return &accessInfo{
-		client:   client,
+		client:   primaryClient,
 		expireAt: expireAt,
 		daysLeft: daysLeft,
 		link:     link,
@@ -229,8 +250,12 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 		exp = info.expireAt.UTC().Format("02.01.2006 15:04 MST")
 	}
 
+	// Prefer subscription URL over raw VLESS link
 	linkLine := "попробуй ещё раз получить ссылку"
-	if strings.TrimSpace(info.link) != "" {
+	subURL := generateSubscriptionURL(cfg, info.client)
+	if strings.TrimSpace(subURL) != "" {
+		linkLine = fmt.Sprintf("<code>%s</code>", subURL)
+	} else if strings.TrimSpace(info.link) != "" {
 		linkLine = fmt.Sprintf("<code>%s</code>", info.link)
 	}
 
@@ -399,6 +424,22 @@ func main() {
 	xrayPort := os.Getenv("XRAY_PORT")
 	xrayBasePath := os.Getenv("XRAY_WEB_BASE_PATH")
 	inboundID, _ := strconv.Atoi(os.Getenv("XRAY_INBOUND_ID"))
+	// Optional: comma-separated inbound IDs to target; if empty, we will use dynamic discovery via GetAllInbounds
+	inboundIDsStr := strings.TrimSpace(os.Getenv("XRAY_INBOUND_IDS"))
+	var inboundIDs []int
+	if inboundIDsStr != "" {
+		for _, p := range strings.Split(inboundIDsStr, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if id, err := strconv.Atoi(p); err == nil {
+				inboundIDs = append(inboundIDs, id)
+			}
+		}
+	} else if inboundID > 0 {
+		inboundIDs = append(inboundIDs, inboundID)
+	}
 	serverPort, _ := strconv.Atoi(os.Getenv("XRAY_SERVER_PORT"))
 
 	xClient := xray.New(xrayUser, xrayPass, xrayHost, xrayPort, xrayBasePath)
@@ -409,12 +450,14 @@ func main() {
 	xrayCfg = &xraySettings{
 		client:        xClient,
 		inboundID:     inboundID,
+		inboundIDs:    inboundIDs,
 		serverAddress: os.Getenv("XRAY_SERVER_ADDRESS"),
 		serverPort:    serverPort,
 		serverName:    os.Getenv("XRAY_SERVER_NAME"),
 		publicKey:     os.Getenv("XRAY_PUBLIC_KEY"),
 		shortID:       os.Getenv("XRAY_SHORT_ID"),
 		spiderX:       os.Getenv("XRAY_SPIDER_X"),
+		subBaseURL:    strings.TrimSpace(os.Getenv("SUB_BASE_URL")),
 	}
 
 	yookassaClient = yookassa.New(yookassaStoreID, yookassaApiKey)
@@ -488,6 +531,264 @@ func main() {
 			}
 		}(update)
 	}
+}
+
+// generateSubscriptionURL builds a subscription URL using fixed path and client's SubID.
+// Format: <SUB_BASE_URL>/s-39fj3r9f3j/<subID>
+func generateSubscriptionURL(cfg *xraySettings, c *xray.Client) string {
+	if cfg == nil || c == nil {
+		return ""
+	}
+	base := cfg.subBaseURL
+	if strings.TrimSpace(base) == "" {
+		// fallback hardcoded base as per request if env not set
+		base = "https://sub.staticdeliverycdn.com:2096"
+	}
+	subID := strings.TrimSpace(c.SubID)
+	if subID == "" {
+		// derive from telegram id
+		subID = "sub" + strings.TrimSpace(c.TgID)
+	}
+	// fixed path segment '/s-39fj3r9f3j/' followed by subID
+	if !strings.HasPrefix(base, "http") {
+		base = "https://" + base
+	}
+	return fmt.Sprintf("%s/s-39fj3r9f3j/%s", strings.TrimRight(base, "/"), subID)
+}
+
+// Admin-only: sync clients across all inbounds, creating missing ones.
+func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	chatID := msg.Chat.ID
+	// Admin check
+	isAdmin := false
+	for _, id := range adminIDs {
+		if id == msg.From.ID {
+			isAdmin = true
+			break
+		}
+	}
+	if !isAdmin {
+		m := tgbotapi.NewMessage(chatID, "⛔️ Только для админа")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	// Load target inbounds
+	inboundIDs := xrCfg.inboundIDs
+	if len(inboundIDs) == 0 {
+		inbounds, err := xrCfg.client.GetAllInbounds()
+		if err != nil {
+			msg := tgbotapi.NewMessage(chatID, "Ошибка загрузки инбаундов: "+err.Error())
+			msg.ParseMode = "HTML"
+			_, _ = bot.Send(msg)
+			return
+		}
+		for _, ib := range inbounds {
+			if ib.Enable && strings.EqualFold(strings.TrimSpace(ib.Protocol), "vless") {
+				inboundIDs = append(inboundIDs, ib.ID)
+			}
+		}
+	}
+	if len(inboundIDs) == 0 {
+		msg := tgbotapi.NewMessage(chatID, "Нет доступных инбаундов для синхронизации")
+		msg.ParseMode = "HTML"
+		_, _ = bot.Send(msg)
+		return
+	}
+
+	// Collect user IDs from storage
+	var userIDs []string
+	if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
+		ids, err := pg.GetAllUserIDs()
+		if err != nil {
+			msg := tgbotapi.NewMessage(chatID, "Ошибка получения пользователей: "+err.Error())
+			msg.ParseMode = "HTML"
+			_, _ = bot.Send(msg)
+			return
+		}
+		userIDs = ids
+	} else if sq, ok := userStore.(interface {
+		GetAllUsers() map[string]sqlite.UserData
+	}); ok {
+		for id := range sq.GetAllUsers() {
+			userIDs = append(userIDs, id)
+		}
+	}
+	if len(userIDs) == 0 {
+		msg := tgbotapi.NewMessage(chatID, "Пользователи не найдены в хранилище")
+		msg.ParseMode = "HTML"
+		_, _ = bot.Send(msg)
+		return
+	}
+
+	created := 0
+	updated := 0
+	failed := 0
+	for _, uid := range userIDs {
+		email := fallbackEmail(uid)
+		// Ensure client across all inbounds without changing expiry (daysToAdd=0)
+		c, _, err := xrCfg.client.EnsureClientAcrossInbounds(inboundIDs, uid, email, 0)
+		if err != nil {
+			failed++
+			continue
+		}
+		if c != nil {
+			// We cannot easily distinguish created vs updated without deeper signals; increment updated
+			updated++
+		} else {
+			created++
+		}
+		// avoid flooding server
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	text := fmt.Sprintf("Синхронизация завершена. Обновлено: %d, создано: %d, ошибок: %d", updated, created, failed)
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = "HTML"
+	_, _ = bot.Send(m)
+}
+
+// Admin-only: migrate users from DB to new Xray server with their current days balance.
+func handleMigrateUsers(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	chatID := msg.Chat.ID
+	// Admin check
+	isAdmin := false
+	for _, id := range adminIDs {
+		if id == msg.From.ID {
+			isAdmin = true
+			break
+		}
+	}
+	if !isAdmin {
+		m := tgbotapi.NewMessage(chatID, "⛔️ Только для админа")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	// Send initial message
+	initialMsg := tgbotapi.NewMessage(chatID, "🔄 Начинаю миграцию пользователей на новый сервер...")
+	initialMsg.ParseMode = "HTML"
+	sentMsg, _ := bot.Send(initialMsg)
+
+	// Load target inbounds
+	inboundIDs := xrCfg.inboundIDs
+	if len(inboundIDs) == 0 {
+		inbounds, err := xrCfg.client.GetAllInbounds()
+		if err != nil {
+			msg := tgbotapi.NewMessage(chatID, "❌ Ошибка загрузки инбаундов: "+err.Error())
+			msg.ParseMode = "HTML"
+			_, _ = bot.Send(msg)
+			return
+		}
+		for _, ib := range inbounds {
+			if ib.Enable && strings.EqualFold(strings.TrimSpace(ib.Protocol), "vless") {
+				inboundIDs = append(inboundIDs, ib.ID)
+			}
+		}
+	}
+	if len(inboundIDs) == 0 {
+		msg := tgbotapi.NewMessage(chatID, "❌ Нет доступных инбаундов для миграции")
+		msg.ParseMode = "HTML"
+		_, _ = bot.Send(msg)
+		return
+	}
+
+	// Collect user IDs from storage
+	var userIDs []string
+	if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
+		ids, err := pg.GetAllUserIDs()
+		if err != nil {
+			msg := tgbotapi.NewMessage(chatID, "❌ Ошибка получения пользователей: "+err.Error())
+			msg.ParseMode = "HTML"
+			_, _ = bot.Send(msg)
+			return
+		}
+		userIDs = ids
+	} else if sq, ok := userStore.(interface {
+		GetAllUsers() map[string]sqlite.UserData
+	}); ok {
+		for id := range sq.GetAllUsers() {
+			userIDs = append(userIDs, id)
+		}
+	}
+	if len(userIDs) == 0 {
+		msg := tgbotapi.NewMessage(chatID, "❌ Пользователи не найдены в хранилище")
+		msg.ParseMode = "HTML"
+		_, _ = bot.Send(msg)
+		return
+	}
+
+	migrated := 0
+	failed := 0
+	skipped := 0
+
+	progressMsg := fmt.Sprintf("📊 Миграция:\nВсего пользователей: %d\nОбработано: 0", len(userIDs))
+	edit := tgbotapi.NewEditMessageText(chatID, sentMsg.MessageID, progressMsg)
+	edit.ParseMode = "HTML"
+	_, _ = bot.Send(edit)
+
+	for idx, uid := range userIDs {
+		// Get user's current days from DB
+		days, err := userStore.GetDays(uid)
+		if err != nil {
+			log.Printf("skip user %s: cannot get days: %v", uid, err)
+			skipped++
+			continue
+		}
+
+		// If user has no days, skip migration (or create with 0 days based on requirement)
+		if days <= 0 {
+			skipped++
+			// Update progress every 10 users
+			if (idx+1)%10 == 0 {
+				progressMsg = fmt.Sprintf("📊 Миграция:\nВсего: %d | Обработано: %d\n✅ Мигрировано: %d | ⏭ Пропущено: %d | ❌ Ошибок: %d",
+					len(userIDs), idx+1, migrated, skipped, failed)
+				edit := tgbotapi.NewEditMessageText(chatID, sentMsg.MessageID, progressMsg)
+				edit.ParseMode = "HTML"
+				_, _ = bot.Send(edit)
+			}
+			continue
+		}
+
+		email := fallbackEmail(uid)
+
+		// Create client on new server with their current days balance
+		_, _, err = xrCfg.client.EnsureClientAcrossInbounds(inboundIDs, uid, email, days)
+		if err != nil {
+			log.Printf("migration failed for user %s: %v", uid, err)
+			failed++
+			continue
+		}
+
+		migrated++
+
+		// Update progress every 10 users or at the end
+		if (idx+1)%10 == 0 || idx == len(userIDs)-1 {
+			progressMsg = fmt.Sprintf("📊 Миграция:\nВсего: %d | Обработано: %d\n✅ Мигрировано: %d | ⏭ Пропущено: %d | ❌ Ошибок: %d",
+				len(userIDs), idx+1, migrated, skipped, failed)
+			edit := tgbotapi.NewEditMessageText(chatID, sentMsg.MessageID, progressMsg)
+			edit.ParseMode = "HTML"
+			_, _ = bot.Send(edit)
+		}
+
+		// Avoid flooding server
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	finalText := fmt.Sprintf("✅ <b>Миграция завершена!</b>\n\n"+
+		"📊 <b>Статистика:</b>\n"+
+		"├ Всего пользователей: %d\n"+
+		"├ ✅ Успешно мигрировано: %d\n"+
+		"├ ⏭ Пропущено (нет дней): %d\n"+
+		"└ ❌ Ошибок: %d\n\n"+
+		"Все пользователи с активными днями перенесены на новый сервер с установкой SubID.",
+		len(userIDs), migrated, skipped, failed)
+
+	finalMsg := tgbotapi.NewEditMessageText(chatID, sentMsg.MessageID, finalText)
+	finalMsg.ParseMode = "HTML"
+	_, _ = bot.Send(finalMsg)
 }
 
 func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
@@ -577,6 +878,10 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		switch msg.Command() {
 		case "start":
 			handleStart(bot, msg, session, xrCfg)
+		case "sync_inbounds":
+			handleSyncInbounds(bot, msg, xrCfg)
+		case "migrate_users":
+			handleMigrateUsers(bot, msg, xrCfg)
 		case "topup", "пополнить", "пополнить_баланс":
 			handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
 		case "getvpn", "vpn", "подключить", "получитьvpn":
