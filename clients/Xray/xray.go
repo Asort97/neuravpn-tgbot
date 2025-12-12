@@ -137,7 +137,7 @@ func New(username, password, host, port, webBasePath string) *XRayClient {
 
 	// Auto-detect protocol: use https for common secure ports or if host starts with https://
 	protocol := "http"
-	if port == "443" || port == "8080" || port == "8443" || strings.HasPrefix(host, "https://") {
+	if port == "443" || port == "8443" || strings.HasPrefix(host, "https://") {
 		protocol = "https"
 		host = strings.TrimPrefix(host, "https://")
 	}
