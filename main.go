@@ -20,7 +20,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const startText = `Привет! <b>Добро пожаловать в HappyCat VPN</b> 😺🔒
+const startText = `Привет! <b>Добро пожаловать в NeuraVPN</b> 😺🔒
 
 Здесь ты можешь:
 • Получить или продлить доступ к VPN
@@ -30,7 +30,7 @@ const startText = `Привет! <b>Добро пожаловать в HappyCat 
 • Открыть подробные инструкции
 • Связаться с поддержкой 24/7
 
-<a href="https://t.me/happycatvpn">Наш новостной канал</a> 📰
+<a href="https://t.me/neuravpn">Наш новостной канал</a> 📰
 
 Выбирай нужный раздел ниже 👇`
 
