@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"strconv"
@@ -133,7 +134,16 @@ func New(username, password, host, port, webBasePath string) *XRayClient {
 	if webBasePath != "" && !strings.HasPrefix(webBasePath, "/") {
 		webBasePath = "/" + webBasePath
 	}
-	serverURL := fmt.Sprintf("http://%s:%s%s", host, port, webBasePath)
+
+	// Auto-detect protocol: use https for common secure ports or if host starts with https://
+	protocol := "http"
+	if port == "443" || port == "8443" || strings.HasPrefix(host, "https://") {
+		protocol = "https"
+		host = strings.TrimPrefix(host, "https://")
+	}
+	host = strings.TrimPrefix(host, "http://")
+
+	serverURL := fmt.Sprintf("%s://%s:%s%s", protocol, host, port, webBasePath)
 
 	jar, _ := cookiejar.New(nil)
 
@@ -230,6 +240,46 @@ func (x *XRayClient) GetInboundById(id int) ([]Client, error) {
 		inboundResp.Obj.ID, inboundResp.Obj.Protocol, len(settings.Clients)))
 
 	return settings.Clients, nil
+}
+
+// GetAllInbounds retrieves all inbound objects from 3X-UI.
+func (x *XRayClient) GetAllInbounds() ([]InboundData, error) {
+	url := fmt.Sprintf("%s/panel/api/inbounds/list", x.serverURL)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		colorfulprint.PrintError("Failed request", err)
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := x.httpClient.Do(req)
+	if err != nil {
+		colorfulprint.PrintError("Failed response", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		colorfulprint.PrintError("Failed to read response body", err)
+		return nil, err
+	}
+
+	// 3X-UI returns { success, obj: [ ... ] }
+	var raw struct {
+		Success bool          `json:"success"`
+		Msg     string        `json:"msg"`
+		Obj     []InboundData `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		colorfulprint.PrintError("Failed to unmarshal inbounds list", err)
+		return nil, err
+	}
+	if !raw.Success {
+		return nil, fmt.Errorf("API returned success=false: %s", raw.Msg)
+	}
+	return raw.Obj, nil
 }
 
 func (x *XRayClient) GetClientByEmail(inboundID int, email string) (*Client, error) {
@@ -447,4 +497,118 @@ func (x *XRayClient) EnsureExpiry(inboundID int, client *Client, daysToAdd int64
 	}
 
 	return expireAt, err
+}
+
+// EnsureClientAcrossInbounds ensures a client with given Telegram ID exists across all provided inbound IDs.
+// It will set SubID in each inbound to "sub"+tgID, enable client, and extend expiry by daysToAdd.
+// Returns the primary client (from first inbound) and its expiry.
+func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, email string, daysToAdd int64, subID string) (*Client, time.Time, error) {
+	if len(inboundIDs) == 0 {
+		return nil, time.Time{}, fmt.Errorf("no inbound IDs provided")
+	}
+	log.Printf("[XRAY] ensure across inbounds=%v tg=%s daysToAdd=%d", inboundIDs, tgID, daysToAdd)
+
+	// First ensure on primary inbound, capturing UUID and expiry
+	primaryID := inboundIDs[0]
+	primaryClient, err := x.GetClientByTelegram(primaryID, tgID)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	if primaryClient == nil {
+		primaryClient = &Client{
+			ID:      uuid.New().String(),
+			Email:   email,
+			Enable:  true,
+			Flow:    "xtls-rprx-vision",
+			LimitIP: 0,
+			TotalGB: 0,
+			TgID:    tgID,
+			SubID:   strings.TrimSpace(subID),
+			Comment: "tg:" + tgID,
+		}
+		if _, err := x.AddClientWithData(primaryID, *primaryClient); err != nil {
+			return nil, time.Time{}, err
+		}
+	} else {
+		// normalize fields
+		if strings.TrimSpace(primaryClient.Email) == "" || primaryClient.Email != email {
+			primaryClient.Email = email
+		}
+		primaryClient.Enable = true
+		primaryClient.Flow = "xtls-rprx-vision"
+		primaryClient.TgID = tgID
+		if strings.TrimSpace(subID) != "" {
+			primaryClient.SubID = strings.TrimSpace(subID)
+		} else {
+			primaryClient.SubID = "sub" + tgID
+		}
+		if strings.TrimSpace(primaryClient.Comment) == "" {
+			primaryClient.Comment = "tg:" + tgID
+		}
+		if err := x.UpdateClient(primaryID, *primaryClient); err != nil {
+			return nil, time.Time{}, err
+		}
+	}
+
+	exp, err := x.EnsureExpiry(primaryID, primaryClient, daysToAdd)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	// Mirror client to other inbounds using the same UUID
+	for _, inboundID := range inboundIDs[1:] {
+		log.Printf("[XRAY] sync client tg=%s to inbound=%d", tgID, inboundID)
+		c, err := x.GetClientByTelegram(inboundID, tgID)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+
+		// Prepare client data with same UUID and expiry from primary
+		clientData := &Client{
+			ID:         primaryClient.ID, // keep same UUID across inbounds
+			Email:      tagEmailForInbound(email, inboundID),
+			Enable:     true,
+			Flow:       "xtls-rprx-vision",
+			LimitIP:    0,
+			TotalGB:    0,
+			ExpiryTime: exp.UnixMilli(), // use expiry from primary
+			TgID:       tgID,
+			SubID:      primaryClient.SubID,
+			Comment:    "tg:" + tgID,
+		}
+
+		if c == nil {
+			// Client doesn't exist on this inbound, create it
+			if _, err := x.AddClientWithData(inboundID, *clientData); err != nil {
+				log.Printf("[XRAY] add client failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
+				return nil, time.Time{}, err
+			}
+		} else {
+			// Client exists, update all fields
+			clientData.CreatedAt = c.CreatedAt
+			clientData.UpdatedAt = c.UpdatedAt
+			if err := x.UpdateClient(inboundID, *clientData); err != nil {
+				log.Printf("[XRAY] update client failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
+				return nil, time.Time{}, err
+			}
+		}
+	}
+
+	return primaryClient, exp, nil
+}
+
+// tagEmailForInbound returns a unique email per inbound to avoid duplicate email errors.
+// If email contains '@', inserts "+inb<id>" before domain. Otherwise appends suffix.
+func tagEmailForInbound(email string, inboundID int) string {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Sprintf("user_inb%d@happycat", inboundID)
+	}
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) == 2 {
+		local, domain := parts[0], parts[1]
+		return fmt.Sprintf("%s+inb%d@%s", local, inboundID, domain)
+	}
+	return fmt.Sprintf("%s_inb%d@happycat", strings.ReplaceAll(email, "@", "_"), inboundID)
 }
