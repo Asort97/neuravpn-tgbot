@@ -125,7 +125,8 @@ var (
 	oldXrayCfg     *xraySettings
 	privacyURL     string
 	adminIDs       []int64
-	userSessions   = make(map[int64]*UserSession)
+	logChatID      int64 = -1003334019708
+	userSessions         = make(map[int64]*UserSession)
 )
 
 func canProceedKey(userID int64, key string, interval time.Duration) bool {
@@ -533,10 +534,12 @@ func main() {
 		for {
 			time.Sleep(1 * time.Hour)
 			if err := xClient.LoginToServer(); err != nil {
-				sendMessageToAdmin("Релогин завершился ошибкой...", "bot", bot, 1234)
+				msg := tgbotapi.NewMessage(logChatID, "⚠️ Релогин к Xray завершился ошибкой")
+				_, _ = bot.Send(msg)
 				log.Printf("[XRAY] re-login failed: %v", err)
 			} else {
-				sendMessageToAdmin("Релогин прошел успешно!", "bot", bot, 1234)
+				msg := tgbotapi.NewMessage(logChatID, "✅ Релогин к Xray прошел успешно")
+				_, _ = bot.Send(msg)
 				log.Printf("[XRAY] re-login success")
 			}
 		}
@@ -1189,13 +1192,11 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 					nmsg.ParseMode = "HTML"
 					_, _ = bot.Send(nmsg)
 
-					// Уведомление админу
-					for _, adminID := range adminIDs {
-						adminMsg := fmt.Sprintf("🆕 <b>Реферал:</b> Пользователь <code>%s</code> (ID:%s) перешёл по ссылке пользователя <code>%s</code> (ID:%s)\nПригласившему начислено +15 дней.", newUserName, userID, referrerID, referrerID)
-						amsg := tgbotapi.NewMessage(adminID, adminMsg)
-						amsg.ParseMode = "HTML"
-						_, _ = bot.Send(amsg)
-					}
+					// Уведомление в лог-чат
+					adminMsg := fmt.Sprintf("🆕 <b>Реферал:</b> Пользователь <code>%s</code> (ID:%s) перешёл по ссылке пользователя <code>%s</code> (ID:%s)\nПригласившему начислено +15 дней.", newUserName, userID, referrerID, referrerID)
+					amsg := tgbotapi.NewMessage(logChatID, adminMsg)
+					amsg.ParseMode = "HTML"
+					_, _ = bot.Send(amsg)
 				}
 			}
 		}
@@ -1348,14 +1349,12 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		id := strings.TrimPrefix(data, "rate_")
 		if p, ok := ratePlanByID[id]; ok {
 			handleRateSelection(bot, cq, session, p)
-			// Дополнительное уведомление админам о выборе тарифа
+			// Уведомление в лог-чат о выборе тарифа
 			planMsg := fmt.Sprintf("💸 Пользователь ID:%d выбрал тариф: %s (%d дн., %.0f₽)", userID, p.Title, p.Days, p.Amount)
-			for _, adminID := range adminIDs {
-				m := tgbotapi.NewMessage(adminID, planMsg)
-				m.ParseMode = "HTML"
-				m.DisableWebPagePreview = true
-				_, _ = bot.Send(m)
-			}
+			m := tgbotapi.NewMessage(logChatID, planMsg)
+			m.ParseMode = "HTML"
+			m.DisableWebPagePreview = true
+			_, _ = bot.Send(m)
 			return
 		}
 	case data == "check_payment":
@@ -1644,14 +1643,12 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg 
 	// Здесь отправим информативное сообщение о покупке пригласившему (если переход был по реферальной ссылке)
 	// Определить пригласившего напрямую здесь сложно без хранения связи; пропустим если неизвестно
 
-	// Уведомление для админов и доп. получателя о покупке тарифа
+	// Уведомление в лог-чат о покупке тарифа
 	adminText := fmt.Sprintf("💳 <b>Покупка тарифа</b>\n👤 Пользователь: <code>%d</code>\n📦 Тариф: <b>%s</b> (%d дн.)", userID, plan.Title, plan.Days)
-	for _, adminID := range adminIDs {
-		m := tgbotapi.NewMessage(adminID, adminText)
-		m.ParseMode = "HTML"
-		m.DisableWebPagePreview = true
-		_, _ = bot.Send(m)
-	}
+	m := tgbotapi.NewMessage(logChatID, adminText)
+	m.ParseMode = "HTML"
+	m.DisableWebPagePreview = true
+	_, _ = bot.Send(m)
 
 	// Оставляем существующее короткое уведомление
 	sendMessageToAdmin(fmt.Sprintf("Платёж от %d за %s", msg.From.ID, plan.Title), msg.From.UserName, bot, userID)
@@ -1722,14 +1719,10 @@ func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id i
 		userLink = fmt.Sprintf("<a href=\"tg://user?id=%d\">Профиль пользователя</a>", id)
 	}
 	newText := fmt.Sprintf("%s:\n%s", userLink, html.EscapeString(text))
-	msg := tgbotapi.NewMessage(623290294, newText)
+	msg := tgbotapi.NewMessage(logChatID, newText)
 	msg.ParseMode = "HTML"
-
-	msg2 := tgbotapi.NewMessage(6365653009, newText)
-	msg2.ParseMode = "HTML"
-	bot.Send(msg)
-	bot.Send(msg2)
-
+	msg.DisableWebPagePreview = true
+	_, _ = bot.Send(msg)
 }
 
 func getActionName(data string) string {
@@ -1769,23 +1762,15 @@ func getActionName(data string) string {
 }
 
 func notifyAdmins(bot *tgbotapi.BotAPI, userID int64, username, action string) {
-	if len(adminIDs) == 0 {
-		return
-	}
 	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">ID:%d</a>`, userID, userID)
 	if username != "" {
 		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, username, username, userID)
 	}
 	text := fmt.Sprintf("📊 Действие: <b>%s</b>\nПользователь: %s", action, userLink)
-	for _, adminID := range adminIDs {
-		if adminID == userID {
-			continue // не уведомляем админа о его же действиях
-		}
-		msg := tgbotapi.NewMessage(adminID, text)
-		msg.ParseMode = "HTML"
-		msg.DisableWebPagePreview = true
-		_, _ = bot.Send(msg)
-	}
+	msg := tgbotapi.NewMessage(logChatID, text)
+	msg.ParseMode = "HTML"
+	msg.DisableWebPagePreview = true
+	_, _ = bot.Send(msg)
 }
 
 // Simple referral stats screen
