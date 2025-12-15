@@ -358,11 +358,11 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 	}
 
 	text := fmt.Sprintf(
-		"🔐 <b>доступ готов!</b>\n🔗 ссылка: %s\n📆 осталось дней: %d\n⏳ действует до: %s\n🆔 ID: <code>%d</code>",
+		"🔐 <b>доступ готов</b>\n🔗 ссылка: %s\n📆 осталось дней: %d\n⏳ действует до: %s\n🆔 id: <code>%d</code>",
 		linkLine, info.daysLeft, exp, userID,
 	)
 	if addedDays > 0 {
-		text += fmt.Sprintf("\n🎁 Начислено: +%d дн.", addedDays)
+		text += fmt.Sprintf("\n🎁 начислено: +%d дн.", addedDays)
 	}
 
 	session.LastAccess = text
@@ -471,7 +471,7 @@ func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 func composeMenuText() string {
 	trimmed := strings.TrimSpace(startText)
 	if trimmed == "" {
-		return "Выберите действие в меню ниже."
+		return "выберите действие в меню ниже."
 	}
 	return trimmed
 }
@@ -732,7 +732,7 @@ func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 	if len(inboundIDs) == 0 {
 		inbounds, err := xrCfg.client.GetAllInbounds()
 		if err != nil {
-			msg := tgbotapi.NewMessage(chatID, "Ошибка загрузки инбаундов: "+err.Error())
+			msg := tgbotapi.NewMessage(chatID, "ошибка загрузки инбаундов: "+err.Error())
 			msg.ParseMode = "HTML"
 			_, _ = bot.Send(msg)
 			return
@@ -744,7 +744,7 @@ func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 		}
 	}
 	if len(inboundIDs) == 0 {
-		msg := tgbotapi.NewMessage(chatID, "Нет доступных инбаундов для синхронизации")
+		msg := tgbotapi.NewMessage(chatID, "нет доступных инбаундов для синхронизации")
 		msg.ParseMode = "HTML"
 		_, _ = bot.Send(msg)
 		return
@@ -755,7 +755,7 @@ func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 	if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
 		ids, err := pg.GetAllUserIDs()
 		if err != nil {
-			msg := tgbotapi.NewMessage(chatID, "Ошибка получения пользователей: "+err.Error())
+			msg := tgbotapi.NewMessage(chatID, "ошибка получения пользователей: "+err.Error())
 			msg.ParseMode = "HTML"
 			_, _ = bot.Send(msg)
 			return
@@ -769,7 +769,7 @@ func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 		}
 	}
 	if len(userIDs) == 0 {
-		msg := tgbotapi.NewMessage(chatID, "Пользователи не найдены в хранилище")
+		msg := tgbotapi.NewMessage(chatID, "пользователи не найдены в хранилище")
 		msg.ParseMode = "HTML"
 		_, _ = bot.Send(msg)
 		return
@@ -1142,8 +1142,37 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			_ = updateSessionText(bot, chatID, session, stateMenu, "⛔️ Только для админа", "HTML", mainMenuInlineKeyboard())
 			return
 		}
-		text := strings.TrimSpace(msg.CommandArguments())
-		if text == "" {
+		// Определяем источник контента: сам месседж или реплай на медиа
+		sourceMsg := msg
+		if msg.ReplyToMessage != nil {
+			sourceMsg = msg.ReplyToMessage
+		}
+
+		// Текст рассылки (из аргументов команды или подписи)
+		broadcastText := strings.TrimSpace(msg.CommandArguments())
+		if broadcastText == "" {
+			// Попробуем извлечь текст из подписи, если там была команда
+			cap := strings.TrimSpace(sourceMsg.Caption)
+			if strings.HasPrefix(cap, "/notify") {
+				after := strings.TrimSpace(cap)
+				// Уберём токен команды (/notify или /notify@bot)
+				if sp := strings.Index(after, " "); sp >= 0 {
+					broadcastText = strings.TrimSpace(after[sp+1:])
+				} else {
+					broadcastText = ""
+				}
+			}
+		}
+
+		// Есть ли медиа в исходном сообщении
+		hasPhoto := sourceMsg.Photo != nil && len(sourceMsg.Photo) > 0
+		hasAnim := sourceMsg.Animation != nil
+		hasDoc := sourceMsg.Document != nil
+		hasVideo := sourceMsg.Video != nil
+		hasMedia := hasPhoto || hasAnim || hasDoc || hasVideo
+
+		// Если нет медиа и нет текста — просим текст
+		if !hasMedia && strings.TrimSpace(broadcastText) == "" {
 			_ = updateSessionText(bot, chatID, session, stateMenu, "Укажите текст для рассылки: /notify <текст>", "HTML", mainMenuInlineKeyboard())
 			return
 		}
@@ -1179,9 +1208,52 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 				if err != nil {
 					continue
 				}
-				m := tgbotapi.NewMessage(id, text)
-				m.ParseMode = "HTML"
-				_, err = bot.Send(m)
+				if hasMedia {
+					// Сначала пробуем copyMessage (с переопределением подписи при необходимости)
+					cm := tgbotapi.NewCopyMessage(id, sourceMsg.Chat.ID, sourceMsg.MessageID)
+					if strings.TrimSpace(broadcastText) != "" {
+						cm.Caption = broadcastText
+						cm.ParseMode = "HTML"
+					} else if strings.HasPrefix(strings.TrimSpace(sourceMsg.Caption), "/notify") {
+						// Если исходная подпись содержала команду, очищаем её у получателей
+						cm.Caption = ""
+					}
+					if _, err = bot.Send(cm); err != nil {
+						// Fallback на отправку по FileID в зависимости от типа
+						switch {
+						case hasAnim:
+							cfg := tgbotapi.NewAnimation(id, tgbotapi.FileID(sourceMsg.Animation.FileID))
+							cfg.Caption = broadcastText
+							cfg.ParseMode = "HTML"
+							_, err = bot.Send(cfg)
+						case hasPhoto:
+							p := sourceMsg.Photo[len(sourceMsg.Photo)-1]
+							cfg := tgbotapi.NewPhoto(id, tgbotapi.FileID(p.FileID))
+							cfg.Caption = broadcastText
+							cfg.ParseMode = "HTML"
+							_, err = bot.Send(cfg)
+						case hasVideo:
+							cfg := tgbotapi.NewVideo(id, tgbotapi.FileID(sourceMsg.Video.FileID))
+							cfg.Caption = broadcastText
+							cfg.ParseMode = "HTML"
+							_, err = bot.Send(cfg)
+						case hasDoc:
+							cfg := tgbotapi.NewDocument(id, tgbotapi.FileID(sourceMsg.Document.FileID))
+							cfg.Caption = broadcastText
+							cfg.ParseMode = "HTML"
+							_, err = bot.Send(cfg)
+						default:
+							// На всякий случай — текстом
+							m := tgbotapi.NewMessage(id, broadcastText)
+							m.ParseMode = "HTML"
+							_, err = bot.Send(m)
+						}
+					}
+				} else {
+					m := tgbotapi.NewMessage(id, broadcastText)
+					m.ParseMode = "HTML"
+					_, err = bot.Send(m)
+				}
 				if err == nil {
 					count++
 				}
@@ -1665,7 +1737,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	text, err := buildStatusText(xrayCfg, int(userID))
 	if err != nil {
-		text = "❌ Не удалось получить статус"
+		text = "❌ не удалось получить статус"
 	}
 	email, _ := userStore.GetEmail(strconv.Itoa(int(userID)))
 	if strings.TrimSpace(email) == "" {
@@ -1674,16 +1746,16 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	refCount := userStore.GetReferralsCount(strconv.FormatInt(userID, 10))
 	refBonus := refCount * 15
 	statusText := fmt.Sprintf(
-		"👤 <b>Профиль</b>\n<b>├ 🪪 ID:</b> <code>%d</code>\n<b>├ 📧 Mail:</b> %s\n<b>└ 🎁 Рефералы</b>: %d (дней: %d)\n\n%s",
+		"👤 <b>профиль</b>\n<b>├ 🪪 id:</b> <code>%d</code>\n<b>├ 📧 mail:</b> %s\n<b>└ 🎁 рефералы</b>: %d (дней: %d)\n\n%s",
 		userID, email, refCount, refBonus, text,
 	)
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✏️ Изменить e-mail", "edit_email"),
+			tgbotapi.NewInlineKeyboardButtonData("✏️ изменить e-mail", "edit_email"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
 		),
 	)
 
@@ -1715,9 +1787,9 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	}
 	linkLine := ""
 	if strings.TrimSpace(subURL) != "" {
-		linkLine = fmt.Sprintf("\n\n<b>🔗 Подписка</b>\n<code>%s</code>", subURL)
+		linkLine = fmt.Sprintf("\n\n<b>🔗 подписка</b>\n<code>%s</code>", subURL)
 	}
-	return fmt.Sprintf("💳 <b>Подписка</b>\n<b>├ %s Статус:</b> %s\n<b>├ ⏱ Остаток:</b> %d дн.\n<b>└ 📅 Действует до:</b> %s%s", statusEmoji, statusText, days, exp, linkLine), nil
+	return fmt.Sprintf("💳 <b>подписка</b>\n<b>├ %s статус:</b> %s\n<b>├ ⏱ остаток:</b> %d дн.\n<b>└ 📅 действует до:</b> %s%s", statusEmoji, statusText, days, exp, linkLine), nil
 }
 
 func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
@@ -1789,7 +1861,7 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg 
 	userID := int64(msg.From.ID)
 	telegramUser := fmt.Sprint(userID)
 
-	waitingText := fmt.Sprintf("Готовлю доступ по тарифу %s...", plan.Title)
+	waitingText := fmt.Sprintf("готовлю доступ по тарифу %s...", plan.Title)
 	_ = updateSessionText(bot, chatID, session, stateTopUp, waitingText, "HTML", mainMenuInlineKeyboard())
 
 	if err := issuePlanAccess(bot, chatID, session, plan, xrCfg, telegramUser, userID); err != nil {
@@ -1803,14 +1875,14 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg 
 	// Определить пригласившего напрямую здесь сложно без хранения связи; пропустим если неизвестно
 
 	// Уведомление в лог-чат о покупке тарифа
-	adminText := fmt.Sprintf("💳 <b>Покупка тарифа</b>\n👤 Пользователь: <code>%d</code>\n📦 Тариф: <b>%s</b> (%d дн.)", userID, plan.Title, plan.Days)
+	adminText := fmt.Sprintf("💳 <b>покупка тарифа</b>\n👤 пользователь: <code>%d</code>\n📦 тариф: <b>%s</b> (%d дн.)", userID, plan.Title, plan.Days)
 	m := tgbotapi.NewMessage(logChatID, adminText)
 	m.ParseMode = "HTML"
 	m.DisableWebPagePreview = true
 	_, _ = bot.Send(m)
 
 	// Оставляем существующее короткое уведомление
-	sendMessageToAdmin(fmt.Sprintf("Платёж от %d за %s", msg.From.ID, plan.Title), msg.From.UserName, bot, userID)
+	sendMessageToAdmin(fmt.Sprintf("платёж от %d за %s", msg.From.ID, plan.Title), msg.From.UserName, bot, userID)
 	return nil
 }
 
@@ -1875,7 +1947,7 @@ func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id i
 	if username != "" {
 		userLink = fmt.Sprintf("<a href=\"https://t.me/%s\">@%s</a>", html.EscapeString(username), html.EscapeString(username))
 	} else {
-		userLink = fmt.Sprintf("<a href=\"tg://user?id=%d\">Профиль пользователя</a>", id)
+		userLink = fmt.Sprintf("<a href=\"tg://user?id=%d\">профиль пользователя</a>", id)
 	}
 	newText := fmt.Sprintf("%s:\n%s", userLink, html.EscapeString(text))
 	msg := tgbotapi.NewMessage(logChatID, newText)
@@ -1902,13 +1974,13 @@ func getActionName(data string) string {
 
 	// Префиксы для динамических действий
 	if strings.HasPrefix(data, "rate_") {
-		return "💸 Выбор тарифа"
+		return "💸 выбор тарифа"
 	}
 	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") {
-		return "⬅️ Предыдущий шаг инструкции"
+		return "⬅️ предыдущий шаг инструкции"
 	}
 	if strings.HasPrefix(data, "win_next_") || strings.HasPrefix(data, "android_next_") || strings.HasPrefix(data, "ios_next_") {
-		return "➡️ Следующий шаг инструкции"
+		return "➡️ следующий шаг инструкции"
 	}
 
 	// Если действие найдено в карте
@@ -1925,7 +1997,7 @@ func notifyAdmins(bot *tgbotapi.BotAPI, userID int64, username, action string) {
 	if username != "" {
 		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, username, username, userID)
 	}
-	text := fmt.Sprintf("📊 Действие: <b>%s</b>\nПользователь: %s", action, userLink)
+	text := fmt.Sprintf("📊 действие: <b>%s</b>\nпользователь: %s", action, userLink)
 	msg := tgbotapi.NewMessage(logChatID, text)
 	msg.ParseMode = "HTML"
 	msg.DisableWebPagePreview = true
@@ -1942,15 +2014,15 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(link), url.QueryEscape("Подключайся к HappyCat VPN и получай бонусы!"))
 
 	text := fmt.Sprintf(
-		"🎁 <b>Реферальная программа</b>\n\n"+
-			"<b>🔗 Твоя ссылка</b>\n<code>%s</code>\n\n"+
-			"<b>📊 Статистика</b>\n"+
-			"├ 👥 Приглашено: %d\n"+
-			"└ 🎉 Бонус: %d дн.\n\n"+
-			"<b>⚙️ Как получить +15 дней</b>\n"+
-			"• Поделись ссылкой с другом\n"+
-			"• Он переходит и активирует VPN\n"+
-			"• Ты автоматически получаешь +15 дней",
+		"🎁 <b>реферальная программа</b>\n\n"+
+			"<b>🔗 твоя ссылка</b>\n<code>%s</code>\n\n"+
+			"<b>📊 статистика</b>\n"+
+			"├ 👥 приглашено: %d\n"+
+			"└ 🎉 бонус: %d дн.\n\n"+
+			"<b>⚙️ как получить +15 дней</b>\n"+
+			"• поделись ссылкой с другом\n"+
+			"• он переходит и активирует VPN\n"+
+			"• ты автоматически получаешь +15 дней",
 		link, count, bonus,
 	)
 	kb := tgbotapi.NewInlineKeyboardMarkup(
@@ -1968,7 +2040,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 // Simple support screen
 func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "📞 <b>поддержка</b>\n\nесть вопросы? пиши: @asortiment97 либо сюда https://t.me/HappyVPNchat\nотвечаем в течении дня."
+	text := "📞 <b>поддержка</b>\n\nесть вопросы? пиши: @asortiment97\nотвечаем в течении дня."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_menu"),
