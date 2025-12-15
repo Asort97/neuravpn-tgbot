@@ -34,6 +34,11 @@ const startText = `Привет! <b>Добро пожаловать в NeuraVPN<
 
 Выбирай нужный раздел ниже 👇`
 
+const (
+	channelUsername = "@neuravpn"
+	channelURL      = "https://t.me/neuravpn"
+)
+
 // throttling map (keyed by user id and action key)
 var lastActionKey = make(map[int64]map[string]time.Time)
 
@@ -150,6 +155,40 @@ func getSession(chatID int64) *UserSession {
 	s := &UserSession{}
 	userSessions[chatID] = s
 	return s
+}
+
+func sendSubscribePrompt(bot *tgbotapi.BotAPI, chatID int64) {
+	text := "🎁 <a href=\"" + channelURL + "\">подпишитесь на наш канал</a> и получите бесплатные 7 дней"
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("перейти ↗️", channelURL),
+			tgbotapi.NewInlineKeyboardButtonData("получить", "claim_sub_bonus"),
+		),
+	)
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = kb
+	msg.DisableWebPagePreview = true
+	_, _ = bot.Send(msg)
+}
+
+func isSubscribedToChannel(bot *tgbotapi.BotAPI, userID int64) (bool, error) {
+	config := tgbotapi.GetChatMemberConfig{
+		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+			SuperGroupUsername: strings.TrimPrefix(channelUsername, "@"),
+			UserID:             userID,
+		},
+	}
+	member, err := bot.GetChatMember(config)
+	if err != nil {
+		return false, err
+	}
+	switch member.Status {
+	case "creator", "administrator", "member":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addDays int64, createIfMissing bool) (*accessInfo, error) {
@@ -1170,36 +1209,36 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	}
 
 	isNew := userStore.IsNewUser(userID)
-	if isNew {
-		_ = userStore.AddDays(userID, 7)
-		_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 7, true)
-		if referrerID != "" && referrerID != userID {
-			if err := userStore.RecordReferral(userID, referrerID); err == nil {
-				_ = userStore.AddDays(referrerID, 15)
-				_, _ = ensureXrayAccess(xrayCfg, referrerID, fallbackEmail(referrerID), 15, true)
-				if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
-					refDays, _ := userStore.GetDays(referrerID)
-					refCount := userStore.GetReferralsCount(referrerID)
-					// Красивое уведомление пригласившему
-					newUserName := msg.From.UserName
-					if newUserName == "" {
-						newUserName = fmt.Sprintf("ID:%s", userID)
-					} else {
-						newUserName = fmt.Sprintf("@%s", newUserName)
-					}
-					refMsg := fmt.Sprintf("🎉 <b>По вашей реферальной ссылке зарегистрировался %s!</b>\n\n🎁 <b>Вам начислено: +15 дней</b>\n👥 <b>Всего рефералов:</b> %d\n⏱ <b>Баланс:</b> %d дн.", newUserName, refCount, refDays)
-					nmsg := tgbotapi.NewMessage(refChatID, refMsg)
-					nmsg.ParseMode = "HTML"
-					_, _ = bot.Send(nmsg)
-
-					// Уведомление в лог-чат
-					adminMsg := fmt.Sprintf("🆕 <b>Реферал:</b> Пользователь <code>%s</code> (ID:%s) перешёл по ссылке пользователя <code>%s</code> (ID:%s)\nПригласившему начислено +15 дней.", newUserName, userID, referrerID, referrerID)
-					amsg := tgbotapi.NewMessage(logChatID, adminMsg)
-					amsg.ParseMode = "HTML"
-					_, _ = bot.Send(amsg)
+	if isNew && referrerID != "" && referrerID != userID {
+		if err := userStore.RecordReferral(userID, referrerID); err == nil {
+			_ = userStore.AddDays(referrerID, 15)
+			_, _ = ensureXrayAccess(xrayCfg, referrerID, fallbackEmail(referrerID), 15, true)
+			_ = userStore.AddDays(userID, 7)
+			_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 7, true)
+			if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
+				refDays, _ := userStore.GetDays(referrerID)
+				refCount := userStore.GetReferralsCount(referrerID)
+				newUserName := msg.From.UserName
+				if newUserName == "" {
+					newUserName = fmt.Sprintf("ID:%s", userID)
+				} else {
+					newUserName = fmt.Sprintf("@%s", newUserName)
 				}
+				refMsg := fmt.Sprintf("🎉 <b>По вашей реферальной ссылке зарегистрировался %s!</b>\n\n🎁 <b>Вам начислено: +15 дней</b>\n👥 <b>Всего рефералов:</b> %d\n⏱ <b>Баланс:</b> %d дн.", newUserName, refCount, refDays)
+				nmsg := tgbotapi.NewMessage(refChatID, refMsg)
+				nmsg.ParseMode = "HTML"
+				_, _ = bot.Send(nmsg)
+
+				adminMsg := fmt.Sprintf("🆕 <b>Реферал:</b> Пользователь <code>%s</code> (ID:%s) перешёл по ссылке пользователя <code>%s</code> (ID:%s)\nПригласившему начислено +15 дней.", newUserName, userID, referrerID, referrerID)
+				amsg := tgbotapi.NewMessage(logChatID, adminMsg)
+				amsg.ParseMode = "HTML"
+				_, _ = bot.Send(amsg)
 			}
 		}
+	}
+
+	if isNew {
+		sendSubscribePrompt(bot, chatID)
 	}
 
 	session.PendingPlanID = ""
@@ -1251,6 +1290,9 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		handleEditEmail(bot, cq, session)
 	case data == "nav_instructions":
 		handleInstructionsMenu(bot, cq, session)
+	case data == "claim_sub_bonus":
+		handleClaimSubscriptionBonus(bot, cq, session, xrCfg)
+		return
 	case data == "windows":
 		if err := startInstructionFlow(bot, chatID, session, instruct.Windows, 0); err != nil {
 			log.Printf("windows instruction error: %v", err)
@@ -1465,6 +1507,43 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 	ackCallback(bot, cq, fmt.Sprintf("Платеж за %s подтверждён", plan.Title))
 }
 
+func handleClaimSubscriptionBonus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, xrCfg *xraySettings) {
+	chatID := cq.Message.Chat.ID
+	userID := int64(cq.From.ID)
+	userIDStr := strconv.FormatInt(userID, 10)
+
+	if !userStore.IsNewUser(userIDStr) {
+		ackCallback(bot, cq, "бонус уже получен")
+		return
+	}
+
+	ok, err := isSubscribedToChannel(bot, userID)
+	if err != nil {
+		log.Printf("subscription check failed: %v", err)
+		ackCallback(bot, cq, "не удалось проверить подписку")
+		return
+	}
+	if !ok {
+		ackCallback(bot, cq, "сначала подпишитесь на канал")
+		return
+	}
+
+	if err := userStore.AddDays(userIDStr, 7); err != nil {
+		ackCallback(bot, cq, "не удалось начислить дни")
+		return
+	}
+
+	info, err := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 7, true)
+	if err != nil {
+		log.Printf("ensureXrayAccess bonus error: %v", err)
+		ackCallback(bot, cq, "не удалось выдать доступ")
+		return
+	}
+
+	_ = sendAccess(info, userIDStr, chatID, 7, userID, xrCfg, bot, session)
+	ackCallback(bot, cq, "бонус выдан")
+}
+
 func handlePreCheckout(bot *tgbotapi.BotAPI, pcq *tgbotapi.PreCheckoutQuery) {
 	ans := tgbotapi.PreCheckoutConfig{
 		PreCheckoutQueryID: pcq.ID,
@@ -1480,19 +1559,14 @@ func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	userID := int64(cq.From.ID)
 	telegramUser := fmt.Sprint(userID)
 
-	bonus := int64(0)
-	if userStore.IsNewUser(telegramUser) {
-		bonus = 7
-	}
-
-	info, err := ensureXrayAccess(xrCfg, telegramUser, fallbackEmail(telegramUser), bonus, true)
+	info, err := ensureXrayAccess(xrCfg, telegramUser, fallbackEmail(telegramUser), 0, true)
 	if err != nil {
 		log.Printf("ensureXrayAccess error: %v", err)
 		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не удалось получить доступ. Напиши в поддержку.", "", mainMenuInlineKeyboard())
 		return
 	}
 
-	if err := sendAccess(info, telegramUser, chatID, int(bonus), userID, xrCfg, bot, session); err != nil {
+	if err := sendAccess(info, telegramUser, chatID, 0, userID, xrCfg, bot, session); err != nil {
 		log.Printf("sendAccess error: %v", err)
 		_ = updateSessionText(bot, chatID, session, stateGetVPN, "Не получилось отправить ссылку.", "", mainMenuInlineKeyboard())
 		return
