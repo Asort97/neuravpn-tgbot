@@ -71,6 +71,8 @@ type DataStore interface {
 	GetSubscriptionID(userID string) (string, error)
 	AcceptPrivacy(userID string, at time.Time) error
 	IsNewUser(userID string) bool
+	IsStartBonusClaimed(userID string) (bool, error)
+	ClaimStartBonus(userID string, source string, at time.Time) (bool, error)
 	RecordReferral(newUserID, referrerID string) error
 	GetReferralsCount(userID string) int
 }
@@ -173,13 +175,20 @@ func sendSubscribePrompt(bot *tgbotapi.BotAPI, chatID int64) {
 }
 
 func isSubscribedToChannel(bot *tgbotapi.BotAPI, userID int64) (bool, error) {
-	config := tgbotapi.GetChatMemberConfig{
+	// Сначала получаем объект канала, чтобы иметь надёжный ChatID
+	chatCfg := tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{SuperGroupUsername: strings.TrimPrefix(channelUsername, "@")}}
+	chat, err := bot.GetChat(chatCfg)
+	if err != nil {
+		return false, err
+	}
+	// Затем проверяем статус участника по ChatID
+	memberCfg := tgbotapi.GetChatMemberConfig{
 		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
-			SuperGroupUsername: strings.TrimPrefix(channelUsername, "@"),
-			UserID:             userID,
+			ChatID: chat.ID,
+			UserID: userID,
 		},
 	}
-	member, err := bot.GetChatMember(config)
+	member, err := bot.GetChatMember(memberCfg)
 	if err != nil {
 		return false, err
 	}
@@ -1213,8 +1222,10 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		if err := userStore.RecordReferral(userID, referrerID); err == nil {
 			_ = userStore.AddDays(referrerID, 15)
 			_, _ = ensureXrayAccess(xrayCfg, referrerID, fallbackEmail(referrerID), 15, true)
-			_ = userStore.AddDays(userID, 7)
-			_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 7, true)
+			if ok, _ := userStore.ClaimStartBonus(userID, "referral", time.Now()); ok {
+				_ = userStore.AddDays(userID, 7)
+				_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 7, true)
+			}
 			if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
 				refDays, _ := userStore.GetDays(referrerID)
 				refCount := userStore.GetReferralsCount(referrerID)
@@ -1237,7 +1248,8 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		}
 	}
 
-	if isNew {
+	// Показываем предложение получить бонус за подписку только если стартовый бонус ещё не получен
+	if claimed, err := userStore.IsStartBonusClaimed(userID); err == nil && !claimed {
 		sendSubscribePrompt(bot, chatID)
 	}
 
@@ -1512,7 +1524,7 @@ func handleClaimSubscriptionBonus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQue
 	userID := int64(cq.From.ID)
 	userIDStr := strconv.FormatInt(userID, 10)
 
-	if !userStore.IsNewUser(userIDStr) {
+	if claimed, err := userStore.IsStartBonusClaimed(userIDStr); err == nil && claimed {
 		ackCallback(bot, cq, "бонус уже получен")
 		return
 	}
@@ -1525,6 +1537,15 @@ func handleClaimSubscriptionBonus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQue
 	}
 	if !ok {
 		ackCallback(bot, cq, "сначала подпишитесь на канал")
+		return
+	}
+
+	if ok, err := userStore.ClaimStartBonus(userIDStr, "channel", time.Now()); err != nil {
+		log.Printf("claim start bonus failed: %v", err)
+		ackCallback(bot, cq, "не удалось начислить бонус")
+		return
+	} else if !ok {
+		ackCallback(bot, cq, "бонус уже получен")
 		return
 	}
 
@@ -1608,7 +1629,8 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	telegramUser := fmt.Sprint(userID)
-	info, _ := ensureXrayAccess(cfg, telegramUser, fallbackEmail(telegramUser), 0, true)
+	// Не создаём запись и клиента при простом просмотре статуса
+	info, _ := ensureXrayAccess(cfg, telegramUser, fallbackEmail(telegramUser), 0, false)
 	days, _ := userStore.GetDays(strconv.Itoa(userID))
 	if info != nil && info.daysLeft > 0 {
 		days = info.daysLeft
