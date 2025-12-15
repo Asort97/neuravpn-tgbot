@@ -39,6 +39,13 @@ const (
 	channelURL      = "https://t.me/neuravpn"
 )
 
+// Runtime-overridable channel settings (safer than hardcoded constants for production)
+var (
+	channelUsernameEff = channelUsername
+	channelURLEff      = channelURL
+	channelChatIDEff   int64
+)
+
 // throttling map (keyed by user id and action key)
 var lastActionKey = make(map[int64]map[string]time.Time)
 
@@ -160,10 +167,10 @@ func getSession(chatID int64) *UserSession {
 }
 
 func sendSubscribePrompt(bot *tgbotapi.BotAPI, chatID int64) {
-	text := "🎁 <a href=\"" + channelURL + "\">подпишитесь на наш канал</a> и получите бесплатные 7 дней"
+	text := "🎁 <a href=\"" + channelURLEff + "\">подпишитесь на наш канал</a> и получите бесплатные 7 дней"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("перейти ↗️", channelURL),
+			tgbotapi.NewInlineKeyboardButtonURL("перейти ↗️", channelURLEff),
 			tgbotapi.NewInlineKeyboardButtonData("получить", "claim_sub_bonus"),
 		),
 	)
@@ -175,19 +182,56 @@ func sendSubscribePrompt(bot *tgbotapi.BotAPI, chatID int64) {
 }
 
 func isSubscribedToChannel(bot *tgbotapi.BotAPI, userID int64) (bool, error) {
-	// Сначала получаем объект канала, чтобы иметь надёжный ChatID
-	chatCfg := tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{SuperGroupUsername: strings.TrimPrefix(channelUsername, "@")}}
-	chat, err := bot.GetChat(chatCfg)
+	// Самый надежный вариант — использовать числовой ChatID (можно задать через ENV CHANNEL_CHAT_ID).
+	if channelChatIDEff != 0 {
+		memberCfg := tgbotapi.GetChatMemberConfig{
+			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+				ChatID: channelChatIDEff,
+				UserID: userID,
+			},
+		}
+		member, err := bot.GetChatMember(memberCfg)
+		if err != nil {
+			return false, err
+		}
+		switch member.Status {
+		case "creator", "administrator", "member":
+			return true, nil
+		default:
+			return false, nil
+		}
+	}
+
+	uname := strings.TrimSpace(channelUsernameEff)
+	if uname == "" {
+		return false, fmt.Errorf("channel username is empty")
+	}
+
+	// Try resolve chat by username (with and without '@')
+	tryGetChat := func(username string) (*tgbotapi.Chat, error) {
+		chatCfg := tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{SuperGroupUsername: strings.TrimSpace(username)}}
+		chat, err := bot.GetChat(chatCfg)
+		if err != nil {
+			return nil, err
+		}
+		return &chat, nil
+	}
+
+	chat, err := tryGetChat(uname)
 	if err != nil {
-		return false, err
+		alt := ""
+		if strings.HasPrefix(uname, "@") {
+			alt = strings.TrimPrefix(uname, "@")
+		} else {
+			alt = "@" + uname
+		}
+		chat, err = tryGetChat(alt)
+		if err != nil {
+			return false, err
+		}
 	}
-	// Затем проверяем статус участника по ChatID
-	memberCfg := tgbotapi.GetChatMemberConfig{
-		ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
-			ChatID: chat.ID,
-			UserID: userID,
-		},
-	}
+
+	memberCfg := tgbotapi.GetChatMemberConfig{ChatConfigWithUser: tgbotapi.ChatConfigWithUser{ChatID: chat.ID, UserID: userID}}
 	member, err := bot.GetChatMember(memberCfg)
 	if err != nil {
 		return false, err
@@ -458,6 +502,25 @@ func main() {
 	botToken := os.Getenv("TG_BOT_TOKEN")
 	privacyURL = os.Getenv("PRIVACY_URL")
 	dbDSN := strings.TrimSpace(os.Getenv("DB_DSN"))
+
+	// Optional: override channel settings without code changes
+	if v := strings.TrimSpace(os.Getenv("CHANNEL_USERNAME")); v != "" {
+		if !strings.HasPrefix(v, "@") {
+			v = "@" + v
+		}
+		channelUsernameEff = v
+		if strings.TrimSpace(channelURLEff) == strings.TrimSpace(channelURL) {
+			channelURLEff = "https://t.me/" + strings.TrimPrefix(v, "@")
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("CHANNEL_URL")); v != "" {
+		channelURLEff = v
+	}
+	if v := strings.TrimSpace(os.Getenv("CHANNEL_CHAT_ID")); v != "" {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
+			channelChatIDEff = id
+		}
+	}
 
 	// Parse admin IDs
 	adminIDsStr := os.Getenv("ADMIN_IDS")
