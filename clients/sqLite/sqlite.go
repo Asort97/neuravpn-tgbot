@@ -17,15 +17,18 @@ type Store struct {
 }
 
 type UserData struct {
-	Days           int64  `json:"days"`
-	CertRef        string `json:"certref"`
-	LastDeduct     string `json:"last_deduct"`     // ISO8601 timestamp
-	ReferredBy     string `json:"referred_by"`     // ID пользователя, который пригласил
-	ReferralUsed   bool   `json:"referral_used"`   // использовал ли свой реферальный бонус
-	ReferralsCount int    `json:"referrals_count"` // сколько человек пригласил
-	Email          string `json:"email"`
-	SubscriptionID string `json:"subscription_id"`
-	ConsentAt      string `json:"consent_at"` // ISO8601 timestamp, когда принял политику
+	Days                int64  `json:"days"`
+	CertRef             string `json:"certref"`
+	LastDeduct          string `json:"last_deduct"`     // ISO8601 timestamp
+	ReferredBy          string `json:"referred_by"`     // ID пользователя, который пригласил
+	ReferralUsed        bool   `json:"referral_used"`   // использовал ли свой реферальный бонус
+	ReferralsCount      int    `json:"referrals_count"` // сколько человек пригласил
+	Email               string `json:"email"`
+	SubscriptionID      string `json:"subscription_id"`
+	StartBonusClaimed   bool   `json:"start_bonus_claimed"`
+	StartBonusSource    string `json:"start_bonus_source"`
+	StartBonusClaimedAt string `json:"start_bonus_claimed_at"`
+	ConsentAt           string `json:"consent_at"` // ISO8601 timestamp, когда принял политику
 }
 
 var (
@@ -315,6 +318,44 @@ func (s *Store) IsNewUser(userID string) bool {
 
 	_, exists := db[userID]
 	return !exists
+}
+
+func (s *Store) IsStartBonusClaimed(userID string) (bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return false, nil
+	}
+	return ud.StartBonusClaimed, nil
+}
+
+// ClaimStartBonus marks start bonus as claimed for a user. Returns true if claimed now, false if already claimed.
+func (s *Store) ClaimStartBonus(userID string, source string, at time.Time) (bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud := db[userID]
+	if ud.StartBonusClaimed {
+		return false, nil
+	}
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.StartBonusClaimed = true
+	ud.StartBonusSource = strings.TrimSpace(source)
+	if at.IsZero() {
+		at = time.Now()
+	}
+	ud.StartBonusClaimedAt = at.UTC().Format(time.RFC3339)
+	db[userID] = ud
+
+	return true, s.saveUsersLocked()
 }
 
 // RecordReferral записывает реферальную связь между новым пользователем и пригласившим

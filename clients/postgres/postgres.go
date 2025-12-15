@@ -42,12 +42,24 @@ CREATE TABLE IF NOT EXISTS users (
     referrals_count INT NOT NULL DEFAULT 0,
     email TEXT,
 	subscription_id TEXT,
+	start_bonus_claimed BOOLEAN NOT NULL DEFAULT FALSE,
+	start_bonus_source TEXT,
+	start_bonus_claimed_at TIMESTAMPTZ,
     consent_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `
-	_, err := s.pool.Exec(ctx, schema)
+	if _, err := s.pool.Exec(ctx, schema); err != nil {
+		return err
+	}
+	// Ensure new columns exist for already-created tables
+	_, err := s.pool.Exec(ctx, `
+		ALTER TABLE users
+			ADD COLUMN IF NOT EXISTS start_bonus_claimed BOOLEAN NOT NULL DEFAULT FALSE,
+			ADD COLUMN IF NOT EXISTS start_bonus_source TEXT,
+			ADD COLUMN IF NOT EXISTS start_bonus_claimed_at TIMESTAMPTZ;
+	`)
 	return err
 }
 
@@ -199,6 +211,49 @@ func (s *Store) IsNewUser(userID string) bool {
 		return true
 	}
 	return false
+}
+
+func (s *Store) IsStartBonusClaimed(userID string) (bool, error) {
+	ctx := context.Background()
+	var claimed bool
+	err := s.pool.QueryRow(ctx, `SELECT start_bonus_claimed FROM users WHERE id = $1`, userID).Scan(&claimed)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return claimed, nil
+}
+
+// ClaimStartBonus atomically marks start bonus as claimed for a user.
+// Returns true if it was claimed now, false if already claimed.
+func (s *Store) ClaimStartBonus(userID string, source string, at time.Time) (bool, error) {
+	ctx := context.Background()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	// Ensure user exists
+	if err := s.ensureUser(ctx, userID); err != nil {
+		return false, err
+	}
+	var updated int
+	err := s.pool.QueryRow(ctx, `
+		UPDATE users
+		SET start_bonus_claimed = TRUE,
+			start_bonus_source = $2,
+			start_bonus_claimed_at = $3,
+			updated_at = NOW()
+		WHERE id = $1 AND start_bonus_claimed = FALSE
+		RETURNING 1
+	`, userID, strings.TrimSpace(source), at.UTC()).Scan(&updated)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) RecordReferral(newUserID, referrerID string) error {
