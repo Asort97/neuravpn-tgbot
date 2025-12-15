@@ -20,19 +20,19 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const startText = `Привет! <b>Добро пожаловать в NeuraVPN</b> 😺🔒
+const startText = `<b>добро пожаловать в neuravpn</b> 😺
 
-Здесь ты можешь:
-• Получить или продлить доступ к VPN
-• Оплатить дни и сразу активировать
-• Узнать статус и остаток
-• Пригласить друзей и получать бонусы
-• Открыть подробные инструкции
-• Связаться с поддержкой 24/7
+здесь ты можешь:
+• получить или продлить доступ к VPN
+• оплатить дни и сразу активировать
+• узнать статус и остаток
+• пригласить друзей и получать бонусы
+• открыть подробные инструкции
+• связаться с поддержкой 24/7
 
-<a href="https://t.me/neuravpn">Наш новостной канал</a> 📰
+<a href="https://t.me/neuravpn">наш новостной канал</a> 📰
 
-Выбирай нужный раздел ниже 👇`
+выбирай нужный раздел ниже 👇`
 
 const (
 	channelUsername = "@neuravpn"
@@ -358,7 +358,7 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 	}
 
 	text := fmt.Sprintf(
-		"🔐 <b>Доступ готов!</b>\n🔗 Ссылка: %s\n📆 Осталось дней: %d\n⏳ Действует до: %s\n🆔 ID: <code>%d</code>",
+		"🔐 <b>доступ готов!</b>\n🔗 ссылка: %s\n📆 осталось дней: %d\n⏳ действует до: %s\n🆔 ID: <code>%d</code>",
 		linkLine, info.daysLeft, exp, userID,
 	)
 	if addedDays > 0 {
@@ -370,10 +370,10 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📚 Инструкции", "nav_instructions"),
+			tgbotapi.NewInlineKeyboardButtonData("📚 инструкции", "nav_instructions"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🏠 Меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
 		),
 	)
 	return updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
@@ -454,16 +454,16 @@ func replaceSessionWithDocument(bot *tgbotapi.BotAPI, chatID int64, session *Use
 func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔐 Подключить VPN", "nav_get_vpn"),
-			tgbotapi.NewInlineKeyboardButtonData("💰 Пополнить баланс", "nav_topup"),
+			tgbotapi.NewInlineKeyboardButtonData("🔐 подключить vpn", "nav_get_vpn"),
+			tgbotapi.NewInlineKeyboardButtonData("💰 пополнить баланс", "nav_topup"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("👤 Профиль", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("👤 профиль", "nav_status"),
 			tgbotapi.NewInlineKeyboardButtonData("🎁 +15 дней", "nav_referral"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📚 Инструкции", "nav_instructions"),
-			tgbotapi.NewInlineKeyboardButtonData("📞 Поддержка", "nav_support"),
+			tgbotapi.NewInlineKeyboardButtonData("📚 инструкции", "nav_instructions"),
+			tgbotapi.NewInlineKeyboardButtonData("📞 поддержка", "nav_support"),
 		),
 	)
 }
@@ -491,7 +491,7 @@ func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
 		rows = append(rows, row)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_menu"),
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_menu"),
 	))
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
@@ -1722,30 +1722,30 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 
 func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "✏️ Отправь новый e-mail сообщением."
+	text := "✏️ отправь новый e-mail сообщением."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_status"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateEditEmail, text, "HTML", kb)
-	ackCallback(bot, cq, "Жду e-mail")
+	ackCallback(bot, cq, "жду e-mail")
 }
 
 func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
 	instruct.ResetState(chatID)
-	text := "📚 <b>Инструкции</b>\nВыбери платформу:"
+	text := "📚 <b>инструкции</b>\nвыбери платформу:"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🖥 Windows", "windows"),
-			tgbotapi.NewInlineKeyboardButtonData("🤖 Android", "android"),
+			tgbotapi.NewInlineKeyboardButtonData("🖥 windows", "windows"),
+			tgbotapi.NewInlineKeyboardButtonData("🤖 android", "android"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🍎 iOS", "ios"),
+			tgbotapi.NewInlineKeyboardButtonData("🍎 ios", "ios"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateInstructions, text, "HTML", kb)
@@ -1955,10 +1955,10 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 	)
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("📤 Поделиться", shareURL),
+			tgbotapi.NewInlineKeyboardButtonURL("📤 поделиться", shareURL),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ Меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
@@ -1968,12 +1968,12 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 // Simple support screen
 func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "📞 <b>Поддержка</b>\n\nЕсть вопросы? Пиши: @asortiment97 либо сюда https://t.me/HappyVPNchat\nОтвечаем в течении дня."
+	text := "📞 <b>поддержка</b>\n\nесть вопросы? пиши: @asortiment97 либо сюда https://t.me/HappyVPNchat\nотвечаем в течении дня."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
-	ackCallback(bot, cq, "Поддержка")
+	ackCallback(bot, cq, "поддержка")
 }
