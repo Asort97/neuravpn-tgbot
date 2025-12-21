@@ -40,7 +40,7 @@ const startText = `добро пожаловать!
 без ограничения исходной скорости вашего интернета.
 можете проверить.
 
-наш новостной канал (https://t.me/neuravpn)`
+<a href="https://t.me/neuravpn">наш новостной канал</a>`
 
 // Runtime-overridable channel settings (safer than hardcoded constants for production)
 var (
@@ -170,23 +170,8 @@ func getSession(chatID int64) *UserSession {
 	return s
 }
 
-func sendSubscribePrompt(bot *tgbotapi.BotAPI, chatID int64) {
-	text := fmt.Sprintf("\u043a\u0441\u0442\u0430\u0442\u0438, \u0443 \u043d\u0430\u0441 \u0435\u0441\u0442\u044c \u043d\u043e\u0432\u043e\u0441\u0442\u043d\u043e\u0439 \u043a\u0430\u043d\u0430\u043b.\n\u0435\u0441\u043b\u0438 \u043f\u043e\u0434\u043f\u0438\u0448\u0435\u0448\u044c\u0441\u044f \u2014 \u0434\u043e\u0431\u0430\u0432\u0438\u043c +%d \u0434\u043d\u0435\u0439 \u0434\u043e\u0441\u0442\u0443\u043f\u0430. \u0431\u043e\u043d\u0443\u0441 \u043c\u043e\u0436\u043d\u043e \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c \u0441\u0440\u0430\u0437\u0443 \u043a\u043d\u043e\u043f\u043a\u043e\u0439 \u043d\u0438\u0436\u0435.", channelBonusDays)
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("\u043f\u043e\u0434\u043f\u0438\u0441\u0430\u0442\u044c\u0441\u044f \u043d\u0430 \u043a\u0430\u043d\u0430\u043b", channelURLEff),
-			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("\u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c +%d \u0434\u043d\u0435\u0439", channelBonusDays), "claim_sub_bonus"),
-		),
-	)
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "HTML"
-	msg.ReplyMarkup = kb
-	msg.DisableWebPagePreview = true
-	_, _ = bot.Send(msg)
-}
-
 func isSubscribedToChannel(bot *tgbotapi.BotAPI, userID int64) (bool, error) {
-	// Самый надежный вариант — использовать числовой ChatID (можно задать через ENV CHANNEL_CHAT_ID).
+	// Самый надежный вариант - использовать числовой ChatID (можно задать через ENV CHANNEL_CHAT_ID).
 	if channelChatIDEff != 0 {
 		memberCfg := tgbotapi.GetChatMemberConfig{
 			ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
@@ -1478,10 +1463,7 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 
 	session.PendingPlanID = ""
 	_ = showMainMenu(bot, chatID, session)
-
-	if claimed, err := userStore.IsStartBonusClaimed(userID); err == nil && !claimed {
-		sendChannelBonusOffer(bot, chatID)
-	}
+	sendChannelBonusOffer(bot, chatID)
 }
 
 func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
