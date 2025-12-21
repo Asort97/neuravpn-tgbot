@@ -33,14 +33,14 @@ const startText = `добро пожаловать!
 
 этот бот поможет подключить neuravpn с понятными инструкциями для любой платформы.
 
-перед покупкой основного тарифа мы предлагаем пробный период — 7 дней.
+перед покупкой основного тарифа мы предлагаем пробный период - 7 дней.
 попробуйте. мы не заставляем.
 
 гарантируем стабильный и бесперебойный доступ ко всем заблокированным ресурсам
 без ограничения исходной скорости вашего интернета.
 можете проверить.
 
-<a href="https://t.me/neuravpn">наш новостной канал</a>`
+наш новостной канал (https://t.me/neuravpn)`
 
 // Runtime-overridable channel settings (safer than hardcoded constants for production)
 var (
@@ -478,15 +478,14 @@ func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("🎁 +15 дней", "nav_referral"),
 			tgbotapi.NewInlineKeyboardButtonData("📞 поддержка", "nav_support"),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("подписаться на канал", channelURLEff),
-			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("получить +%d дней", channelBonusDays), "claim_sub_bonus"),
-		),
 	)
 }
 
 func composeMenuText() string {
-	base := strings.TrimSpace(fmt.Sprintf(startText, startTrialDays, channelBonusDays))
+	base := strings.TrimSpace(startText)
+	if strings.Contains(base, "%") {
+		base = strings.TrimSpace(fmt.Sprintf(startText, startTrialDays, channelBonusDays))
+	}
 	if base == "" {
 		return "Добро пожаловать! Используйте меню ниже, чтобы подключить VPN."
 	}
@@ -496,6 +495,22 @@ func composeMenuText() string {
 func showMainMenu(bot *tgbotapi.BotAPI, chatID int64, session *UserSession) error {
 	text := composeMenuText()
 	return updateSessionText(bot, chatID, session, stateMenu, text, "HTML", mainMenuInlineKeyboard())
+}
+
+func sendChannelBonusOffer(bot *tgbotapi.BotAPI, chatID int64) {
+	text := fmt.Sprintf(
+		"кстати, у нас есть новостной канал.\n\nесли подпишешься — добавим +%d дней доступа.",
+		channelBonusDays,
+	)
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.DisableWebPagePreview = true
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("подписаться", channelURLEff),
+			tgbotapi.NewInlineKeyboardButtonData("проверить", "claim_sub_bonus"),
+		),
+	)
+	_, _ = bot.Send(msg)
 }
 
 func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
@@ -1463,6 +1478,10 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 
 	session.PendingPlanID = ""
 	_ = showMainMenu(bot, chatID, session)
+
+	if claimed, err := userStore.IsStartBonusClaimed(userID); err == nil && !claimed {
+		sendChannelBonusOffer(bot, chatID)
+	}
 }
 
 func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
