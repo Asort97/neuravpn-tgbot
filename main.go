@@ -2155,17 +2155,12 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 		"🎁 +15 дней к доступу\n\n"+
 			"кстати, у нас есть реферальная программа.\nприводишь друга → получаешь +15 дней доступа.\n\n"+
 			"🔗 твоя ссылка\n<code>%s</code>\n\n"+
-			"пришло друзей: %d\nнакопленный бонус: %d дней\n\n"+
-			"ещё бонус: подпишись на канал и забери +%d дней ниже.",
-		link, count, bonus, channelBonusDays,
+			"пришло друзей: %d\nнакопленный бонус: %d дней.",
+		link, count, bonus,
 	)
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonURL("поделиться ссылкой", shareURL),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("подписаться на канал", channelURLEff),
-			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("получить +%d дней", channelBonusDays), "claim_sub_bonus"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
