@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log"
@@ -570,6 +571,49 @@ func sendStarsInvoice(bot *tgbotapi.BotAPI, chatID int64, plan RatePlan) error {
 
 	_, err := bot.Send(inv)
 	return err
+}
+
+func createStarsInvoiceLink(bot *tgbotapi.BotAPI, plan RatePlan) (string, error) {
+	stars := starsAmountForPlan(plan)
+	prices := []tgbotapi.LabeledPrice{
+		{Label: plan.Title, Amount: stars},
+	}
+
+	payload := starsPayloadPrefix + plan.ID
+	startParam := "neuravpn_" + plan.ID
+
+	pricesBytes, err := json.Marshal(prices)
+	if err != nil {
+		return "", err
+	}
+
+	// Telegram requires suggested_tip_amounts to be an array, not null.
+	tipsBytes, err := json.Marshal([]int{})
+	if err != nil {
+		return "", err
+	}
+
+	params := tgbotapi.Params{
+		"title":                 "NeuraVPN",
+		"description":           fmt.Sprintf("Доступ к NeuraVPN на %d дней.", plan.Days),
+		"payload":               payload,
+		"provider_token":        "",
+		"currency":              starsCurrency,
+		"prices":                string(pricesBytes),
+		"start_parameter":       startParam,
+		"suggested_tip_amounts": string(tipsBytes),
+	}
+
+	resp, err := bot.MakeRequest("createInvoiceLink", params)
+	if err != nil {
+		return "", err
+	}
+
+	var link string
+	if err := json.Unmarshal(resp.Result, &link); err != nil {
+		return "", err
+	}
+	return link, nil
 }
 
 func main() {
@@ -1618,12 +1662,28 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			return
 		}
 		session.PendingPlanID = p.ID
-		if err := sendStarsInvoice(bot, chatID, p); err != nil {
-			log.Printf("sendStarsInvoice error: %v", err)
-			ackCallback(bot, cq, "не удалось выставить счёт")
+		link, err := createStarsInvoiceLink(bot, p)
+		if err != nil {
+			log.Printf("createStarsInvoiceLink error: %v", err)
+			ackCallback(bot, cq, "не удалось создать ссылку")
 			return
 		}
-		ackCallback(bot, cq, "счёт выставлен")
+		stars := starsAmountForPlan(p)
+		text := fmt.Sprintf(
+			"💰 покупка доступа\n\nтариф: %s\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nнажми «оплатить ⭐».",
+			p.Title, p.Days, p.Amount, stars,
+		)
+		kb := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonURL("оплатить ⭐", link),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_topup"),
+				tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
+			),
+		)
+		_ = updateSessionText(bot, chatID, session, stateChoosePay, text, "", kb)
+		ackCallback(bot, cq, "готово")
 		return
 	case strings.HasPrefix(data, "pay_card_"):
 		id := strings.TrimPrefix(data, "pay_card_")
