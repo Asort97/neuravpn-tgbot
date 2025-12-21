@@ -565,6 +565,8 @@ func sendStarsInvoice(bot *tgbotapi.BotAPI, chatID int64, plan RatePlan) error {
 		starsCurrency,
 		prices,
 	)
+	// tgbotapi sends nil SuggestedTipAmounts as JSON null, but Telegram expects an array.
+	inv.SuggestedTipAmounts = []int{}
 
 	_, err := bot.Send(inv)
 	return err
