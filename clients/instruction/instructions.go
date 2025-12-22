@@ -61,11 +61,11 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		photoPath string
 		caption   string
 	}{
-		{"", `Скачайте <a href="https://github.com/Mahdi-zarei/nekoray/releases/download/4.3.5/nekoray-4.3.5-2025-05-16-windows64.zip">Nekoray</a>`},
-		{"", "После завершения загрузки выполните следующие действия:\n1) Найдите загруженный файл nekoray-windows64.zip.\n2) Щелкните правой кнопкой мыши на файле и выберите 'Извлечь все…' или воспользуйтесь архиватором, например, WinRAR или 7-Zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
-		{"", "Откройте папку с распакованными файлами. Найдите файл nekobox.exe. Дважды щелкните по нему, чтобы запустить программу."},
-		{"InstructionPhotos/Windows/0.png", "В программе нажмите на кнопку 'Сервера' и далее 'Добавить профиль из буфера обмена' (Предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
-		{"InstructionPhotos/Windows/1.png", "Активируйте режим TUN и запустите конфигурацию, нажав по конфигу правой кнопкой мыши и выбрав опцию Запуск. VPN работает!"},
+		{"", `скачайте <a href="https://github.com/Mahdi-zarei/nekoray/releases/download/4.3.5/nekoray-4.3.5-2025-05-16-windows64.zip">nekoray</a>`},
+		{"", "после завершения загрузки выполните следующие действия:\n1) найдите загруженный файл nekoray-windows64.zip.\n2) щелкните правой кнопкой мыши на файле и выберите 'извлечь все…' или воспользуйтесь архиватором, например, winrar или 7-zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
+		{"", "откройте папку с распакованными файлами. найдите файл nekobox.exe. дважды щелкните по нему, чтобы запустить программу."},
+		{"InstructionPhotos/Windows/0.png", "в программе нажмите на кнопку 'сервера' и далее 'добавить профиль из буфера обмена' (предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
+		{"InstructionPhotos/Windows/1.png", "активируйте режим tun и запустите конфигурацию, нажав по конфигу правой кнопкой мыши и выбрав опцию запуск работает!"},
 	}
 
 	// Границы
@@ -80,24 +80,24 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	var row []tgbotapi.InlineKeyboardButton
 
 	if step > 0 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("win_prev_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", fmt.Sprintf("win_prev_%d", step)))
 	}
-	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("Шаг %d/%d", step+1, len(steps)), "win_current"))
+	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "win_current"))
 	if step < len(steps)-1 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("Вперёд ➡️", fmt.Sprintf("win_next_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд ➡️", fmt.Sprintf("win_next_%d", step)))
 	}
 	rows = append(rows, row)
 
 	if step == 0 {
 		linkRow := tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://github.com/Mahdi-zarei/nekoray/releases/download/4.3.5/nekoray-4.3.5-2025-05-16-windows64.zip"),
+			tgbotapi.NewInlineKeyboardButtonURL("скачать ↗️", "https://github.com/Mahdi-zarei/nekoray/releases/download/4.3.5/nekoray-4.3.5-2025-05-16-windows64.zip"),
 		)
 
 		rows = append(rows, linkRow)
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("❌ Выйти", "nav_instructions"),
+		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -180,9 +180,9 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Android/0.jpg", `Скачайте <a href="https://play.google.com/store/apps/details?id=com.happproxy">Happ - Proxy Utility</a> из Google Play`},
-		{"InstructionPhotos/Android/1.jpg", "Заходим в приложение и вставляем ключ из буфера обмена (Предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
-		{"InstructionPhotos/Android/2.jpg", "Далее жмём на кнопку включения и VPN работает!:"},
+		{"InstructionPhotos/Android/0.jpg", `скачайте <a href="https://play.google.com/store/apps/details?id=com.happproxy">happ - proxy utility</a> из Google Play`},
+		{"InstructionPhotos/Android/1.jpg", "заходим в приложение и вставляем ключ из буфера обмена (предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
+		{"InstructionPhotos/Android/2.jpg", "далее жмём на кнопку включения и vpn работает!"},
 	}
 
 	// Границы
@@ -197,25 +197,25 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	var row []tgbotapi.InlineKeyboardButton
 
 	if step > 0 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("android_prev_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", fmt.Sprintf("android_prev_%d", step)))
 	}
-	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("Android %d/%d", step+1, len(steps)), "android_current"))
+	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "android_current"))
 	if step < len(steps)-1 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("Вперёд ➡️", fmt.Sprintf("android_next_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд ➡️", fmt.Sprintf("android_next_%d", step)))
 	}
 
 	rows = append(rows, row)
 
 	if step == 0 {
 		linkRow := tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://play.google.com/store/apps/details?id=com.happproxy"),
+			tgbotapi.NewInlineKeyboardButtonURL("скачать ↗️", "https://play.google.com/store/apps/details?id=com.happproxy"),
 		)
 
 		rows = append(rows, linkRow)
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("❌ Выйти", "nav_instructions"),
+		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -297,10 +297,10 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Ios/0.png", `Скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">V2RayTun</a> из App Store`},
-		{"InstructionPhotos/Ios/1.png", "Скопируйте ключ, который получили (начинается на vless://...)"},
-		{"InstructionPhotos/Ios/2.png", "Откройте V2RayTun и нажмите на + в правом верхнем углу"},
-		{"InstructionPhotos/Ios/3.png", "Выберите 'Импорт из буфера', подтвердите и нажмите 'Подключиться'"},
+		{"InstructionPhotos/Ios/0.png", `скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">v2raytun</a> из app store`},
+		{"InstructionPhotos/Ios/1.png", "скопируйте ключ, который получили (начинается на https://sub.static....)"},
+		{"InstructionPhotos/Ios/2.png", "откройте V2RayTun и нажмите на + в правом верхнем углу"},
+		{"InstructionPhotos/Ios/3.png", "выберите 'импорт из буфера', подтвердите и нажмите 'Подключиться'"},
 	}
 
 	// Границы
@@ -315,24 +315,24 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	var row []tgbotapi.InlineKeyboardButton
 
 	if step > 0 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("ios_prev_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", fmt.Sprintf("ios_prev_%d", step)))
 	}
-	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("iOS %d/%d", step+1, len(steps)), "ios_current"))
+	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "ios_current"))
 	if step < len(steps)-1 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("Вперёд ➡️", fmt.Sprintf("ios_next_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд ➡️", fmt.Sprintf("ios_next_%d", step)))
 	}
 
 	rows = append(rows, row)
 
 	if step == 0 {
 		linkRow := tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("Скачать ↗️", "https://apps.apple.com/kz/app/v2raytun/id6476628951"),
+			tgbotapi.NewInlineKeyboardButtonURL("скачать ↗️", "https://apps.apple.com/kz/app/v2raytun/id6476628951"),
 		)
 		rows = append(rows, linkRow)
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("❌ Выйти", "nav_instructions"),
+		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
