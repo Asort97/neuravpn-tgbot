@@ -1509,7 +1509,10 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 
 	session.PendingPlanID = ""
 	_ = showMainMenu(bot, chatID, session)
-	sendChannelBonusOffer(bot, chatID)
+
+	if claimed, err := userStore.IsStartBonusClaimed(userID); err == nil && !claimed {
+		sendChannelBonusOffer(bot, chatID)
+	}
 }
 
 func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
