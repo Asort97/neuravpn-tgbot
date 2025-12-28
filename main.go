@@ -364,7 +364,7 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 наше приложение для ios, android и windows сейчас в разработке, но мы нашли оптимальный компромисс.
 временный доступ осуществляется через сторонние клиенты — они отлично работают!
 
-ваш ключ (подключение к neuravpn):
+<b>ваш ключ (подключение к neuravpn):</b>
 %s
 (нажмите чтобы скопировать)
 перейдите в раздел «инструкции» — мы подробно объясним, что и куда нужно вставить.
@@ -778,8 +778,8 @@ func main() {
 				_, _ = bot.Send(msg)
 				log.Printf("[XRAY] re-login failed: %v", err)
 			} else {
-				msg := tgbotapi.NewMessage(logChatID, "✅ Релогин к Xray прошел успешно")
-				_, _ = bot.Send(msg)
+				// msg := tgbotapi.NewMessage(logChatID, "✅ Релогин к Xray прошел успешно")
+				// _, _ = bot.Send(msg)
 				log.Printf("[XRAY] re-login success")
 			}
 		}
