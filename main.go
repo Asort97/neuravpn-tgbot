@@ -328,6 +328,13 @@ func fallbackEmail(userID string) string {
 	return fmt.Sprintf("%s@happycat", userID)
 }
 
+func formatExpiryUTC(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format("02.01.2006 15:04 UTC")
+}
+
 func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays int, userID int64, cfg *xraySettings, bot *tgbotapi.BotAPI, session *UserSession) error {
 	if info == nil || info.client == nil {
 		return fmt.Errorf("no access info")
@@ -335,7 +342,7 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 
 	exp := "—"
 	if !info.expireAt.IsZero() {
-		exp = info.expireAt.UTC().Format("02.01.2006 15:04 MST")
+		exp = formatExpiryUTC(info.expireAt)
 	}
 
 	left := "0 дней"
@@ -359,9 +366,8 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 			"временный доступ осуществляется через сторонние клиенты — они отлично работают!\n\n"+
 			"ваш ключ (подключение к neuravpn):\n%s\n(нажмите чтобы скопировать)\n"+
 			"перейдите в раздел «инструкции» — мы подробно объясним, что и куда нужно вставить.\n\n"+
-			"оставшееся время / действует до:\n%s\n\n"+
-			"ID:<code>%d</code>",
-		keyLine, combined, userID,
+			"оставшееся время / действует до:\n%s\n"+
+			keyLine, combined,
 	)
 	if addedDays > 0 {
 		text += fmt.Sprintf("\n\n✨ Начислено: +%d дней", addedDays)
@@ -458,7 +464,7 @@ func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔌 подключить VPN", "nav_get_vpn"),
-			tgbotapi.NewInlineKeyboardButtonData("👤 профиль", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("👤 профиль/оплата", "nav_status"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🎁 +15 дней", "nav_referral"),
@@ -1928,22 +1934,24 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	if strings.TrimSpace(email) == "" {
 		email = "не указан"
 	}
+	emailEsc := html.EscapeString(email)
 	refCount := userStore.GetReferralsCount(userIDStr)
 	refBonus := refCount * referralBonusDays
 
 	header := fmt.Sprintf(
-		"👤 профиль\n🪪 id: %d\n📧 mail: %s\n🎁 рефералы: %d (дней: %d)",
-		userID, email, refCount, refBonus,
+		"👤 профиль\n🪪 id: <code>%d</code>\n📧 mail: %s\n🎁 рефералы: %d (дней: %d)",
+		userID, emailEsc, refCount, refBonus,
 	)
 
 	var accessBlock string
 	if days > 0 {
-		expStr := ""
+		expTime := time.Time{}
 		if info != nil && !info.expireAt.IsZero() {
-			expStr = info.expireAt.Format("02.01.2006 15:04")
+			expTime = info.expireAt
 		} else {
-			expStr = time.Now().Add(time.Duration(days) * 24 * time.Hour).Format("02.01.2006 15:04")
+			expTime = time.Now().UTC().Add(time.Duration(days) * 24 * time.Hour)
 		}
+		expStr := formatExpiryUTC(expTime)
 		accessBlock = fmt.Sprintf(
 			"\n\nу вас есть доступ к neuravpn 🟢\nон активен ещё %d дней\nдо %s\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!",
 			days, expStr,
@@ -1966,7 +1974,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		),
 	)
 
-	_ = updateSessionText(bot, chatID, session, stateStatus, profileText, "", kb)
+	_ = updateSessionText(bot, chatID, session, stateStatus, profileText, "HTML", kb)
 }
 func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	telegramUser := fmt.Sprint(userID)
@@ -1984,7 +1992,7 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	}
 	exp := "-"
 	if info != nil && !info.expireAt.IsZero() {
-		exp = info.expireAt.Format("02.01.2006 15:04")
+		exp = formatExpiryUTC(info.expireAt)
 	}
 	// Always show subscription URL instead of raw VLESS
 	subURL := ""
