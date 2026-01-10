@@ -3,6 +3,8 @@ package instruct
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -229,7 +231,11 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			media := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
+			file, err := animationFile(steps[step].photoPath)
+			if err != nil {
+				return state.MessageID, err
+			}
+			media := tgbotapi.NewInputMediaAnimation(file)
 			media.Caption = steps[step].caption
 			media.ParseMode = "HTML"
 
@@ -423,7 +429,12 @@ func sendInstructionPhoto(bot *tgbotapi.BotAPI, chatID int64, photoPath, caption
 }
 
 func sendInstructionAnimation(bot *tgbotapi.BotAPI, chatID int64, animationPath, caption string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
-	animation := tgbotapi.NewAnimation(chatID, tgbotapi.FilePath(animationPath))
+	file, err := animationFile(animationPath)
+	if err != nil {
+		log.Printf("read animation failed: %v", err)
+		return 0, err
+	}
+	animation := tgbotapi.NewAnimation(chatID, file)
 	animation.Caption = caption
 	animation.ParseMode = "HTML"
 	animation.ReplyMarkup = kb
@@ -433,6 +444,15 @@ func sendInstructionAnimation(bot *tgbotapi.BotAPI, chatID int64, animationPath,
 		return 0, err
 	}
 	return sent.MessageID, nil
+}
+
+func animationFile(path string) (tgbotapi.RequestFileData, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return tgbotapi.FileBytes{}, err
+	}
+	name := filepath.Base(path)
+	return tgbotapi.FileBytes{Name: name, Bytes: data}, nil
 }
 
 func sendInstructionText(bot *tgbotapi.BotAPI, chatID int64, text string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
