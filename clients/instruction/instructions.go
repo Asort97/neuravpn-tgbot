@@ -3,8 +3,6 @@ package instruct
 import (
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -23,6 +21,47 @@ type InstructionState struct {
 	MessageID   int
 	ChatID      int64
 	HasImage    bool
+}
+
+type editMessageAnimationConfig struct {
+	tgbotapi.BaseEdit
+	Media tgbotapi.InputMediaAnimation
+}
+
+func (editMessageAnimationConfig) method() string {
+	return "editMessageMedia"
+}
+
+func (config editMessageAnimationConfig) params() (tgbotapi.Params, error) {
+	params := make(tgbotapi.Params)
+	if config.InlineMessageID != "" {
+		params["inline_message_id"] = config.InlineMessageID
+	} else {
+		params.AddFirstValid("chat_id", config.ChatID, config.ChannelUsername)
+		params.AddNonZero("message_id", config.MessageID)
+	}
+
+	if err := params.AddInterface("reply_markup", config.ReplyMarkup); err != nil {
+		return params, err
+	}
+
+	media := config.Media
+	if media.Media.NeedsUpload() {
+		media.Media = tgbotapi.FileID("attach://file-0")
+	}
+
+	err := params.AddInterface("media", media)
+	return params, err
+}
+
+func (config editMessageAnimationConfig) files() []tgbotapi.RequestFile {
+	if !config.Media.Media.NeedsUpload() {
+		return nil
+	}
+	return []tgbotapi.RequestFile{{
+		Name: "file-0",
+		Data: config.Media.Media,
+	}}
 }
 
 var (
@@ -231,15 +270,11 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			file, err := animationFile(steps[step].photoPath)
-			if err != nil {
-				return state.MessageID, err
-			}
-			media := tgbotapi.NewInputMediaAnimation(file)
+			media := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
 			media.Caption = steps[step].caption
 			media.ParseMode = "HTML"
 
-			edit := tgbotapi.EditMessageMediaConfig{
+			edit := editMessageAnimationConfig{
 				BaseEdit: tgbotapi.BaseEdit{
 					ChatID:      chatID,
 					MessageID:   state.MessageID,
@@ -429,12 +464,7 @@ func sendInstructionPhoto(bot *tgbotapi.BotAPI, chatID int64, photoPath, caption
 }
 
 func sendInstructionAnimation(bot *tgbotapi.BotAPI, chatID int64, animationPath, caption string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
-	file, err := animationFile(animationPath)
-	if err != nil {
-		log.Printf("read animation failed: %v", err)
-		return 0, err
-	}
-	animation := tgbotapi.NewAnimation(chatID, file)
+	animation := tgbotapi.NewAnimation(chatID, tgbotapi.FilePath(animationPath))
 	animation.Caption = caption
 	animation.ParseMode = "HTML"
 	animation.ReplyMarkup = kb
@@ -444,15 +474,6 @@ func sendInstructionAnimation(bot *tgbotapi.BotAPI, chatID int64, animationPath,
 		return 0, err
 	}
 	return sent.MessageID, nil
-}
-
-func animationFile(path string) (tgbotapi.RequestFileData, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return tgbotapi.FileBytes{}, err
-	}
-	name := filepath.Base(path)
-	return tgbotapi.FileBytes{Name: name, Bytes: data}, nil
 }
 
 func sendInstructionText(bot *tgbotapi.BotAPI, chatID int64, text string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
