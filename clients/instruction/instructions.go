@@ -180,8 +180,8 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Android/0.MP4", `скачайте <a href="https://play.google.com/store/apps/details?id=com.happproxy">happ - proxy utility</a> из Google Play`},
-		{"InstructionPhotos/Android/1.MP4", "заходим в приложение и вставляем ключ из буфера обмена (предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
+		{"InstructionPhotos/Android/0.MP4", `скачайте <a href="https://play.google.com/store/apps/details?id=com.v2raytun.android&hl=ru">v2raytun</a> из google play`},
+		{"InstructionPhotos/Android/1.MP4", "заходим в приложение и вставляем ключ из буфера обмена. предварительно вы должны скопировать ключ-подключения который мы вам отправили"},
 		{"InstructionPhotos/Android/2.MP4", "далее жмём на кнопку включения и vpn работает!"},
 	}
 
@@ -298,10 +298,9 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Ios/0.png", `скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">v2raytun</a> из app store`},
-		{"InstructionPhotos/Ios/1.png", "скопируйте ключ, который получили (начинается на https://sub.static....)"},
-		{"InstructionPhotos/Ios/2.png", "откройте V2RayTun и нажмите на + в правом верхнем углу"},
-		{"InstructionPhotos/Ios/3.png", "выберите \"импорт из буфера\", подтвердите и нажмите \"подключиться\""},
+		{"InstructionPhotos/Ios/0.MP4", `скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">v2raytun</a> из app store`},
+		{"InstructionPhotos/Ios/1.MP4", "заходим в приложение и вставляем ключ из буфера обмена. предварительно вы должны скопировать ключ-подключения который мы вам отправили"},
+		{"InstructionPhotos/Ios/2.MP4", "далее жмём на кнопку включения и vpn работает!"},
 	}
 
 	// Границы
@@ -347,9 +346,19 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			media := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
-			media.Caption = steps[step].caption
-			media.ParseMode = "HTML"
+			var media interface{}
+			if isAnimationPath(steps[step].photoPath) {
+				animation := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
+				animation.Type = "animation"
+				animation.Caption = steps[step].caption
+				animation.ParseMode = "HTML"
+				media = animation
+			} else {
+				photo := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
+				photo.Caption = steps[step].caption
+				photo.ParseMode = "HTML"
+				media = photo
+			}
 
 			edit := tgbotapi.EditMessageMediaConfig{
 				BaseEdit: tgbotapi.BaseEdit{
@@ -361,7 +370,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 			}
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("ios edit media failed: %v", err)
-				state.MessageID = 0
+				return state.MessageID, err
 			} else {
 				state.CurrentStep = step
 				state.HasImage = true
@@ -373,7 +382,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 			edit.ParseMode = "HTML"
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("ios edit text failed: %v", err)
-				state.MessageID = 0
+				return state.MessageID, err
 			} else {
 				state.CurrentStep = step
 				state.HasImage = false
@@ -381,8 +390,8 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 				return state.MessageID, nil
 			}
 		default:
-			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
-			state.MessageID = 0
+			log.Printf("ios edit skipped due to content type mismatch")
+			return state.MessageID, fmt.Errorf("ios instruction content type mismatch")
 		}
 	}
 
@@ -391,7 +400,11 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 		err   error
 	)
 	if needsImage {
-		msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		if isAnimationPath(steps[step].photoPath) {
+			msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		} else {
+			msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -434,6 +447,10 @@ func sendInstructionAnimation(bot *tgbotapi.BotAPI, chatID int64, animationPath,
 		return 0, err
 	}
 	return sent.MessageID, nil
+}
+
+func isAnimationPath(path string) bool {
+	return strings.HasSuffix(strings.ToLower(path), ".mp4")
 }
 
 func sendInstructionText(bot *tgbotapi.BotAPI, chatID int64, text string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
