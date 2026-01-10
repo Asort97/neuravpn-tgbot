@@ -1548,7 +1548,8 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	if !(strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "win_next_") ||
 		strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "android_next_") ||
 		strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "ios_next_") ||
-		data == "windows" || data == "android" || data == "ios") {
+		strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "macos_next_") ||
+		data == "windows" || data == "android" || data == "ios" || data == "macos") {
 		notifyAdmins(bot, userID, username, actionName)
 	}
 
@@ -1585,6 +1586,11 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	case data == "ios":
 		if err := startInstructionFlow(bot, chatID, session, instruct.IOS, 0); err != nil {
 			log.Printf("ios instruction error: %v", err)
+			ackText = "Не удалось открыть инструкцию"
+		}
+	case data == "macos":
+		if err := startInstructionFlow(bot, chatID, session, instruct.MacOS, 0); err != nil {
+			log.Printf("macos instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
 	case strings.HasPrefix(data, "win_prev_"):
@@ -1662,6 +1668,32 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 					session.State = stateInstructions
 				} else if err != nil {
 					log.Printf("ios next step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
+			}
+		}
+	case strings.HasPrefix(data, "macos_prev_"):
+		parts := strings.Split(data, "macos_prev_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				if msgID, err := instruct.InstructionMacOS(chatID, bot, n-1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("macos prev step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
+			}
+		}
+	case strings.HasPrefix(data, "macos_next_"):
+		parts := strings.Split(data, "macos_next_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				if msgID, err := instruct.InstructionMacOS(chatID, bot, n+1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("macos next step error: %v", err)
 					ackText = "Не удалось обновить шаг"
 				}
 			}
@@ -2032,6 +2064,7 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🍏 iOS", "ios"),
+			tgbotapi.NewInlineKeyboardButtonData("💻 MacOS", "macos"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
@@ -2055,6 +2088,8 @@ func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSessi
 		msgID, err = instruct.InstructionAndroid(chatID, bot, step)
 	case instruct.IOS:
 		msgID, err = instruct.InstructionIos(chatID, bot, step)
+	case instruct.MacOS:
+		msgID, err = instruct.InstructionMacOS(chatID, bot, step)
 	default:
 		return fmt.Errorf("unsupported instruction platform: %v", platform)
 	}
@@ -2185,6 +2220,7 @@ func getActionName(data string) string {
 		"windows":          "инструкция Windows",
 		"android":          "инструкция Android",
 		"ios":              "инструкция iOS",
+		"macos":            "инструкция MacOS",
 		"check_payment":    "проверить оплату",
 		"claim_sub_bonus":  "получить бонус за подписку",
 	}
@@ -2192,10 +2228,10 @@ func getActionName(data string) string {
 	if strings.HasPrefix(data, "rate_") {
 		return "выбор тарифа"
 	}
-	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") {
+	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "macos_prev_") {
 		return "инструкция: назад"
 	}
-	if strings.HasPrefix(data, "win_next_") || strings.HasPrefix(data, "android_next_") || strings.HasPrefix(data, "ios_next_") {
+	if strings.HasPrefix(data, "win_next_") || strings.HasPrefix(data, "android_next_") || strings.HasPrefix(data, "ios_next_") || strings.HasPrefix(data, "macos_next_") {
 		return "инструкция: дальше"
 	}
 

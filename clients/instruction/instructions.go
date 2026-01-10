@@ -14,6 +14,7 @@ const (
 	Windows InstructType = iota
 	Android
 	IOS
+	MacOS
 )
 
 type InstructionState struct {
@@ -27,6 +28,7 @@ var (
 	windowsStates = make(map[int64]*InstructionState)
 	androidStates = make(map[int64]*InstructionState)
 	iosStates     = make(map[int64]*InstructionState)
+	macosStates   = make(map[int64]*InstructionState)
 )
 
 func SetInstructKeyboard(messageID int, chatID int64, instructType InstructType) {
@@ -48,6 +50,13 @@ func SetInstructKeyboard(messageID int, chatID int64, instructType InstructType)
 		}
 	case IOS:
 		iosStates[chatID] = &InstructionState{
+			CurrentStep: -1,
+			MessageID:   messageID,
+			ChatID:      chatID,
+			HasImage:    false,
+		}
+	case MacOS:
+		macosStates[chatID] = &InstructionState{
 			CurrentStep: -1,
 			MessageID:   messageID,
 			ChatID:      chatID,
@@ -423,6 +432,79 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	return msgID, nil
 }
 
+func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
+	steps := []struct {
+		photoPath string
+		caption   string
+	}{
+		{"", `скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">v2raytun</a> из app store`},
+		{"", "заходим в приложение и вставляем ключ из буфера обмена. предварительно вы должны скопировать ключ-подключения который мы вам отправили"},
+		{"", "далее жмём на кнопку включения и vpn работает!"},
+	}
+
+	// Границы
+	if step < 0 {
+		step = 0
+	}
+	if step >= len(steps) {
+		step = len(steps) - 1
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+
+	if step > 0 {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", fmt.Sprintf("macos_prev_%d", step)))
+	}
+	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "macos_current"))
+	if step < len(steps)-1 {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд ➡️", fmt.Sprintf("macos_next_%d", step)))
+	}
+
+	rows = append(rows, row)
+
+	if step == 0 {
+		linkRow := tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("скачать ↗️", "https://apps.apple.com/kz/app/v2raytun/id6476628951"),
+		)
+		rows = append(rows, linkRow)
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
+	))
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	state, ok := macosStates[chatID]
+	if !ok || state == nil {
+		state = &InstructionState{ChatID: chatID}
+	}
+
+	if state.MessageID != 0 {
+		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, steps[step].caption, kb)
+		edit.ParseMode = "HTML"
+		if _, err := bot.Send(edit); err != nil {
+			log.Printf("macos edit text failed: %v", err)
+			return state.MessageID, err
+		}
+		state.CurrentStep = step
+		state.HasImage = false
+		macosStates[chatID] = state
+		return state.MessageID, nil
+	}
+
+	msgID, err := sendInstructionText(bot, chatID, steps[step].caption, kb)
+	if err != nil {
+		return 0, err
+	}
+	state.CurrentStep = step
+	state.MessageID = msgID
+	state.HasImage = false
+	macosStates[chatID] = state
+	return msgID, nil
+}
+
 func sendInstructionPhoto(bot *tgbotapi.BotAPI, chatID int64, photoPath, caption string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
 	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(photoPath))
 	photo.Caption = caption
@@ -469,6 +551,7 @@ func ResetState(chatID int64) {
 	delete(windowsStates, chatID)
 	delete(androidStates, chatID)
 	delete(iosStates, chatID)
+	delete(macosStates, chatID)
 }
 
 // func SendInstructMenu(bot *tgbotapi.BotAPI, chatID int64) {
