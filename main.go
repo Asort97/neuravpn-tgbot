@@ -2259,7 +2259,9 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 	link := fmt.Sprintf("https://t.me/%s?start=ref_%s", bot.Self.UserName, userID)
 	count := userStore.GetReferralsCount(userID)
 	bonus := count * referralBonusDays
-	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(link), url.QueryEscape("подключай vpn, опробовав его бесплатно 7 дней!"))
+	shareText := url.QueryEscape("подключай vpn, опробовав его бесплатно 7 дней!")
+	shareText = strings.ReplaceAll(shareText, "+", "%20")
+	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(link), shareText)
 
 	text := fmt.Sprintf(
 		"🎁 +15 дней к доступу\n\n"+
