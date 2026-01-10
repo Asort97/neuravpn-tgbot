@@ -243,7 +243,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 			}
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("android edit media failed: %v", err)
-				state.MessageID = 0
+				return state.MessageID, err
 			} else {
 				state.CurrentStep = step
 				state.HasImage = true
@@ -255,7 +255,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 			edit.ParseMode = "HTML"
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("android edit text failed: %v", err)
-				state.MessageID = 0
+				return state.MessageID, err
 			} else {
 				state.CurrentStep = step
 				state.HasImage = false
@@ -263,8 +263,8 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 				return state.MessageID, nil
 			}
 		default:
-			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
-			state.MessageID = 0
+			log.Printf("android edit skipped due to content type mismatch")
+			return state.MessageID, fmt.Errorf("android instruction content type mismatch")
 		}
 	}
 
