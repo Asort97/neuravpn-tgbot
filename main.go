@@ -10,6 +10,7 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -151,6 +152,8 @@ var (
 	expiryReminderMu    sync.Mutex
 	expiryReminderState = make(map[int64]map[string]string)
 )
+
+const expiryReminderStatePath = "database/reminder_state.json"
 
 func canProceedKey(userID int64, key string, interval time.Duration) bool {
 	now := time.Now()
@@ -397,7 +400,47 @@ func shouldSendExpiryReminder(userID int64, key string, day string) bool {
 		return false
 	}
 	expiryReminderState[userID][key] = day
+	_ = saveExpiryReminderState()
 	return true
+}
+
+func loadExpiryReminderState() {
+	expiryReminderMu.Lock()
+	defer expiryReminderMu.Unlock()
+
+	data, err := os.ReadFile(expiryReminderStatePath)
+	if err != nil {
+		return
+	}
+	var raw map[string]map[string]string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		log.Printf("expiry reminder load failed: %v", err)
+		return
+	}
+	out := make(map[int64]map[string]string)
+	for k, v := range raw {
+		id, err := strconv.ParseInt(k, 10, 64)
+		if err != nil {
+			continue
+		}
+		out[id] = v
+	}
+	expiryReminderState = out
+}
+
+func saveExpiryReminderState() error {
+	if err := os.MkdirAll(filepath.Dir(expiryReminderStatePath), 0o755); err != nil {
+		return err
+	}
+	raw := make(map[string]map[string]string)
+	for k, v := range expiryReminderState {
+		raw[strconv.FormatInt(k, 10)] = v
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(expiryReminderStatePath, data, 0o644)
 }
 
 func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
@@ -889,6 +932,7 @@ func main() {
 		log.Fatalf("bot init error: %v", err)
 	}
 
+	loadExpiryReminderState()
 	startExpiryReminder(bot, xrayCfg)
 
 	// Профилактический re-login к XRAY раз в час
