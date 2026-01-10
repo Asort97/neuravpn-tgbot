@@ -180,9 +180,9 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Android/0.jpg", `скачайте <a href="https://play.google.com/store/apps/details?id=com.happproxy">happ - proxy utility</a> из Google Play`},
-		{"InstructionPhotos/Android/1.jpg", "заходим в приложение и вставляем ключ из буфера обмена (предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
-		{"InstructionPhotos/Android/2.jpg", "далее жмём на кнопку включения и vpn работает!"},
+		{"InstructionPhotos/Android/0.MP4", `скачайте <a href="https://play.google.com/store/apps/details?id=com.happproxy">happ - proxy utility</a> из Google Play`},
+		{"InstructionPhotos/Android/1.MP4", "заходим в приложение и вставляем ключ из буфера обмена (предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
+		{"InstructionPhotos/Android/2.MP4", "далее жмём на кнопку включения и vpn работает!"},
 	}
 
 	// Границы
@@ -229,7 +229,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			media := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
+			media := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
 			media.Caption = steps[step].caption
 			media.ParseMode = "HTML"
 
@@ -273,7 +273,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		err   error
 	)
 	if needsImage {
-		msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
 		if err != nil {
 			return 0, err
 		}
@@ -417,6 +417,19 @@ func sendInstructionPhoto(bot *tgbotapi.BotAPI, chatID int64, photoPath, caption
 	sent, err := bot.Send(photo)
 	if err != nil {
 		log.Printf("send photo failed: %v", err)
+		return 0, err
+	}
+	return sent.MessageID, nil
+}
+
+func sendInstructionAnimation(bot *tgbotapi.BotAPI, chatID int64, animationPath, caption string, kb tgbotapi.InlineKeyboardMarkup) (int, error) {
+	animation := tgbotapi.NewAnimation(chatID, tgbotapi.FilePath(animationPath))
+	animation.Caption = caption
+	animation.ParseMode = "HTML"
+	animation.ReplyMarkup = kb
+	sent, err := bot.Send(animation)
+	if err != nil {
+		log.Printf("send animation failed: %v", err)
 		return 0, err
 	}
 	return sent.MessageID, nil
