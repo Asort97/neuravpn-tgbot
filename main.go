@@ -440,9 +440,9 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 					expStr := formatExpiryUTC(exp)
 					text := ""
 					if daysLeft <= 0 {
-						text = fmt.Sprintf("⏰ ваш доступ к NeuraVPN закончился.\nдействовал до: %s\nпродлите в разделе «оплата».", expStr)
+						text = fmt.Sprintf("⏰ ваш доступ к neuravpn закончился.\nдействовал до: %s\nпродлите в разделе «оплата».", expStr)
 					} else {
-						text = fmt.Sprintf("⏰ ваш доступ к NeuraVPN заканчивается через %d дн.\nдействует до: %s\nпродлите в разделе «оплата».", daysLeft, expStr)
+						text = fmt.Sprintf("⏰ ваш доступ к neuravpn заканчивается через %d дн.\nдействует до: %s\nпродлите в разделе «оплата».", daysLeft, expStr)
 					}
 
 					msg := tgbotapi.NewMessage(userID, text)
