@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	xray "github.com/Asort97/vpnBot/clients/Xray"
@@ -144,6 +145,11 @@ var (
 	adminIDs       []int64
 	logChatID      int64 = -1003334019708
 	userSessions         = make(map[int64]*UserSession)
+)
+
+var (
+	expiryReminderMu    sync.Mutex
+	expiryReminderState = make(map[int64]map[string]string)
 )
 
 func canProceedKey(userID int64, key string, interval time.Duration) bool {
@@ -331,6 +337,122 @@ func formatExpiryUTC(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format("02.01.2006 15:04 UTC")
+}
+
+func collectExpiryByTgID(cfg *xraySettings) (map[int64]time.Time, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, fmt.Errorf("xray not configured")
+	}
+
+	inboundIDs := cfg.inboundIDs
+	if len(inboundIDs) == 0 {
+		inbounds, err := cfg.client.GetAllInbounds()
+		if err != nil {
+			return nil, err
+		}
+		for _, ib := range inbounds {
+			if ib.Enable && strings.EqualFold(strings.TrimSpace(ib.Protocol), "vless") {
+				inboundIDs = append(inboundIDs, ib.ID)
+			}
+		}
+	}
+	if len(inboundIDs) == 0 {
+		return nil, fmt.Errorf("no inbounds available for reminder")
+	}
+
+	result := make(map[int64]time.Time)
+	for _, inboundID := range inboundIDs {
+		clients, err := cfg.client.GetInboundById(inboundID)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range clients {
+			if !c.Enable || c.ExpiryTime <= 0 {
+				continue
+			}
+			tgID := strings.TrimSpace(c.TgID)
+			if tgID == "" {
+				continue
+			}
+			id, err := strconv.ParseInt(tgID, 10, 64)
+			if err != nil {
+				continue
+			}
+			exp := time.UnixMilli(c.ExpiryTime)
+			if existing, ok := result[id]; !ok || exp.After(existing) {
+				result[id] = exp
+			}
+		}
+	}
+	return result, nil
+}
+
+func shouldSendExpiryReminder(userID int64, key string, day string) bool {
+	expiryReminderMu.Lock()
+	defer expiryReminderMu.Unlock()
+	if expiryReminderState[userID] == nil {
+		expiryReminderState[userID] = make(map[string]string)
+	}
+	if expiryReminderState[userID][key] == day {
+		return false
+	}
+	expiryReminderState[userID][key] = day
+	return true
+}
+
+func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
+	go func() {
+		ticker := time.NewTicker(12 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			func() {
+				expiries, err := collectExpiryByTgID(cfg)
+				if err != nil {
+					log.Printf("expiry reminder: %v", err)
+					return
+				}
+				now := time.Now().UTC()
+				today := now.Format("2006-01-02")
+
+				for userID, exp := range expiries {
+					remain := exp.Sub(now)
+					daysLeft := int64(0)
+					if remain > 0 {
+						daysLeft = int64(remain.Hours()/24 + 0.999)
+					}
+
+					key := ""
+					if daysLeft == 3 {
+						key = "d3"
+					} else if daysLeft == 1 {
+						key = "d1"
+					} else if daysLeft <= 0 {
+						key = "expired"
+					} else {
+						continue
+					}
+
+					if !shouldSendExpiryReminder(userID, key, today) {
+						continue
+					}
+
+					expStr := formatExpiryUTC(exp)
+					text := ""
+					if daysLeft <= 0 {
+						text = fmt.Sprintf("⏰ ваш доступ к NeuraVPN закончился.\nдействовал до: %s\nпродлите в разделе «оплата».", expStr)
+					} else {
+						text = fmt.Sprintf("⏰ ваш доступ к NeuraVPN заканчивается через %d дн.\nдействует до: %s\nпродлите в разделе «оплата».", daysLeft, expStr)
+					}
+
+					msg := tgbotapi.NewMessage(userID, text)
+					_, _ = bot.Send(msg)
+				}
+			}()
+
+			<-ticker.C
+		}
+	}()
 }
 
 func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays int, userID int64, cfg *xraySettings, bot *tgbotapi.BotAPI, session *UserSession) error {
@@ -766,6 +888,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("bot init error: %v", err)
 	}
+
+	startExpiryReminder(bot, xrayCfg)
 
 	// Профилактический re-login к XRAY раз в час
 	go func() {
