@@ -23,47 +23,6 @@ type InstructionState struct {
 	HasImage    bool
 }
 
-type editMessageAnimationConfig struct {
-	tgbotapi.BaseEdit
-	Media tgbotapi.InputMediaAnimation
-}
-
-func (editMessageAnimationConfig) method() string {
-	return "editMessageMedia"
-}
-
-func (config editMessageAnimationConfig) params() (tgbotapi.Params, error) {
-	params := make(tgbotapi.Params)
-	if config.InlineMessageID != "" {
-		params["inline_message_id"] = config.InlineMessageID
-	} else {
-		params.AddFirstValid("chat_id", config.ChatID, config.ChannelUsername)
-		params.AddNonZero("message_id", config.MessageID)
-	}
-
-	if err := params.AddInterface("reply_markup", config.ReplyMarkup); err != nil {
-		return params, err
-	}
-
-	media := config.Media
-	if media.Media.NeedsUpload() {
-		media.Media = tgbotapi.FileID("attach://file-0")
-	}
-
-	err := params.AddInterface("media", media)
-	return params, err
-}
-
-func (config editMessageAnimationConfig) files() []tgbotapi.RequestFile {
-	if !config.Media.Media.NeedsUpload() {
-		return nil
-	}
-	return []tgbotapi.RequestFile{{
-		Name: "file-0",
-		Data: config.Media.Media,
-	}}
-}
-
 var (
 	windowsStates = make(map[int64]*InstructionState)
 	androidStates = make(map[int64]*InstructionState)
@@ -270,11 +229,12 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			media := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
+			media := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
+			media.Type = "animation"
 			media.Caption = steps[step].caption
 			media.ParseMode = "HTML"
 
-			edit := editMessageAnimationConfig{
+			edit := tgbotapi.EditMessageMediaConfig{
 				BaseEdit: tgbotapi.BaseEdit{
 					ChatID:      chatID,
 					MessageID:   state.MessageID,
