@@ -70,11 +70,11 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		photoPath string
 		caption   string
 	}{
-		{"", `скачайте <a href="https://github.com/Mahdi-zarei/nekoray/releases/download/4.3.5/nekoray-4.3.5-2025-05-16-windows64.zip">nekoray</a>`},
-		{"", "после завершения загрузки выполните следующие действия:\n1) найдите загруженный файл nekoray-windows64.zip.\n2) щелкните правой кнопкой мыши на файле и выберите \"извлечь все...\" или воспользуйтесь архиватором, например, winrar или 7-zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
-		{"", "откройте папку с распакованными файлами. найдите файл nekobox.exe. дважды щелкните по нему, чтобы запустить программу."},
-		{"InstructionPhotos/Windows/0.png", "в программе нажмите на кнопку \"сервера\" и далее \"добавить профиль из буфера обмена\" (предварительно вы должны скопировать ключ-подключения который мы вам отправили)"},
-		{"InstructionPhotos/Windows/1.png", "активируйте режим tun и запустите конфигурацию, нажав по конфигу правой кнопкой мыши и выбрав опцию запуск работает!"},
+		{"", `скачайте <a href="https://github.com/Asort97/neuravpn-client/releases/tag/v1.0.0">neuravpn client</a>`},
+		{"", "после завершения загрузки выполните следующие действия:\n1) найдите загруженный файл release1.0.0.zip.\n2) щелкните правой кнопкой мыши на файле и выберите \"извлечь все...\" или воспользуйтесь архиватором, например, winrar или 7-zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
+		{"", "откройте папку с распакованными файлами. найдите файл neuravpn.exe. щелкните по нему правой кнопкой мыши и запустите от имени администратора."},
+		{"InstructionPhotos/Windows/0.mp4", "предварительно скопировав ключ доступа, в программе нажмите на кнопку \"вставить из буфера\""},
+		{"InstructionPhotos/Windows/1.mp4", "подключитесь к vpn, нажав по большой кнопке в центру. вы подключены!"},
 	}
 
 	// Границы
@@ -120,9 +120,19 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			image := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
-			image.Caption = steps[step].caption
-			image.ParseMode = "HTML"
+			var media interface{}
+			if isAnimationPath(steps[step].photoPath) {
+				animation := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
+				animation.Type = "animation"
+				animation.Caption = steps[step].caption
+				animation.ParseMode = "HTML"
+				media = animation
+			} else {
+				image := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
+				image.Caption = steps[step].caption
+				image.ParseMode = "HTML"
+				media = image
+			}
 
 			edit := tgbotapi.EditMessageMediaConfig{
 				BaseEdit: tgbotapi.BaseEdit{
@@ -130,7 +140,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 					MessageID:   state.MessageID,
 					ReplyMarkup: &kb,
 				},
-				Media: image,
+				Media: media,
 			}
 
 			if _, err := bot.Send(edit); err != nil {
@@ -165,7 +175,11 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		err   error
 	)
 	if needsImage {
-		msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		if isAnimationPath(steps[step].photoPath) {
+			msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		} else {
+			msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		}
 		if err != nil {
 			return 0, err
 		}

@@ -93,8 +93,6 @@ var ratePlans = []RatePlan{
 	{ID: "15d", Title: "15 дней", Amount: 25, Days: 15},
 	{ID: "30d", Title: "30 дней", Amount: 50, Days: 30},
 	{ID: "60d", Title: "60 дней", Amount: 100, Days: 60},
-	{ID: "120d", Title: "120 дней", Amount: 200, Days: 120},
-	{ID: "240d", Title: "240 дней", Amount: 300, Days: 240},
 	{ID: "365d", Title: "365 дней", Amount: 400, Days: 365},
 }
 
@@ -1503,7 +1501,7 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 				} else {
 					newUserName = fmt.Sprintf("@%s", newUserName)
 				}
-				refMsg := fmt.Sprintf("🎉 <b>По вашей реферальной ссылке зарегистрировался %s!</b>\n\n🎁 <b>Вам начислено: +15 дней</b>\n👥 <b>Всего рефералов:</b> %d\n⏱ <b>Баланс:</b> %d дн.", newUserName, refCount, refDays)
+				refMsg := fmt.Sprintf("🎉 <b>по вашей реферальной ссылке зарегистрировался %s!</b>\n\n🎁 <b>вам начислено: +15 дней</b>\n👥 <b>всего рефералов:</b> %d\n⏱ <b>баланс:</b> %d дн.", newUserName, refCount, refDays)
 				nmsg := tgbotapi.NewMessage(refChatID, refMsg)
 				nmsg.ParseMode = "HTML"
 				_, _ = bot.Send(nmsg)
@@ -1714,8 +1712,8 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		}
 		stars := starsAmountForPlan(p)
 		text := fmt.Sprintf(
-			"💰 покупка доступа\n\nтариф: %s\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nнажми «оплатить ⭐».",
-			p.Title, p.Days, p.Amount, stars,
+			"💰 покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nнажми «оплатить ⭐».",
+			p.Days, p.Amount, stars,
 		)
 		kb := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
@@ -1807,8 +1805,8 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 
 	stars := starsAmountForPlan(plan)
 	text := fmt.Sprintf(
-		"💰 покупка доступа\n\nтариф: %s\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nвыберите способ оплаты:",
-		plan.Title, plan.Days, plan.Amount, stars,
+		"💰 покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nвыберите способ оплаты:",
+		plan.Days, plan.Amount, stars,
 	)
 	_ = updateSessionText(bot, chatID, session, stateChoosePay, text, "HTML", choosePayKeyboard(plan))
 	ackCallback(bot, cq, "выберите способ оплаты")
@@ -2261,7 +2259,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 	link := fmt.Sprintf("https://t.me/%s?start=ref_%s", bot.Self.UserName, userID)
 	count := userStore.GetReferralsCount(userID)
 	bonus := count * referralBonusDays
-	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(link), url.QueryEscape("NeuraVPN: приводи друга и получай +15 дней доступа"))
+	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(link), url.QueryEscape("подключай vpn, опробовав его бесплатно 7 дней!"))
 
 	text := fmt.Sprintf(
 		"🎁 +15 дней к доступу\n\n"+
