@@ -390,16 +390,17 @@ func collectExpiryByTgID(cfg *xraySettings) (map[int64]time.Time, error) {
 	return result, nil
 }
 
-func shouldSendExpiryReminder(userID int64, key string, day string) bool {
+func shouldSendExpiryReminder(userID int64, stage string, expiry time.Time) bool {
 	expiryReminderMu.Lock()
 	defer expiryReminderMu.Unlock()
 	if expiryReminderState[userID] == nil {
 		expiryReminderState[userID] = make(map[string]string)
 	}
-	if expiryReminderState[userID][key] == day {
+	expKey := expiry.UTC().Format(time.RFC3339Nano)
+	if expiryReminderState[userID][stage] == expKey {
 		return false
 	}
-	expiryReminderState[userID][key] = day
+	expiryReminderState[userID][stage] = expKey
 	_ = saveExpiryReminderState()
 	return true
 }
@@ -456,7 +457,6 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 					return
 				}
 				now := time.Now().UTC()
-				today := now.Format("2006-01-02")
 
 				for userID, exp := range expiries {
 					remain := exp.Sub(now)
@@ -476,7 +476,7 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 						continue
 					}
 
-					if !shouldSendExpiryReminder(userID, key, today) {
+					if !shouldSendExpiryReminder(userID, key, exp) {
 						continue
 					}
 
