@@ -397,12 +397,32 @@ func shouldSendExpiryReminder(userID int64, stage string, expiry time.Time) bool
 		expiryReminderState[userID] = make(map[string]string)
 	}
 	expKey := expiry.UTC().Format(time.RFC3339Nano)
-	if expiryReminderState[userID][stage] == expKey {
+	if stage == "expired" {
+		if expiryReminderState[userID][stage] != "" {
+			return false
+		}
+	} else if expiryReminderState[userID][stage] == expKey {
 		return false
 	}
 	expiryReminderState[userID][stage] = expKey
 	_ = saveExpiryReminderState()
 	return true
+}
+
+func clearExpiryReminderStage(userID int64, stage string) {
+	expiryReminderMu.Lock()
+	defer expiryReminderMu.Unlock()
+	if expiryReminderState[userID] == nil {
+		return
+	}
+	if _, ok := expiryReminderState[userID][stage]; !ok {
+		return
+	}
+	delete(expiryReminderState[userID], stage)
+	if len(expiryReminderState[userID]) == 0 {
+		delete(expiryReminderState, userID)
+	}
+	_ = saveExpiryReminderState()
 }
 
 func loadExpiryReminderState() {
@@ -463,6 +483,7 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 					daysLeft := int64(0)
 					if remain > 0 {
 						daysLeft = int64(remain.Hours()/24 + 0.999)
+						clearExpiryReminderStage(userID, "expired")
 					}
 
 					key := ""
