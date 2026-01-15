@@ -2,6 +2,7 @@ package instruct
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"strings"
 
@@ -25,10 +26,11 @@ type InstructionState struct {
 }
 
 var (
-	windowsStates = make(map[int64]*InstructionState)
-	androidStates = make(map[int64]*InstructionState)
-	iosStates     = make(map[int64]*InstructionState)
-	macosStates   = make(map[int64]*InstructionState)
+	windowsStates   = make(map[int64]*InstructionState)
+	androidStates   = make(map[int64]*InstructionState)
+	iosStates       = make(map[int64]*InstructionState)
+	macosStates     = make(map[int64]*InstructionState)
+	instructionKeys = make(map[int64]string)
 )
 
 func SetInstructKeyboard(messageID int, chatID int64, instructType InstructType) {
@@ -63,6 +65,11 @@ func SetInstructKeyboard(messageID int, chatID int64, instructType InstructType)
 			HasImage:    false,
 		}
 	}
+}
+
+// SetInstructionKey stores a per-chat key used in captions.
+func SetInstructionKey(chatID int64, key string) {
+	instructionKeys[chatID] = key
 }
 
 func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
@@ -106,14 +113,17 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔑 скопировать ключ", "copy_key"),
-	))
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	caption := steps[step].caption
+	if step == 1 {
+		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
+		}
+	}
 
 	needsImage := strings.TrimSpace(steps[step].photoPath) != ""
 	state, exists := windowsStates[chatID]
@@ -128,12 +138,12 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 			if isAnimationPath(steps[step].photoPath) {
 				animation := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
 				animation.Type = "animation"
-				animation.Caption = steps[step].caption
+				animation.Caption = caption
 				animation.ParseMode = "HTML"
 				media = animation
 			} else {
 				image := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
-				image.Caption = steps[step].caption
+				image.Caption = caption
 				image.ParseMode = "HTML"
 				media = image
 			}
@@ -157,7 +167,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 				return state.MessageID, nil
 			}
 		case !needsImage && !state.HasImage:
-			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, steps[step].caption, kb)
+			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, caption, kb)
 			edit.ParseMode = "HTML"
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("windows edit text failed: %v", err)
@@ -180,16 +190,16 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	)
 	if needsImage {
 		if isAnimationPath(steps[step].photoPath) {
-			msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+			msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, caption, kb)
 		} else {
-			msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+			msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, caption, kb)
 		}
 		if err != nil {
 			return 0, err
 		}
 		state.HasImage = true
 	} else {
-		msgID, err = sendInstructionText(bot, chatID, steps[step].caption, kb)
+		msgID, err = sendInstructionText(bot, chatID, caption, kb)
 		if err != nil {
 			return 0, err
 		}
@@ -242,14 +252,17 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔑 скопировать ключ", "copy_key"),
-	))
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	caption := steps[step].caption
+	if step == 1 {
+		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
+		}
+	}
 
 	needsImage := strings.TrimSpace(steps[step].photoPath) != ""
 	state, ok := androidStates[chatID]
@@ -262,7 +275,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		case needsImage && state.HasImage:
 			media := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
 			media.Type = "animation"
-			media.Caption = steps[step].caption
+			media.Caption = caption
 			media.ParseMode = "HTML"
 
 			edit := tgbotapi.EditMessageMediaConfig{
@@ -283,7 +296,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 				return state.MessageID, nil
 			}
 		case !needsImage && !state.HasImage:
-			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, steps[step].caption, kb)
+			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, caption, kb)
 			edit.ParseMode = "HTML"
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("android edit text failed: %v", err)
@@ -305,13 +318,13 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		err   error
 	)
 	if needsImage {
-		msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+		msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, caption, kb)
 		if err != nil {
 			return 0, err
 		}
 		state.HasImage = true
 	} else {
-		msgID, err = sendInstructionText(bot, chatID, steps[step].caption, kb)
+		msgID, err = sendInstructionText(bot, chatID, caption, kb)
 		if err != nil {
 			return 0, err
 		}
@@ -363,14 +376,17 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔑 скопировать ключ", "copy_key"),
-	))
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	caption := steps[step].caption
+	if step == 1 {
+		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
+		}
+	}
 
 	needsImage := strings.TrimSpace(steps[step].photoPath) != ""
 	state, ok := iosStates[chatID]
@@ -385,12 +401,12 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 			if isAnimationPath(steps[step].photoPath) {
 				animation := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
 				animation.Type = "animation"
-				animation.Caption = steps[step].caption
+				animation.Caption = caption
 				animation.ParseMode = "HTML"
 				media = animation
 			} else {
 				photo := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(steps[step].photoPath))
-				photo.Caption = steps[step].caption
+				photo.Caption = caption
 				photo.ParseMode = "HTML"
 				media = photo
 			}
@@ -413,7 +429,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 				return state.MessageID, nil
 			}
 		case !needsImage && !state.HasImage:
-			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, steps[step].caption, kb)
+			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, caption, kb)
 			edit.ParseMode = "HTML"
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("ios edit text failed: %v", err)
@@ -436,16 +452,16 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	)
 	if needsImage {
 		if isAnimationPath(steps[step].photoPath) {
-			msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+			msgID, err = sendInstructionAnimation(bot, chatID, steps[step].photoPath, caption, kb)
 		} else {
-			msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, steps[step].caption, kb)
+			msgID, err = sendInstructionPhoto(bot, chatID, steps[step].photoPath, caption, kb)
 		}
 		if err != nil {
 			return 0, err
 		}
 		state.HasImage = true
 	} else {
-		msgID, err = sendInstructionText(bot, chatID, steps[step].caption, kb)
+		msgID, err = sendInstructionText(bot, chatID, caption, kb)
 		if err != nil {
 			return 0, err
 		}
@@ -497,14 +513,17 @@ func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error)
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔑 скопировать ключ", "copy_key"),
-	))
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	caption := steps[step].caption
+	if step == 1 {
+		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
+		}
+	}
 
 	state, ok := macosStates[chatID]
 	if !ok || state == nil {
@@ -512,7 +531,7 @@ func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error)
 	}
 
 	if state.MessageID != 0 {
-		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, steps[step].caption, kb)
+		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, state.MessageID, caption, kb)
 		edit.ParseMode = "HTML"
 		if _, err := bot.Send(edit); err != nil {
 			log.Printf("macos edit text failed: %v", err)
@@ -524,7 +543,7 @@ func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error)
 		return state.MessageID, nil
 	}
 
-	msgID, err := sendInstructionText(bot, chatID, steps[step].caption, kb)
+	msgID, err := sendInstructionText(bot, chatID, caption, kb)
 	if err != nil {
 		return 0, err
 	}
@@ -582,6 +601,7 @@ func ResetState(chatID int64) {
 	delete(androidStates, chatID)
 	delete(iosStates, chatID)
 	delete(macosStates, chatID)
+	delete(instructionKeys, chatID)
 }
 
 // func SendInstructMenu(bot *tgbotapi.BotAPI, chatID int64) {

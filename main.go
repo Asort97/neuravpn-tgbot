@@ -1783,22 +1783,22 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			return
 		}
 	case data == "windows":
-		if err := startInstructionFlow(bot, chatID, session, instruct.Windows, 0); err != nil {
+		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.Windows, 0); err != nil {
 			log.Printf("windows instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
 	case data == "android":
-		if err := startInstructionFlow(bot, chatID, session, instruct.Android, 0); err != nil {
+		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.Android, 0); err != nil {
 			log.Printf("android instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
 	case data == "ios":
-		if err := startInstructionFlow(bot, chatID, session, instruct.IOS, 0); err != nil {
+		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.IOS, 0); err != nil {
 			log.Printf("ios instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
 	case data == "macos":
-		if err := startInstructionFlow(bot, chatID, session, instruct.MacOS, 0); err != nil {
+		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.MacOS, 0); err != nil {
 			log.Printf("macos instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
@@ -2306,7 +2306,7 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 	)
 	_ = updateSessionText(bot, chatID, session, stateInstructions, text, "HTML", kb)
 }
-func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, platform instruct.InstructType, step int) error {
+func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, xrCfg *xraySettings, platform instruct.InstructType, step int) error {
 	prevMessageID := session.MessageID
 	instruct.ResetState(chatID)
 
@@ -2314,6 +2314,19 @@ func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSessi
 		msgID int
 		err   error
 	)
+
+	userIDStr := strconv.FormatInt(chatID, 10)
+	key := ""
+	if xrCfg != nil {
+		if info, _ := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, true); info != nil {
+			link := generateSubscriptionURL(xrCfg, info.client)
+			if strings.TrimSpace(link) == "" {
+				link = info.link
+			}
+			key = link
+		}
+	}
+	instruct.SetInstructionKey(chatID, key)
 
 	switch platform {
 	case instruct.Windows:
