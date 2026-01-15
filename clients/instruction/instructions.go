@@ -106,6 +106,10 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔑 скопировать ключ", "copy_key"),
+	))
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
@@ -238,6 +242,10 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔑 скопировать ключ", "copy_key"),
+	))
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
 	))
 
@@ -353,6 +361,10 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 		)
 		rows = append(rows, linkRow)
 	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔑 скопировать ключ", "copy_key"),
+	))
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
@@ -483,6 +495,10 @@ func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error)
 		)
 		rows = append(rows, linkRow)
 	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔑 скопировать ключ", "copy_key"),
+	))
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("❌ выйти", "nav_instructions"),
