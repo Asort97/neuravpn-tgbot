@@ -119,7 +119,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
 	caption := steps[step].caption
-	if step == 1 {
+	if step == 3 {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
 			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
 		}
