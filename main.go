@@ -1760,6 +1760,29 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	case data == "claim_sub_bonus":
 		handleClaimSubscriptionBonus(bot, cq, session, xrCfg)
 		return
+	case data == "copy_key":
+		{
+			userIDStr := strconv.FormatInt(cq.From.ID, 10)
+			info, _ := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, true)
+			link := ""
+			if info != nil && info.client != nil {
+				link = generateSubscriptionURL(xrCfg, info.client)
+				if strings.TrimSpace(link) == "" {
+					link = info.link
+				}
+			}
+			if strings.TrimSpace(link) == "" {
+				ackCallback(bot, cq, "ключ недоступен, попробуйте позже")
+				return
+			}
+			text := fmt.Sprintf("Ваш ключ:\n<code>%s</code>\nСкопируй и вставь в клиент.", html.EscapeString(link))
+			msg := tgbotapi.NewMessage(chatID, text)
+			msg.ParseMode = "HTML"
+			msg.DisableWebPagePreview = true
+			_, _ = bot.Send(msg)
+			ackCallback(bot, cq, "ключ отправлен сообщением")
+			return
+		}
 	case data == "windows":
 		if err := startInstructionFlow(bot, chatID, session, instruct.Windows, 0); err != nil {
 			log.Printf("windows instruction error: %v", err)
@@ -2408,6 +2431,7 @@ func getActionName(data string) string {
 		"android":          "инструкция Android",
 		"ios":              "инструкция iOS",
 		"macos":            "инструкция MacOS",
+		"copy_key":         "копировать ключ",
 		"check_payment":    "проверить оплату",
 		"claim_sub_bonus":  "получить бонус за подписку",
 	}
