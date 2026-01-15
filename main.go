@@ -1775,7 +1775,11 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 				ackCallback(bot, cq, "ключ недоступен, попробуйте позже")
 				return
 			}
-			ackCallback(bot, cq, fmt.Sprintf("Copy to Clipboard: %s", link))
+			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("`%s`", escapeMarkdownV2(link)))
+			msg.ParseMode = "MarkdownV2"
+			msg.DisableWebPagePreview = true
+			_, _ = bot.Send(msg)
+			ackCallback(bot, cq, "нажми на моноспейс, чтобы скопировать")
 			return
 		}
 	case data == "windows":
@@ -1993,6 +1997,31 @@ func ackCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, text string) 
 		cfg.Text = text
 	}
 	_, _ = bot.Request(cfg)
+}
+
+// escapeMarkdownV2 escapes a string for safe use inside MarkdownV2 code spans.
+func escapeMarkdownV2(s string) string {
+	replacer := strings.NewReplacer(
+		"_", "\\_",
+		"*", "\\*",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"~", "\\~",
+		"`", "\\`",
+		">", "\\>",
+		"#", "\\#",
+		"+", "\\+",
+		"-", "\\-",
+		"=", "\\=",
+		"|", "\\|",
+		"{", "\\{",
+		"}", "\\}",
+		".", "\\.",
+		"!", "\\!",
+	)
+	return replacer.Replace(s)
 }
 
 func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
