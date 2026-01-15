@@ -1775,12 +1775,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 				ackCallback(bot, cq, "ключ недоступен, попробуйте позже")
 				return
 			}
-			text := fmt.Sprintf("Ваш ключ:\n<code>%s</code>\nСкопируй и вставь в клиент.", html.EscapeString(link))
-			msg := tgbotapi.NewMessage(chatID, text)
-			msg.ParseMode = "HTML"
-			msg.DisableWebPagePreview = true
-			_, _ = bot.Send(msg)
-			ackCallback(bot, cq, "ключ отправлен сообщением")
+			ackCallback(bot, cq, fmt.Sprintf("Copy to Clipboard: %s", link))
 			return
 		}
 	case data == "windows":
