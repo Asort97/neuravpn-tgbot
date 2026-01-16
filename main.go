@@ -1735,8 +1735,8 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	if !(strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "win_next_") ||
 		strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "android_next_") ||
 		strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "ios_next_") ||
-		strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "macos_next_") ||
-		data == "windows" || data == "android" || data == "ios" || data == "macos") {
+		strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "macos_next_") || data == "ios_current" ||
+		data == "windows" || data == "android" || data == "ios" || data == "macos" || data == "nav_status") {
 		notifyAdmins(bot, userID, username, actionName)
 	}
 
@@ -2185,7 +2185,7 @@ func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		return
 	}
 
-	sendMessageToAdmin(fmt.Sprintf("user id:%d запросил VPN", cq.From.ID), cq.From.UserName, bot, userID)
+	// sendMessageToAdmin(fmt.Sprintf("user id:%d запросил VPN", cq.From.ID), cq.From.UserName, bot, userID)
 }
 
 func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, xrCfg *xraySettings) {
