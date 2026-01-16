@@ -136,8 +136,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		case needsImage && state.HasImage:
 			var media interface{}
 			if isAnimationPath(steps[step].photoPath) {
-				animation := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
-				animation.Type = "animation"
+				animation := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
 				animation.Caption = caption
 				animation.ParseMode = "HTML"
 				media = animation
@@ -273,8 +272,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			media := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
-			media.Type = "animation"
+			media := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
 			media.Caption = caption
 			media.ParseMode = "HTML"
 
@@ -399,8 +397,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 		case needsImage && state.HasImage:
 			var media interface{}
 			if isAnimationPath(steps[step].photoPath) {
-				animation := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
-				animation.Type = "animation"
+				animation := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
 				animation.Caption = caption
 				animation.ParseMode = "HTML"
 				media = animation
