@@ -244,7 +244,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 
 	if step == 0 {
 		linkRow := tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("скачать ↗️", "https://play.google.com/store/apps/details?id=com.happproxy"),
+			tgbotapi.NewInlineKeyboardButtonURL("скачать ↗️", "https://play.google.com/store/apps/details?id=com.v2raytun.android&hl=ru"),
 		)
 
 		rows = append(rows, linkRow)
