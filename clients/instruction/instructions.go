@@ -159,6 +159,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("windows edit media failed: %v", err)
 				state.MessageID = 0
+				state.HasImage = false
 			} else {
 				state.CurrentStep = step
 				state.HasImage = true
@@ -286,7 +287,9 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 			}
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("android edit media failed: %v", err)
-				return state.MessageID, err
+				state.MessageID = 0
+				state.HasImage = false
+				return InstructionAndroid(chatID, bot, step)
 			} else {
 				state.CurrentStep = step
 				state.HasImage = true
@@ -298,7 +301,8 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 			edit.ParseMode = "HTML"
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("android edit text failed: %v", err)
-				return state.MessageID, err
+				state.MessageID = 0
+				state.HasImage = false
 			} else {
 				state.CurrentStep = step
 				state.HasImage = false
@@ -418,7 +422,9 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 			}
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("ios edit media failed: %v", err)
-				return state.MessageID, err
+				state.MessageID = 0
+				state.HasImage = false
+				return InstructionIos(chatID, bot, step)
 			} else {
 				state.CurrentStep = step
 				state.HasImage = true
@@ -430,7 +436,8 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 			edit.ParseMode = "HTML"
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("ios edit text failed: %v", err)
-				return state.MessageID, err
+				state.MessageID = 0
+				state.HasImage = false
 			} else {
 				state.CurrentStep = step
 				state.HasImage = false
@@ -532,7 +539,7 @@ func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error)
 		edit.ParseMode = "HTML"
 		if _, err := bot.Send(edit); err != nil {
 			log.Printf("macos edit text failed: %v", err)
-			return state.MessageID, err
+			state.MessageID = 0
 		}
 		state.CurrentStep = step
 		state.HasImage = false
