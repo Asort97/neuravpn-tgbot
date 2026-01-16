@@ -92,10 +92,10 @@ type DataStore interface {
 }
 
 var ratePlans = []RatePlan{
-	{ID: "15d", Title: "15 дней", Amount: 25, Days: 15},
-	{ID: "30d", Title: "30 дней", Amount: 50, Days: 30},
-	{ID: "60d", Title: "60 дней", Amount: 100, Days: 60},
-	{ID: "365d", Title: "365 дней", Amount: 400, Days: 365},
+	{ID: "30d", Title: "30 дней", Amount: 100, Days: 30},
+	{ID: "60d", Title: "60 дней", Amount: 150, Days: 60},
+	{ID: "90d", Title: "90 дней", Amount: 200, Days: 90},
+	{ID: "365d", Title: "365 дней", Amount: 650, Days: 365},
 }
 
 var ratePlanByID = func() map[string]RatePlan {
@@ -718,7 +718,7 @@ const (
 )
 
 func starsAmountForPlan(plan RatePlan) int {
-	n := int(math.Round(plan.Amount * 2))
+	n := int(math.Round(plan.Amount * 1.5))
 	if n < 1 {
 		n = 1
 	}
