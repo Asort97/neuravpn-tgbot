@@ -1,4 +1,4 @@
-package instruct
+﻿package instruct
 
 import (
 	"fmt"
