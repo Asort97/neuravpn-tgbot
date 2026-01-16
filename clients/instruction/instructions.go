@@ -1,4 +1,4 @@
-﻿package instruct
+package instruct
 
 import (
 	"fmt"
@@ -136,7 +136,8 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		case needsImage && state.HasImage:
 			var media interface{}
 			if isAnimationPath(steps[step].photoPath) {
-				animation := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
+				animation := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
+				animation.Type = "animation"
 				animation.Caption = caption
 				animation.ParseMode = "HTML"
 				media = animation
@@ -158,6 +159,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("windows edit media failed: %v", err)
+				state.MessageID = 0
 			} else {
 				state.CurrentStep = step
 				state.HasImage = true
@@ -169,6 +171,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 			edit.ParseMode = "HTML"
 			if _, err := bot.Send(edit); err != nil {
 				log.Printf("windows edit text failed: %v", err)
+				state.MessageID = 0
 			} else {
 				state.CurrentStep = step
 				state.HasImage = false
@@ -270,7 +273,8 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			media := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
+			media := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
+			media.Type = "animation"
 			media.Caption = caption
 			media.ParseMode = "HTML"
 
@@ -395,7 +399,8 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 		case needsImage && state.HasImage:
 			var media interface{}
 			if isAnimationPath(steps[step].photoPath) {
-				animation := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(steps[step].photoPath))
+				animation := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(steps[step].photoPath))
+				animation.Type = "animation"
 				animation.Caption = caption
 				animation.ParseMode = "HTML"
 				media = animation
