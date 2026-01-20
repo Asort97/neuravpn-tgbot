@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
+	"io/fs"
 	"log"
 	"math"
+	"math/rand"
 	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +54,12 @@ var (
 	channelUsernameEff = channelUsername
 	channelURLEff      = channelURL
 	channelChatIDEff   int64
+	adStats            = newAdStatsStore(filepath.Join("database", "ad_stats.json"))
 )
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
 
 // throttling map (keyed by user id and action key)
 var lastActionKey = make(map[int64]map[string]time.Time)
@@ -73,6 +82,100 @@ type RatePlan struct {
 	Title  string
 	Amount float64
 	Days   int
+}
+
+type adStatsStore struct {
+	mu   sync.RWMutex
+	path string
+	data map[string]map[string]bool // adTag -> set of userIDs counted
+}
+
+func newAdStatsStore(path string) *adStatsStore {
+	return &adStatsStore{
+		path: path,
+		data: make(map[string]map[string]bool),
+	}
+}
+
+func (s *adStatsStore) load() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.data) > 0 {
+		return
+	}
+	b, err := os.ReadFile(s.path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			s.data = make(map[string]map[string]bool)
+			return
+		}
+		log.Printf("ad stats read error: %v", err)
+		return
+	}
+	var raw map[string][]string
+	if err := json.Unmarshal(b, &raw); err != nil {
+		log.Printf("ad stats unmarshal error: %v", err)
+		s.data = make(map[string]map[string]bool)
+		return
+	}
+	for tag, users := range raw {
+		if s.data[tag] == nil {
+			s.data[tag] = make(map[string]bool)
+		}
+		for _, u := range users {
+			s.data[tag][u] = true
+		}
+	}
+}
+
+func (s *adStatsStore) saveLocked() {
+	raw := make(map[string][]string)
+	for tag, set := range s.data {
+		for u := range set {
+			raw[tag] = append(raw[tag], u)
+		}
+	}
+	b, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		log.Printf("ad stats marshal error: %v", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		log.Printf("ad stats mkdir error: %v", err)
+		return
+	}
+	if err := os.WriteFile(s.path, b, 0o644); err != nil {
+		log.Printf("ad stats write error: %v", err)
+	}
+}
+
+func (s *adStatsStore) record(tag, userID string) (newCount int, isNew bool) {
+	s.load()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data[tag] == nil {
+		s.data[tag] = make(map[string]bool)
+	}
+	if s.data[tag][userID] {
+		return len(s.data[tag]), false
+	}
+	s.data[tag][userID] = true
+	s.saveLocked()
+	return len(s.data[tag]), true
+}
+
+func (s *adStatsStore) statsForChannel(channel string) map[string]int {
+	s.load()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	res := make(map[string]int)
+	prefix := channel + "/"
+	for tag, users := range s.data {
+		if strings.HasPrefix(tag, prefix) {
+			res[tag] = len(users)
+		}
+	}
+	return res
 }
 
 type DataStore interface {
@@ -1604,6 +1707,10 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		switch msg.Command() {
 		case "start":
 			handleStart(bot, msg, session, xrCfg)
+		case "adlink":
+			handleAdLink(bot, msg)
+		case "adcheck":
+			handleAdCheck(bot, msg)
 		case "sync_inbounds":
 			handleSyncInbounds(bot, msg, xrCfg)
 		case "migrate_users":
@@ -1672,6 +1779,11 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		referrerID = strings.TrimPrefix(args, "ref_")
 	}
 
+	if args != "" && strings.HasPrefix(args, "ad_") {
+		adTag := strings.TrimPrefix(args, "ad_")
+		adStats.record(adTag, userID)
+	}
+
 	isNew := userStore.IsNewUser(userID)
 	if isNew && referrerID != "" && referrerID != userID {
 		if err := userStore.RecordReferral(userID, referrerID); err == nil {
@@ -1709,6 +1821,105 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	if claimed, err := userStore.IsStartBonusClaimed(userID); err == nil && !claimed {
 		sendChannelBonusOffer(bot, chatID)
 	}
+}
+
+func handleAdLink(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	isAdmin := false
+	for _, id := range adminIDs {
+		if id == msg.From.ID {
+			isAdmin = true
+			break
+		}
+	}
+	if !isAdmin {
+		m := tgbotapi.NewMessage(chatID, "доступ только для админов")
+		_, _ = bot.Send(m)
+		return
+	}
+
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) < 1 {
+		m := tgbotapi.NewMessage(chatID, "использование: /adlink <канал или @канал> [ид_поста]\nпример: /adlink @mychannel 123 или /adlink @mychannel (тогда сгенерирую случайный id)")
+		_, _ = bot.Send(m)
+		return
+	}
+	channel := strings.TrimPrefix(args[0], "@")
+	if channel == "" {
+		m := tgbotapi.NewMessage(chatID, "укажи канал, например @mychannel")
+		_, _ = bot.Send(m)
+		return
+	}
+	postID := ""
+	if len(args) > 1 {
+		postID = args[1]
+	} else {
+		postID = randomSlug(8)
+	}
+
+	tag := fmt.Sprintf("%s/%s", channel, postID)
+	startParam := "ad_" + tag
+	link := fmt.Sprintf("https://t.me/%s?start=%s", bot.Self.UserName, startParam)
+
+	text := fmt.Sprintf("Рекламная ссылка:\nканал: @%s\nпост: %s\nstart: %s\n\n%s", channel, postID, startParam, link)
+	m := tgbotapi.NewMessage(chatID, text)
+	m.DisableWebPagePreview = true
+	_, _ = bot.Send(m)
+}
+
+func handleAdCheck(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	isAdmin := false
+	for _, id := range adminIDs {
+		if id == msg.From.ID {
+			isAdmin = true
+			break
+		}
+	}
+	if !isAdmin {
+		m := tgbotapi.NewMessage(chatID, "доступ только для админов")
+		_, _ = bot.Send(m)
+		return
+	}
+
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) < 1 {
+		m := tgbotapi.NewMessage(chatID, "использование: /adcheck <канал|@канал>\nпример: /adcheck @mychannel")
+		_, _ = bot.Send(m)
+		return
+	}
+	channel := strings.TrimPrefix(args[0], "@")
+	stats := adStats.statsForChannel(channel)
+	if len(stats) == 0 {
+		m := tgbotapi.NewMessage(chatID, fmt.Sprintf("нет данных по каналу @%s", channel))
+		_, _ = bot.Send(m)
+		return
+	}
+
+	// sort tags by count desc
+	type item struct {
+		tag   string
+		count int
+	}
+	var items []item
+	for tag, c := range stats {
+		items = append(items, item{tag: tag, count: c})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].count > items[j].count })
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Статистика по @%s:\n", channel))
+	for _, it := range items {
+		post := strings.TrimPrefix(it.tag, channel+"/")
+		link := fmt.Sprintf("https://t.me/%s", it.tag)
+		if post != "" {
+			link = fmt.Sprintf("https://t.me/%s/%s", channel, post)
+		}
+		b.WriteString(fmt.Sprintf("• пост %s — %d переходов (%s)\n", post, it.count, link))
+	}
+	m := tgbotapi.NewMessage(chatID, b.String())
+	m.DisableWebPagePreview = true
+	_, _ = bot.Send(m)
 }
 
 func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
@@ -2022,6 +2233,15 @@ func escapeMarkdownV2(s string) string {
 		"!", "\\!",
 	)
 	return replacer.Replace(s)
+}
+
+func randomSlug(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteByte(letters[rand.Intn(len(letters))])
+	}
+	return b.String()
 }
 
 func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
