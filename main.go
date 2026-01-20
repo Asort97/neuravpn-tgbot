@@ -54,11 +54,23 @@ var (
 	channelUsernameEff = channelUsername
 	channelURLEff      = channelURL
 	channelChatIDEff   int64
-	adStats            = newAdStatsStore(filepath.Join("database", "ad_stats.json"))
+	adStats            = newAdStatsStore(resolveAdStatsPath())
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+}
+
+func resolveAdStatsPath() string {
+	if p := strings.TrimSpace(os.Getenv("AD_STATS_PATH")); p != "" {
+		return p
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return filepath.Join("database", "ad_stats.json")
+	}
+	base := filepath.Dir(exe)
+	return filepath.Join(base, "database", "ad_stats.json")
 }
 
 // throttling map (keyed by user id and action key)
@@ -1840,20 +1852,20 @@ func handleAdLink(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	args := strings.Fields(msg.CommandArguments())
 	if len(args) < 1 {
-		m := tgbotapi.NewMessage(chatID, "использование: /adlink <канал или @канал> [ид_поста]\nпример: /adlink @mychannel 123 или /adlink @mychannel (тогда сгенерирую случайный id)")
+		m := tgbotapi.NewMessage(chatID, "использование: /adlink <канал/@канал/https://t.me/...> [ид_поста]\nпример: /adlink @mychannel 123 или /adlink https://t.me/mychannel/45")
 		_, _ = bot.Send(m)
 		return
 	}
-	channel := strings.TrimPrefix(args[0], "@")
+	channel, postID := parseAdInput(args[0])
 	if channel == "" {
-		m := tgbotapi.NewMessage(chatID, "укажи канал, например @mychannel")
+		m := tgbotapi.NewMessage(chatID, "укажи канал, например @mychannel или ссылку https://t.me/mychannel")
 		_, _ = bot.Send(m)
 		return
 	}
-	postID := ""
 	if len(args) > 1 {
 		postID = args[1]
-	} else {
+	}
+	if postID == "" {
 		postID = randomSlug(8)
 	}
 
@@ -1884,11 +1896,11 @@ func handleAdCheck(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	args := strings.Fields(msg.CommandArguments())
 	if len(args) < 1 {
-		m := tgbotapi.NewMessage(chatID, "использование: /adcheck <канал|@канал>\nпример: /adcheck @mychannel")
+		m := tgbotapi.NewMessage(chatID, "использование: /adcheck <канал|@канал|ссылка>\nпример: /adcheck @mychannel")
 		_, _ = bot.Send(m)
 		return
 	}
-	channel := strings.TrimPrefix(args[0], "@")
+	channel, _ := parseAdInput(args[0])
 	stats := adStats.statsForChannel(channel)
 	if len(stats) == 0 {
 		m := tgbotapi.NewMessage(chatID, fmt.Sprintf("нет данных по каналу @%s", channel))
@@ -2233,6 +2245,33 @@ func escapeMarkdownV2(s string) string {
 		"!", "\\!",
 	)
 	return replacer.Replace(s)
+}
+
+func parseAdInput(raw string) (channel, post string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	raw = strings.TrimPrefix(raw, "@")
+	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") {
+		if u, err := url.Parse(raw); err == nil {
+			// path like /channel or /channel/post
+			parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+			if len(parts) > 0 {
+				channel = parts[0]
+			}
+			if len(parts) > 1 {
+				post = parts[1]
+			}
+			return channel, post
+		}
+	}
+	parts := strings.Split(raw, "/")
+	channel = parts[0]
+	if len(parts) > 1 {
+		post = parts[1]
+	}
+	return channel, post
 }
 
 func randomSlug(n int) string {
