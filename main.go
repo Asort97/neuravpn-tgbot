@@ -1843,7 +1843,9 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	chatID := msg.Chat.ID
 	userID := strconv.FormatInt(msg.From.ID, 10)
 	isNew := userStore.IsNewUser(userID)
-	logAction(bot, msg.From.ID, msg.From.UserName, "🚀 старт", isNew)
+	if isNew {
+		logAction(bot, msg.From.ID, msg.From.UserName, "", true)
+	}
 	args := msg.CommandArguments()
 	referrerID := ""
 	if args != "" && strings.HasPrefix(args, "ref_") {
@@ -2017,7 +2019,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "android_next_") ||
 			strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "ios_next_") ||
 			strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "macos_next_") ||
-			strings.HasSuffix(data, "_current") || data == "copy_key") {
+			strings.HasSuffix(data, "_current") || data == "copy_key" || data == "nav_menu") {
 		logAction(bot, userID, username, actionName, false)
 	}
 
@@ -2256,11 +2258,6 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		if p, ok := ratePlanByID[id]; ok {
 			handleRateSelection(bot, cq, session, p)
 			// Уведомление в лог-чат о выборе тарифа
-			planMsg := fmt.Sprintf("💸 Пользователь ID:%d выбрал тариф: %s (%d дн., %.0f₽)", userID, p.Title, p.Days, p.Amount)
-			m := tgbotapi.NewMessage(logChatID, planMsg)
-			m.ParseMode = "HTML"
-			m.DisableWebPagePreview = true
-			_, _ = bot.Send(m)
 			return
 		}
 	case data == "check_payment":
@@ -2405,7 +2402,7 @@ func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNe
 		ls.IsNew = true
 	}
 	ls.Last = now
-	if len(ls.Actions) == 0 || ls.Actions[len(ls.Actions)-1] != action {
+	if strings.TrimSpace(action) != "" && (len(ls.Actions) == 0 || ls.Actions[len(ls.Actions)-1] != action) {
 		ls.Actions = append(ls.Actions, action)
 	}
 	logSessionMu.Unlock()
@@ -2426,9 +2423,12 @@ func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNe
 	}
 	newMark := ""
 	if ls.IsNew {
-		newMark = " 🆕 НОВЫЙ"
+		newMark = " НОВЫЙ ПОЛЬЗОВАТЕЛЬ"
 	}
-	actions := strings.Join(ls.Actions, " → ")
+	actions := "—"
+	if len(ls.Actions) > 0 {
+		actions = strings.Join(ls.Actions, " → ")
+	}
 	text := fmt.Sprintf("👤 %s%s\n🕒 %s–%s · сессия %s\n🔗 действия: %s", userLink, newMark, ls.Start.Format("15:04"), ls.Last.Format("15:04"), minutesLabel(mins), actions)
 
 	if ls.MsgID == 0 {
@@ -2810,14 +2810,15 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg 
 	// Определить пригласившего напрямую здесь сложно без хранения связи; пропустим если неизвестно
 
 	// Уведомление в лог-чат о покупке тарифа
-	adminText := fmt.Sprintf("💳 <b>покупка тарифа</b>\n👤 пользователь: <code>%d</code>\n📦 тариф: <b>%s</b> (%d дн.)", userID, plan.Title, plan.Days)
-	m := tgbotapi.NewMessage(logChatID, adminText)
+	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">ID:%d</a>`, userID, userID)
+	if msg.From.UserName != "" {
+		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, msg.From.UserName, msg.From.UserName, userID)
+	}
+	payText := fmt.Sprintf("💰 %s оплатил %s за %.0f ₽ 🎉", userLink, plan.Title, plan.Amount)
+	m := tgbotapi.NewMessage(logChatID, payText)
 	m.ParseMode = "HTML"
 	m.DisableWebPagePreview = true
 	_, _ = bot.Send(m)
-
-	// Оставляем существующее короткое уведомление
-	sendMessageToAdmin(fmt.Sprintf("платёж от %d за %s", msg.From.ID, plan.Title), msg.From.UserName, bot, userID)
 	return nil
 }
 
@@ -2911,7 +2912,11 @@ func getActionName(data string) string {
 	}
 
 	if strings.HasPrefix(data, "rate_") {
-		return "выбор тарифа"
+		id := strings.TrimPrefix(data, "rate_")
+		if p, ok := ratePlanByID[id]; ok {
+			return fmt.Sprintf("выбор суммы: %s", p.Title)
+		}
+		return "выбор суммы"
 	}
 	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "macos_prev_") {
 		return "инструкция: назад"
