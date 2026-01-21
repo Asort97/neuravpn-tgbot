@@ -76,6 +76,57 @@ func resolveAdStatsPath() string {
 // throttling map (keyed by user id and action key)
 var lastActionKey = make(map[int64]map[string]time.Time)
 
+func sessionAction(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, action string, isNewUser bool) {
+	now := time.Now()
+	if session.SessionID == 0 {
+		session.SessionID = 1
+		session.SessionStart = now
+		session.LastActionAt = now
+		session.LastAction = action
+		session.Actions = []string{action}
+		return
+	}
+
+	if now.Sub(session.LastActionAt) > 10*time.Minute {
+		flushSessionLog(bot, chatID, session, isNewUser)
+		session.SessionID++
+		session.SessionStart = now
+		session.Actions = nil
+	}
+	session.LastAction = action
+	session.LastActionAt = now
+	session.Actions = append(session.Actions, action)
+}
+
+func flushSessionLog(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, wasNew bool) {
+	if session.SessionStart.IsZero() || session.LastActionAt.IsZero() {
+		return
+	}
+	dur := session.LastActionAt.Sub(session.SessionStart).Round(time.Minute)
+	if dur < time.Minute {
+		dur = time.Minute
+	}
+	userID := chatID
+	username := ""
+	if u, err := bot.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: chatID}}); err == nil && u.UserName != "" {
+		username = u.UserName
+	}
+	userLink := fmt.Sprintf("<a href=\"tg://user?id=%d\">ID:%d</a>", userID, userID)
+	if username != "" {
+		userLink = fmt.Sprintf("<a href=\"https://t.me/%s\">@%s</a> (ID:%d)", username, username, userID)
+	}
+	newMark := ""
+	if wasNew {
+		newMark = " 🆕 НОВЫЙ"
+	}
+	actions := strings.Join(session.Actions, " → ")
+	text := fmt.Sprintf("👤 %s%s\n🕒 %s–%s · сессия %s\n🔗 действия: %s", userLink, newMark, session.SessionStart.Format("15:04"), session.LastActionAt.Format("15:04"), dur, actions)
+	msg := tgbotapi.NewMessage(logChatID, text)
+	msg.ParseMode = "HTML"
+	msg.DisableWebPagePreview = true
+	_, _ = bot.Send(msg)
+}
+
 type SessionState string
 
 const (
@@ -230,6 +281,11 @@ type UserSession struct {
 	LastLink      string
 	CertFileName  string
 	CertFileBytes []byte
+	LastAction    string
+	LastActionAt  time.Time
+	SessionID     int
+	SessionStart  time.Time
+	Actions       []string
 }
 
 type xraySettings struct {
@@ -709,6 +765,7 @@ func updateSessionText(bot *tgbotapi.BotAPI, chatID int64, session *UserSession,
 			instruct.ResetState(chatID)
 			session.State = state
 			session.ContentType = "text"
+			sessionAction(bot, chatID, session, stripHTML(text), userStore.IsNewUser(strconv.FormatInt(chatID, 10)))
 			return nil
 		}
 	}
@@ -735,6 +792,7 @@ func replaceSessionWithText(bot *tgbotapi.BotAPI, chatID int64, session *UserSes
 	session.MessageID = sent.MessageID
 	session.State = state
 	session.ContentType = "text"
+	sessionAction(bot, chatID, session, stripHTML(text), userStore.IsNewUser(strconv.FormatInt(chatID, 10)))
 	return nil
 }
 
@@ -2308,6 +2366,25 @@ func extractAdTag(msg *tgbotapi.Message) string {
 		}
 	}
 	return ""
+}
+
+func stripHTML(s string) string {
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		if r == '<' {
+			inTag = true
+			continue
+		}
+		if r == '>' {
+			inTag = false
+			continue
+		}
+		if !inTag {
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
