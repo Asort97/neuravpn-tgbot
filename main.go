@@ -834,9 +834,6 @@ func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 
 func composeMenuText() string {
 	base := strings.TrimSpace(startText)
-	if strings.Contains(base, "%") {
-		base = strings.TrimSpace(fmt.Sprintf(startText, startTrialDays, channelBonusDays))
-	}
 	if base == "" {
 		return "Добро пожаловать! Используйте меню ниже, чтобы подключить VPN."
 	}
@@ -1846,17 +1843,28 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	if isNew {
 		logAction(bot, msg.From.ID, msg.From.UserName, "", true)
 	}
-	args := msg.CommandArguments()
+	args := strings.TrimSpace(msg.CommandArguments())
+	args = strings.TrimPrefix(args, "=")
+	if fields := strings.Fields(args); len(fields) > 0 {
+		args = fields[0]
+	} else {
+		args = ""
+	}
 	referrerID := ""
 	if args != "" && strings.HasPrefix(args, "ref_") {
 		referrerID = strings.TrimPrefix(args, "ref_")
+		if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil && refChatID > 0 {
+			referrerID = strconv.FormatInt(refChatID, 10)
+		} else {
+			referrerID = ""
+		}
 	}
 
 	if adTag := extractAdTag(msg); adTag != "" {
 		adStats.record(adTag, userID)
 	}
 
-	if isNew && referrerID != "" && referrerID != userID {
+	if referrerID != "" && referrerID != userID {
 		if err := userStore.RecordReferral(userID, referrerID); err == nil {
 			_ = userStore.AddDays(referrerID, 15)
 			_, _ = ensureXrayAccess(xrayCfg, referrerID, fallbackEmail(referrerID), 15, true)
@@ -1878,11 +1886,13 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 				nmsg.ParseMode = "HTML"
 				_, _ = bot.Send(nmsg)
 
-				adminMsg := fmt.Sprintf("🆕 <b>Реферал:</b> Пользователь <code>%s</code> (ID:%s) перешёл по ссылке пользователя <code>%s</code> (ID:%s)\nПригласившему начислено +15 дней.", newUserName, userID, referrerID, referrerID)
+				adminMsg := fmt.Sprintf("🎁 <b>%s</b> (ID:%s) перешёл по ссылке пользователя <code>%s</code> (ID:%s)", newUserName, userID, referrerID, referrerID)
 				amsg := tgbotapi.NewMessage(logChatID, adminMsg)
 				amsg.ParseMode = "HTML"
 				_, _ = bot.Send(amsg)
 			}
+		} else {
+			log.Printf("referral record failed: user=%s ref=%s err=%v", userID, referrerID, err)
 		}
 	}
 
