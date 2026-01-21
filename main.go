@@ -282,6 +282,13 @@ type logSession struct {
 	IsNew   bool
 }
 
+func minutesLabel(n int) string {
+	if n <= 1 {
+		return "1 мин"
+	}
+	return fmt.Sprintf("%d мин", n)
+}
+
 type xraySettings struct {
 	client        *xray.XRayClient
 	inboundID     int
@@ -759,7 +766,6 @@ func updateSessionText(bot *tgbotapi.BotAPI, chatID int64, session *UserSession,
 			instruct.ResetState(chatID)
 			session.State = state
 			session.ContentType = "text"
-			sessionAction(bot, chatID, session, stripHTML(text), userStore.IsNewUser(strconv.FormatInt(chatID, 10)))
 			return nil
 		}
 	}
@@ -786,7 +792,6 @@ func replaceSessionWithText(bot *tgbotapi.BotAPI, chatID int64, session *UserSes
 	session.MessageID = sent.MessageID
 	session.State = state
 	session.ContentType = "text"
-	sessionAction(bot, chatID, session, stripHTML(text), userStore.IsNewUser(strconv.FormatInt(chatID, 10)))
 	return nil
 }
 
@@ -1837,6 +1842,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSession, xrCfg *xraySettings) {
 	chatID := msg.Chat.ID
 	userID := strconv.FormatInt(msg.From.ID, 10)
+	isNew := userStore.IsNewUser(userID)
+	logAction(bot, msg.From.ID, msg.From.UserName, "🚀 старт", isNew)
 	args := msg.CommandArguments()
 	referrerID := ""
 	if args != "" && strings.HasPrefix(args, "ref_") {
@@ -1847,7 +1854,6 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		adStats.record(adTag, userID)
 	}
 
-	isNew := userStore.IsNewUser(userID)
 	if isNew && referrerID != "" && referrerID != userID {
 		if err := userStore.RecordReferral(userID, referrerID); err == nil {
 			_ = userStore.AddDays(referrerID, 15)
@@ -2003,9 +2009,17 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	ackText := ""
 
 	// Логирование действия для админов (не логируем навигацию по инструкциям и шаги)
-	// username := cq.From.UserName
+	username := cq.From.UserName
 	userID := int64(cq.From.ID)
-	// actionName := getActionName(data)
+	actionName := getActionName(data)
+	if actionName != "" &&
+		!(strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "win_next_") ||
+			strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "android_next_") ||
+			strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "ios_next_") ||
+			strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "macos_next_") ||
+			strings.HasSuffix(data, "_current") || data == "copy_key") {
+		logAction(bot, userID, username, actionName, false)
+	}
 
 	switch {
 	case data == "nav_menu":
@@ -2391,7 +2405,9 @@ func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNe
 		ls.IsNew = true
 	}
 	ls.Last = now
-	ls.Actions = append(ls.Actions, action)
+	if len(ls.Actions) == 0 || ls.Actions[len(ls.Actions)-1] != action {
+		ls.Actions = append(ls.Actions, action)
+	}
 	logSessionMu.Unlock()
 
 	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">ID:%d</a>`, userID, userID)
@@ -2404,15 +2420,16 @@ func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNe
 		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, username, username, userID)
 	}
 	dur := ls.Last.Sub(ls.Start).Round(time.Minute)
-	if dur < time.Minute {
-		dur = time.Minute
+	mins := int(math.Round(dur.Minutes()))
+	if mins < 1 {
+		mins = 1
 	}
 	newMark := ""
 	if ls.IsNew {
 		newMark = " 🆕 НОВЫЙ"
 	}
 	actions := strings.Join(ls.Actions, " → ")
-	text := fmt.Sprintf("👤 %s%s\n🕒 %s–%s · сессия %s\n🔗 действия: %s", userLink, newMark, ls.Start.Format("15:04"), ls.Last.Format("15:04"), dur, actions)
+	text := fmt.Sprintf("👤 %s%s\n🕒 %s–%s · сессия %s\n🔗 действия: %s", userLink, newMark, ls.Start.Format("15:04"), ls.Last.Format("15:04"), minutesLabel(mins), actions)
 
 	if ls.MsgID == 0 {
 		msg := tgbotapi.NewMessage(logChatID, text)
