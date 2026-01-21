@@ -1791,8 +1791,7 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		referrerID = strings.TrimPrefix(args, "ref_")
 	}
 
-	if args != "" && strings.HasPrefix(args, "ad_") {
-		adTag := strings.TrimPrefix(args, "ad_")
+	if adTag := extractAdTag(msg); adTag != "" {
 		adStats.record(adTag, userID)
 	}
 
@@ -2281,6 +2280,34 @@ func randomSlug(n int) string {
 		b.WriteByte(letters[rand.Intn(len(letters))])
 	}
 	return b.String()
+}
+
+func extractAdTag(msg *tgbotapi.Message) string {
+	// Primary: command arguments
+	args := strings.TrimSpace(msg.CommandArguments())
+	args = strings.TrimPrefix(args, "=")
+	if strings.HasPrefix(args, "ad_") {
+		return strings.TrimPrefix(args, "ad_")
+	}
+
+	// Fallback: parse from full text (/start=ad_xxx or start=ad_xxx)
+	text := strings.TrimSpace(msg.Text)
+	text = strings.TrimPrefix(text, "/")
+	text = strings.TrimPrefix(text, "start")
+	text = strings.TrimLeft(text, " =")
+	if strings.HasPrefix(text, "ad_") {
+		return strings.TrimPrefix(text, "ad_")
+	}
+
+	// Fallback: search "start=ad_"
+	if idx := strings.Index(msg.Text, "start=ad_"); idx != -1 {
+		val := msg.Text[idx+len("start="):]
+		val = strings.Fields(val)[0]
+		if strings.HasPrefix(val, "ad_") {
+			return strings.TrimPrefix(val, "ad_")
+		}
+	}
+	return ""
 }
 
 func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
