@@ -55,6 +55,8 @@ var (
 	channelURLEff      = channelURL
 	channelChatIDEff   int64
 	adStats            = newAdStatsStore(resolveAdStatsPath())
+	logSessionMu       sync.Mutex
+	logSessions        = make(map[int64]*logSession) // key: userID
 )
 
 func init() {
@@ -84,11 +86,12 @@ func sessionAction(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, act
 		session.LastActionAt = now
 		session.LastAction = action
 		session.Actions = []string{action}
+		logAction(bot, chatID, "", action, isNewUser)
 		return
 	}
 
 	if now.Sub(session.LastActionAt) > 10*time.Minute {
-		flushSessionLog(bot, chatID, session, isNewUser)
+		// start new session
 		session.SessionID++
 		session.SessionStart = now
 		session.Actions = nil
@@ -96,6 +99,7 @@ func sessionAction(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, act
 	session.LastAction = action
 	session.LastActionAt = now
 	session.Actions = append(session.Actions, action)
+	logAction(bot, chatID, "", action, isNewUser)
 }
 
 func flushSessionLog(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, wasNew bool) {
@@ -106,25 +110,7 @@ func flushSessionLog(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, w
 	if dur < time.Minute {
 		dur = time.Minute
 	}
-	userID := chatID
-	username := ""
-	if u, err := bot.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: chatID}}); err == nil && u.UserName != "" {
-		username = u.UserName
-	}
-	userLink := fmt.Sprintf("<a href=\"tg://user?id=%d\">ID:%d</a>", userID, userID)
-	if username != "" {
-		userLink = fmt.Sprintf("<a href=\"https://t.me/%s\">@%s</a> (ID:%d)", username, username, userID)
-	}
-	newMark := ""
-	if wasNew {
-		newMark = " 🆕 НОВЫЙ"
-	}
-	actions := strings.Join(session.Actions, " → ")
-	text := fmt.Sprintf("👤 %s%s\n🕒 %s–%s · сессия %s\n🔗 действия: %s", userLink, newMark, session.SessionStart.Format("15:04"), session.LastActionAt.Format("15:04"), dur, actions)
-	msg := tgbotapi.NewMessage(logChatID, text)
-	msg.ParseMode = "HTML"
-	msg.DisableWebPagePreview = true
-	_, _ = bot.Send(msg)
+	_ = dur // legacy; no-op
 }
 
 type SessionState string
@@ -286,6 +272,14 @@ type UserSession struct {
 	SessionID     int
 	SessionStart  time.Time
 	Actions       []string
+}
+
+type logSession struct {
+	MsgID   int
+	Start   time.Time
+	Last    time.Time
+	Actions []string
+	IsNew   bool
 }
 
 type xraySettings struct {
@@ -2009,16 +2003,9 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	ackText := ""
 
 	// Логирование действия для админов (не логируем навигацию по инструкциям и шаги)
-	username := cq.From.UserName
+	// username := cq.From.UserName
 	userID := int64(cq.From.ID)
-	actionName := getActionName(data)
-	if !(strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "win_next_") ||
-		strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "android_next_") ||
-		strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "ios_next_") ||
-		strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "macos_next_") || data == "ios_current" ||
-		data == "windows" || data == "android" || data == "ios" || data == "macos" || data == "nav_status") {
-		notifyAdmins(bot, userID, username, actionName)
-	}
+	// actionName := getActionName(data)
 
 	switch {
 	case data == "nav_menu":
@@ -2385,6 +2372,76 @@ func stripHTML(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNew bool) {
+	now := time.Now()
+	logSessionMu.Lock()
+	ls := logSessions[userID]
+	if ls == nil || now.Sub(ls.Last) > 10*time.Minute {
+		ls = &logSession{
+			Start:   now,
+			Last:    now,
+			Actions: []string{},
+			IsNew:   isNew,
+		}
+		logSessions[userID] = ls
+	}
+	if isNew {
+		ls.IsNew = true
+	}
+	ls.Last = now
+	ls.Actions = append(ls.Actions, action)
+	logSessionMu.Unlock()
+
+	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">ID:%d</a>`, userID, userID)
+	if username == "" {
+		if u, err := bot.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: userID}}); err == nil && u.UserName != "" {
+			username = u.UserName
+		}
+	}
+	if username != "" {
+		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, username, username, userID)
+	}
+	dur := ls.Last.Sub(ls.Start).Round(time.Minute)
+	if dur < time.Minute {
+		dur = time.Minute
+	}
+	newMark := ""
+	if ls.IsNew {
+		newMark = " 🆕 НОВЫЙ"
+	}
+	actions := strings.Join(ls.Actions, " → ")
+	text := fmt.Sprintf("👤 %s%s\n🕒 %s–%s · сессия %s\n🔗 действия: %s", userLink, newMark, ls.Start.Format("15:04"), ls.Last.Format("15:04"), dur, actions)
+
+	if ls.MsgID == 0 {
+		msg := tgbotapi.NewMessage(logChatID, text)
+		msg.ParseMode = "HTML"
+		msg.DisableWebPagePreview = true
+		if sent, err := bot.Send(msg); err == nil {
+			logSessionMu.Lock()
+			ls.MsgID = sent.MessageID
+			logSessionMu.Unlock()
+		}
+		return
+	}
+
+	edit := tgbotapi.NewEditMessageText(logChatID, ls.MsgID, text)
+	edit.ParseMode = "HTML"
+	edit.DisableWebPagePreview = true
+	if _, err := bot.Send(edit); err != nil {
+		// fallback: send new
+		msg := tgbotapi.NewMessage(logChatID, text)
+		msg.ParseMode = "HTML"
+		msg.DisableWebPagePreview = true
+		if sent, err2 := bot.Send(msg); err2 == nil {
+			logSessionMu.Lock()
+			ls.MsgID = sent.MessageID
+			logSessionMu.Unlock()
+		} else {
+			log.Printf("log action send failed: %v; fallback err: %v", err, err2)
+		}
+	}
 }
 
 func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
@@ -2854,15 +2911,7 @@ func getActionName(data string) string {
 }
 
 func notifyAdmins(bot *tgbotapi.BotAPI, userID int64, username, action string) {
-	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">ID:%d</a>`, userID, userID)
-	if username != "" {
-		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, username, username, userID)
-	}
-	text := fmt.Sprintf("📊 действие: <b>%s</b>\nпользователь: %s", action, userLink)
-	msg := tgbotapi.NewMessage(logChatID, text)
-	msg.ParseMode = "HTML"
-	msg.DisableWebPagePreview = true
-	_, _ = bot.Send(msg)
+	logAction(bot, userID, username, action, false)
 }
 
 // Simple referral stats screen
