@@ -244,10 +244,10 @@ type DataStore interface {
 }
 
 var ratePlans = []RatePlan{
-	{ID: "30d", Title: "30 дней", Amount: 100, Days: 30},
-	{ID: "60d", Title: "60 дней", Amount: 150, Days: 60},
-	{ID: "90d", Title: "90 дней", Amount: 200, Days: 90},
-	{ID: "365d", Title: "365 дней", Amount: 650, Days: 365},
+	{ID: "30d", Title: "30 дней", Amount: 99, Days: 30},
+	{ID: "60d", Title: "60 дней", Amount: 169, Days: 60},
+	{ID: "90d", Title: "90 дней", Amount: 249, Days: 90},
+	{ID: "365d", Title: "365 дней", Amount: 949, Days: 365},
 }
 
 var ratePlanByID = func() map[string]RatePlan {
@@ -280,6 +280,8 @@ type logSession struct {
 	Last    time.Time
 	Actions []string
 	IsNew   bool
+	Sending bool
+	Dirty   bool
 }
 
 func minutesLabel(n int) string {
@@ -2426,48 +2428,82 @@ func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNe
 	if username != "" {
 		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, username, username, userID)
 	}
-	dur := ls.Last.Sub(ls.Start).Round(time.Minute)
-	mins := int(math.Round(dur.Minutes()))
-	if mins < 1 {
-		mins = 1
-	}
-	newMark := ""
-	if ls.IsNew {
-		newMark = " НОВЫЙ ПОЛЬЗОВАТЕЛЬ"
-	}
-	actions := "—"
-	if len(ls.Actions) > 0 {
-		actions = strings.Join(ls.Actions, " → ")
-	}
-	text := fmt.Sprintf("👤 %s%s\n🕒 %s–%s · сессия %s\n🔗 действия: %s", userLink, newMark, ls.Start.Format("15:04"), ls.Last.Format("15:04"), minutesLabel(mins), actions)
 
-	if ls.MsgID == 0 {
-		msg := tgbotapi.NewMessage(logChatID, text)
-		msg.ParseMode = "HTML"
-		msg.DisableWebPagePreview = true
-		if sent, err := bot.Send(msg); err == nil {
-			logSessionMu.Lock()
-			ls.MsgID = sent.MessageID
+	for {
+		logSessionMu.Lock()
+		ls = logSessions[userID]
+		if ls == nil {
 			logSessionMu.Unlock()
+			return
 		}
-		return
-	}
 
-	edit := tgbotapi.NewEditMessageText(logChatID, ls.MsgID, text)
-	edit.ParseMode = "HTML"
-	edit.DisableWebPagePreview = true
-	if _, err := bot.Send(edit); err != nil {
-		// fallback: send new
-		msg := tgbotapi.NewMessage(logChatID, text)
-		msg.ParseMode = "HTML"
-		msg.DisableWebPagePreview = true
-		if sent, err2 := bot.Send(msg); err2 == nil {
-			logSessionMu.Lock()
-			ls.MsgID = sent.MessageID
+		if ls.Sending {
+			ls.Dirty = true
 			logSessionMu.Unlock()
+			return
+		}
+
+		dur := ls.Last.Sub(ls.Start).Round(time.Minute)
+		mins := int(math.Round(dur.Minutes()))
+		if mins < 1 {
+			mins = 1
+		}
+		newMark := ""
+		if ls.IsNew {
+			newMark = " НОВЫЙ ПОЛЬЗОВАТЕЛЬ"
+		}
+		actions := "—"
+		if len(ls.Actions) > 0 {
+			actions = strings.Join(ls.Actions, " → ")
+		}
+		text := fmt.Sprintf("👤 %s%s\n🕒 %s–%s · сессия %s\n🔗 действия: %s", userLink, newMark, ls.Start.Format("15:04"), ls.Last.Format("15:04"), minutesLabel(mins), actions)
+		msgID := ls.MsgID
+		ls.Sending = true
+		logSessionMu.Unlock()
+
+		newMsgID := 0
+		if msgID == 0 {
+			msg := tgbotapi.NewMessage(logChatID, text)
+			msg.ParseMode = "HTML"
+			msg.DisableWebPagePreview = true
+			if sent, err := bot.Send(msg); err == nil {
+				newMsgID = sent.MessageID
+			} else {
+				log.Printf("log action send failed: %v", err)
+			}
 		} else {
-			log.Printf("log action send failed: %v; fallback err: %v", err, err2)
+			edit := tgbotapi.NewEditMessageText(logChatID, msgID, text)
+			edit.ParseMode = "HTML"
+			edit.DisableWebPagePreview = true
+			if _, err := bot.Send(edit); err != nil {
+				msg := tgbotapi.NewMessage(logChatID, text)
+				msg.ParseMode = "HTML"
+				msg.DisableWebPagePreview = true
+				if sent, err2 := bot.Send(msg); err2 == nil {
+					newMsgID = sent.MessageID
+				} else {
+					log.Printf("log action edit failed: %v; fallback send failed: %v", err, err2)
+				}
+			}
 		}
+
+		logSessionMu.Lock()
+		ls = logSessions[userID]
+		if ls == nil {
+			logSessionMu.Unlock()
+			return
+		}
+		if newMsgID != 0 {
+			ls.MsgID = newMsgID
+		}
+		ls.Sending = false
+		if ls.Dirty {
+			ls.Dirty = false
+			logSessionMu.Unlock()
+			continue
+		}
+		logSessionMu.Unlock()
+		return
 	}
 }
 
