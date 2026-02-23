@@ -35,7 +35,7 @@ const (
 	channelUsername   = "@neuravpn"
 	channelURL        = "https://t.me/neuravpn"
 )
-const startText = `<tg-emoji emoji-id="5343693752999383705">👋</tg-emoji> добро пожаловать!
+const startText = `<tg-emoji emoji-id="5346299917679757635">👋</tg-emoji> добро пожаловать!
 
 этот бот поможет подключить neuravpn с понятными инструкциями для любой платформы.
 
@@ -716,7 +716,7 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 		keyLine = fmt.Sprintf("<code>%s</code>", info.link)
 	}
 
-	text := fmt.Sprintf(`🔌 подключить neuravpn
+	text := fmt.Sprintf(`<tg-emoji emoji-id="5346325906526868503">🔌</tg-emoji> подключить neuravpn
 
 наше приложение для ios, android и windows сейчас в разработке, но мы нашли оптимальный компромисс.
 временный доступ осуществляется через сторонние клиенты — они отлично работают!
@@ -2220,7 +2220,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		}
 		stars := starsAmountForPlan(p)
 		text := fmt.Sprintf(
-			"💰 покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nнажми «оплатить ⭐».",
+			"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nнажми «оплатить ⭐».",
 			p.Days, p.Amount, stars,
 		)
 		kb := tgbotapi.NewInlineKeyboardMarkup(
@@ -2513,7 +2513,7 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 	chatID := cq.Message.Chat.ID
 	session.PendingPlanID = ""
 	var builder strings.Builder
-	builder.WriteString("💰 покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nпосле выбора можно оплатить картой или звёздами.\n\nтарифы:\n")
+	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nпосле выбора можно оплатить картой или звёздами.\n\nтарифы:\n")
 	for _, plan := range ratePlans {
 		builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽\n", plan.Days, plan.Amount))
 	}
@@ -2526,7 +2526,7 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 
 	stars := starsAmountForPlan(plan)
 	text := fmt.Sprintf(
-		"💰 покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nвыберите способ оплаты:",
+		"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nвыберите способ оплаты:",
 		plan.Days, plan.Amount, stars,
 	)
 	_ = updateSessionText(bot, chatID, session, stateChoosePay, text, "HTML", choosePayKeyboard(plan))
@@ -2693,7 +2693,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	refBonus := refCount * referralBonusDays
 
 	header := fmt.Sprintf(
-		"👤 профиль\n🪪 id: <code>%d</code>\n📧 mail: %s\n🎁 рефералы: %d (дней: %d)",
+		"<tg-emoji emoji-id=\"5343693752999383705\">👤</tg-emoji> профиль\n🪪 id: <code>%d</code>\n📧 mail: %s\n<tg-emoji emoji-id=\"5345823764720426390\">🎁</tg-emoji> рефералы: %d (дней: %d)",
 		userID, emailEsc, refCount, refBonus,
 	)
 
@@ -2996,7 +2996,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(link), shareText)
 
 	text := fmt.Sprintf(
-		"🎁 +15 дней к доступу\n\n"+
+		"<tg-emoji emoji-id=\"5345823764720426390\">🎁</tg-emoji> +15 дней к доступу\n\n"+
 			"кстати, у нас есть реферальная программа.\nприводишь друга → получаешь +15 дней доступа.\n\n"+
 			"🔗 твоя ссылка\n<code>%s</code>\n\n"+
 			"пришло друзей: %d\nнакопленный бонус: %d дней.",
@@ -3014,7 +3014,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 }
 func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "📞 поддержка\n\nесть вопросы или предложения? пиши: @asortiment97\nответим лично, никаких почтовых ящиков."
+	text := "<tg-emoji emoji-id=\"5346123042336573193\">📞</tg-emoji> поддержка\n\nесть вопросы или предложения? пиши: @asortiment97\nответим лично, никаких почтовых ящиков."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
