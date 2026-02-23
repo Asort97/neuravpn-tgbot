@@ -934,12 +934,12 @@ func mainMenuInlineKeyboardRaw() rawInlineKeyboardMarkup {
 	return rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{
-				rawCallbackButton("🔌 подключить VPN", "nav_get_vpn", "", "5346325906526868503"),
-				rawCallbackButton("👤 профиль/оплата", "nav_status", "", ""),
+				rawCallbackButton("подключить VPN", "nav_get_vpn", "", "5346325906526868503"),
+				rawCallbackButton("профиль/оплата", "nav_status", "", "5343693752999383705"),
 			},
 			{
-				rawCallbackButton("🎁 +15 дней", "nav_referral", "", "5345823764720426390"),
-				rawCallbackButton("📞 поддержка", "nav_support", "", ""),
+				rawCallbackButton("+15 дней", "nav_referral", "", "5345823764720426390"),
+				rawCallbackButton("поддержка", "nav_support", "", "5346123042336573193"),
 			},
 		},
 	}
@@ -2847,6 +2847,17 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	}
 
 	profileText := header + accessBlock
+
+	kbRaw := rawInlineKeyboardMarkup{
+		InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
+			{rawCallbackButton("✏️ e-mail", "edit_email", "", "")},
+			{rawCallbackButton("⬅️ меню", "nav_menu", "", "")},
+		},
+	}
+	if err := updateSessionTextRaw(bot, chatID, session, stateStatus, profileText, "HTML", kbRaw); err == nil {
+		return
+	}
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
