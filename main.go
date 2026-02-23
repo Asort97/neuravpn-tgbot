@@ -35,7 +35,7 @@ const (
 	channelUsername   = "@neuravpn"
 	channelURL        = "https://t.me/neuravpn"
 )
-const startText = `<tg-emoji emoji-id="5343693752999383705"></tg-emoji> добро пожаловать!
+const startText = `<tg-emoji emoji-id="5343693752999383705">👋</tg-emoji> добро пожаловать!
 
 этот бот поможет подключить neuravpn с понятными инструкциями для любой платформы.
 
