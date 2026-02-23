@@ -735,6 +735,18 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 
 	session.LastAccess = text
 	session.LastLink = info.link
+	kbRaw := rawInlineKeyboardMarkup{
+		InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("инструкции", "nav_instructions", "", "")},
+			{
+				rawCallbackButton("профиль", "nav_status", "", "5343693752999383705"),
+				rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+			},
+		},
+	}
+	if err := updateSessionTextRaw(bot, chatID, session, stateMenu, text, "HTML", kbRaw); err == nil {
+		return nil
+	}
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
