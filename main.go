@@ -1772,6 +1772,9 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 	}
 
 	if msg.IsCommand() {
+		// For command-driven navigation we always send a new message,
+		// while callback-button navigation keeps edit-in-place behavior.
+		session.MessageID = 0
 		switch msg.Command() {
 		case "start":
 			handleStart(bot, msg, session, xrCfg)
