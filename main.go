@@ -934,12 +934,12 @@ func mainMenuInlineKeyboardRaw() rawInlineKeyboardMarkup {
 	return rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{
-				rawCallbackButton("подключить VPN", "nav_get_vpn", "primary", "5346325906526868503"),
-				rawCallbackButton("профиль/оплата", "nav_status", "primary", ""),
+				rawCallbackButton("🔌 подключить VPN", "nav_get_vpn", "", "5346325906526868503"),
+				rawCallbackButton("👤 профиль/оплата", "nav_status", "", ""),
 			},
 			{
-				rawCallbackButton("+15 дней", "nav_referral", "success", "5345823764720426390"),
-				rawCallbackButton("поддержка", "nav_support", "danger", ""),
+				rawCallbackButton("🎁 +15 дней", "nav_referral", "", "5345823764720426390"),
+				rawCallbackButton("📞 поддержка", "nav_support", "", ""),
 			},
 		},
 	}
