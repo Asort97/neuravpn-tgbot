@@ -820,6 +820,131 @@ func replaceSessionWithDocument(bot *tgbotapi.BotAPI, chatID int64, session *Use
 	return nil
 }
 
+type rawInlineKeyboardButton struct {
+	Text              string  `json:"text"`
+	CallbackData      *string `json:"callback_data,omitempty"`
+	URL               *string `json:"url,omitempty"`
+	Style             string  `json:"style,omitempty"`
+	IconCustomEmojiID string  `json:"icon_custom_emoji_id,omitempty"`
+}
+
+type rawInlineKeyboardMarkup struct {
+	InlineKeyboard [][]rawInlineKeyboardButton `json:"inline_keyboard"`
+}
+
+func rawCallbackButton(text, callbackData, style, iconCustomEmojiID string) rawInlineKeyboardButton {
+	cb := callbackData
+	return rawInlineKeyboardButton{
+		Text:              text,
+		CallbackData:      &cb,
+		Style:             style,
+		IconCustomEmojiID: iconCustomEmojiID,
+	}
+}
+
+func sendMessageRaw(bot *tgbotapi.BotAPI, chatID int64, text string, parseMode string, replyMarkup interface{}) (int, error) {
+	params := tgbotapi.Params{}
+	params.AddNonZero64("chat_id", chatID)
+	params["text"] = text
+	if parseMode != "" {
+		params["parse_mode"] = parseMode
+	}
+	params.AddBool("disable_web_page_preview", true)
+	if replyMarkup != nil {
+		if err := params.AddInterface("reply_markup", replyMarkup); err != nil {
+			return 0, err
+		}
+	}
+
+	resp, err := bot.MakeRequest("sendMessage", params)
+	if err != nil {
+		return 0, err
+	}
+	if !resp.Ok {
+		return 0, fmt.Errorf("telegram sendMessage error %d: %s", resp.ErrorCode, resp.Description)
+	}
+
+	var sent struct {
+		MessageID int `json:"message_id"`
+	}
+	if err := json.Unmarshal(resp.Result, &sent); err != nil {
+		return 0, err
+	}
+	if sent.MessageID == 0 {
+		return 0, errors.New("telegram sendMessage returned empty message_id")
+	}
+
+	return sent.MessageID, nil
+}
+
+func editMessageTextRaw(bot *tgbotapi.BotAPI, chatID int64, messageID int, text string, parseMode string, replyMarkup interface{}) error {
+	params := tgbotapi.Params{}
+	params.AddNonZero64("chat_id", chatID)
+	params.AddNonZero("message_id", messageID)
+	params["text"] = text
+	if parseMode != "" {
+		params["parse_mode"] = parseMode
+	}
+	params.AddBool("disable_web_page_preview", true)
+	if replyMarkup != nil {
+		if err := params.AddInterface("reply_markup", replyMarkup); err != nil {
+			return err
+		}
+	}
+
+	resp, err := bot.MakeRequest("editMessageText", params)
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fmt.Errorf("telegram editMessageText error %d: %s", resp.ErrorCode, resp.Description)
+	}
+
+	return nil
+}
+
+func updateSessionTextRaw(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, state SessionState, text string, parseMode string, keyboard rawInlineKeyboardMarkup) error {
+	if session.MessageID != 0 {
+		err := editMessageTextRaw(bot, chatID, session.MessageID, text, parseMode, keyboard)
+		if err == nil {
+			instruct.ResetState(chatID)
+			session.State = state
+			session.ContentType = "text"
+			return nil
+		}
+	}
+
+	if session.MessageID != 0 {
+		_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, session.MessageID))
+	}
+
+	instruct.ResetState(chatID)
+	sentMessageID, err := sendMessageRaw(bot, chatID, text, parseMode, keyboard)
+	if err != nil {
+		return err
+	}
+
+	session.MessageID = sentMessageID
+	session.State = state
+	session.ContentType = "text"
+	return nil
+}
+
+func mainMenuInlineKeyboardRaw() rawInlineKeyboardMarkup {
+	return rawInlineKeyboardMarkup{
+		InlineKeyboard: [][]rawInlineKeyboardButton{
+			{
+				rawCallbackButton("подключить VPN", "nav_get_vpn", "primary", "5346325906526868503"),
+				rawCallbackButton("профиль/оплата", "nav_status", "primary", ""),
+			},
+			{
+				rawCallbackButton("+15 дней", "nav_referral", "success", "5345823764720426390"),
+				rawCallbackButton("поддержка", "nav_support", "danger", ""),
+			},
+		},
+	}
+}
+
 func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -843,6 +968,9 @@ func composeMenuText() string {
 
 func showMainMenu(bot *tgbotapi.BotAPI, chatID int64, session *UserSession) error {
 	text := composeMenuText()
+	if err := updateSessionTextRaw(bot, chatID, session, stateMenu, text, "HTML", mainMenuInlineKeyboardRaw()); err == nil {
+		return nil
+	}
 	return updateSessionText(bot, chatID, session, stateMenu, text, "HTML", mainMenuInlineKeyboard())
 }
 
