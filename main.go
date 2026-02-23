@@ -2478,13 +2478,17 @@ func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNe
 			edit.ParseMode = "HTML"
 			edit.DisableWebPagePreview = true
 			if _, err := bot.Send(edit); err != nil {
-				msg := tgbotapi.NewMessage(logChatID, text)
-				msg.ParseMode = "HTML"
-				msg.DisableWebPagePreview = true
-				if sent, err2 := bot.Send(msg); err2 == nil {
-					newMsgID = sent.MessageID
+				if strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
+					// no-op: same text already in log message
 				} else {
-					log.Printf("log action edit failed: %v; fallback send failed: %v", err, err2)
+					msg := tgbotapi.NewMessage(logChatID, text)
+					msg.ParseMode = "HTML"
+					msg.DisableWebPagePreview = true
+					if sent, err2 := bot.Send(msg); err2 == nil {
+						newMsgID = sent.MessageID
+					} else {
+						log.Printf("log action edit failed: %v; fallback send failed: %v", err, err2)
+					}
 				}
 			}
 		}
