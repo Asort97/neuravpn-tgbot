@@ -1016,6 +1016,13 @@ func sendReferralSubscriptionPrompt(bot *tgbotapi.BotAPI, chatID int64) {
 	_, _ = bot.Send(msg)
 }
 
+func formatUserLabel(username string, userID int64) string {
+	if strings.TrimSpace(username) != "" {
+		return "@" + username
+	}
+	return fmt.Sprintf("ID:%d", userID)
+}
+
 func finalizeReferralAfterSubscription(bot *tgbotapi.BotAPI, newUserID int64, newUsername string, xrCfg *xraySettings) (bool, error) {
 	newUserIDStr := strconv.FormatInt(newUserID, 10)
 	referrerID, granted, err := userStore.ConfirmReferralAndRewardReferrer(newUserIDStr, int64(referralBonusDays), time.Now())
@@ -1028,10 +1035,7 @@ func finalizeReferralAfterSubscription(bot *tgbotapi.BotAPI, newUserID int64, ne
 
 	_, _ = ensureXrayAccess(xrCfg, referrerID, fallbackEmail(referrerID), int64(referralBonusDays), true)
 
-	newUserLabel := fmt.Sprintf("ID:%d", newUserID)
-	if strings.TrimSpace(newUsername) != "" {
-		newUserLabel = "@" + newUsername
-	}
+	newUserLabel := formatUserLabel(newUsername, newUserID)
 
 	if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
 		refDays, _ := userStore.GetDays(referrerID)
@@ -1042,7 +1046,7 @@ func finalizeReferralAfterSubscription(bot *tgbotapi.BotAPI, newUserID int64, ne
 		_, _ = bot.Send(nmsg)
 	}
 
-	adminMsg := fmt.Sprintf("✅ <b>%s</b> (ID:%s) подтвердил подписку, пригласившему <code>%s</code> начислено +%d дней", newUserLabel, newUserIDStr, referrerID, referralBonusDays)
+	adminMsg := fmt.Sprintf("✅ <b>%s</b> (ID:%s) подписался по рефералке пользователя <code>%s</code> (ID:%s). Пригласившему начислено +%d дней", newUserLabel, newUserIDStr, referrerID, referrerID, referralBonusDays)
 	amsg := tgbotapi.NewMessage(logChatID, adminMsg)
 	amsg.ParseMode = "HTML"
 	_, _ = bot.Send(amsg)
@@ -2050,6 +2054,19 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		} else {
 			referrerID = ""
 		}
+	}
+
+	if isNew {
+		newUserLabel := formatUserLabel(msg.From.UserName, msg.From.ID)
+		adminMsg := ""
+		if referrerID != "" && referrerID != userID {
+			adminMsg = fmt.Sprintf("🎁 НОВЫЙ ПОЛЬЗОВАТЕЛЬ <b>%s</b> (ID:%s) перешёл по реферальной ссылке пользователя <code>%s</code> (ID:%s)", newUserLabel, userID, referrerID, referrerID)
+		} else {
+			adminMsg = fmt.Sprintf("👤 НОВЫЙ ПОЛЬЗОВАТЕЛЬ <b>%s</b> (ID:%s)", newUserLabel, userID)
+		}
+		amsg := tgbotapi.NewMessage(logChatID, adminMsg)
+		amsg.ParseMode = "HTML"
+		_, _ = bot.Send(amsg)
 	}
 
 	if adTag := extractAdTag(msg); adTag != "" {
@@ -3206,7 +3223,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 
 	text := fmt.Sprintf(
 		"<tg-emoji emoji-id=\"5345823764720426390\">🎁</tg-emoji> +15 дней к доступу\n\n"+
-			"кстати, у нас есть реферальная программа.\nприводишь друга → получаешь +15 дней доступа.\n\n"+
+			"кстати, у нас есть реферальная программа.\nприводишь друга → он подписывается на канал → получаешь +15 дней доступа.\n\n"+
 			"🔗 твоя ссылка\n<code>%s</code>\n\n"+
 			"пришло друзей: %d\nнакопленный бонус: %d дней.",
 		link, count, bonus,
