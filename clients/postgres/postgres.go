@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS users (
     referred_by TEXT,
     referral_used BOOLEAN NOT NULL DEFAULT FALSE,
     referrals_count INT NOT NULL DEFAULT 0,
+	referral_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+	referral_confirmed_at TIMESTAMPTZ,
+	referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE,
     email TEXT,
 	subscription_id TEXT,
 	start_bonus_claimed BOOLEAN NOT NULL DEFAULT FALSE,
@@ -58,7 +61,10 @@ CREATE TABLE IF NOT EXISTS users (
 		ALTER TABLE users
 			ADD COLUMN IF NOT EXISTS start_bonus_claimed BOOLEAN NOT NULL DEFAULT FALSE,
 			ADD COLUMN IF NOT EXISTS start_bonus_source TEXT,
-			ADD COLUMN IF NOT EXISTS start_bonus_claimed_at TIMESTAMPTZ;
+			ADD COLUMN IF NOT EXISTS start_bonus_claimed_at TIMESTAMPTZ,
+			ADD COLUMN IF NOT EXISTS referral_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+			ADD COLUMN IF NOT EXISTS referral_confirmed_at TIMESTAMPTZ,
+			ADD COLUMN IF NOT EXISTS referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE;
 	`)
 	return err
 }
@@ -287,11 +293,112 @@ func (s *Store) RecordReferral(newUserID, referrerID string) error {
 		return err
 	}
 
-	if _, err := tx.Exec(ctx, `UPDATE users SET referrals_count = referrals_count + 1, updated_at = NOW() WHERE id = $1`, referrerID); err != nil {
-		return err
+	return tx.Commit(ctx)
+}
+
+// ConfirmReferralAndRewardReferrer confirms referral subscription for new user and rewards referrer once.
+// Returns referrerID and whether reward was granted in this call.
+func (s *Store) ConfirmReferralAndRewardReferrer(newUserID string, rewardDays int64, at time.Time) (string, bool, error) {
+	ctx := context.Background()
+	if at.IsZero() {
+		at = time.Now()
 	}
 
-	return tx.Commit(ctx)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var referrerID string
+	var referralConfirmed bool
+	var rewardGiven bool
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(referred_by, ''),
+		       referral_confirmed,
+		       referrer_reward_given
+		FROM users
+		WHERE id = $1
+		FOR UPDATE
+	`, newUserID).Scan(&referrerID, &referralConfirmed, &rewardGiven)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+
+	referrerID = strings.TrimSpace(referrerID)
+	if referrerID == "" {
+		if !referralConfirmed {
+			if _, err := tx.Exec(ctx, `
+				UPDATE users
+				SET referral_confirmed = TRUE,
+					referral_confirmed_at = $2,
+					updated_at = NOW()
+				WHERE id = $1
+			`, newUserID, at.UTC()); err != nil {
+				return "", false, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return "", false, err
+		}
+		return "", false, nil
+	}
+
+	if !referralConfirmed {
+		if _, err := tx.Exec(ctx, `
+			UPDATE users
+			SET referral_confirmed = TRUE,
+				referral_confirmed_at = $2,
+				updated_at = NOW()
+			WHERE id = $1
+		`, newUserID, at.UTC()); err != nil {
+			return "", false, err
+		}
+	}
+
+	if rewardGiven {
+		if err := tx.Commit(ctx); err != nil {
+			return referrerID, false, err
+		}
+		return referrerID, false, nil
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO users (id, last_deduct, updated_at)
+		VALUES ($1, NOW(), NOW())
+		ON CONFLICT (id) DO NOTHING
+	`, referrerID); err != nil {
+		return "", false, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE users
+		SET referrals_count = referrals_count + 1,
+			days = days + $2,
+			last_deduct = CASE WHEN last_deduct IS NULL THEN NOW() ELSE last_deduct END,
+			updated_at = NOW()
+		WHERE id = $1
+	`, referrerID, rewardDays); err != nil {
+		return "", false, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE users
+		SET referrer_reward_given = TRUE,
+			updated_at = NOW()
+		WHERE id = $1
+	`, newUserID); err != nil {
+		return "", false, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", false, err
+	}
+
+	return referrerID, true, nil
 }
 
 func (s *Store) GetReferralsCount(userID string) int {

@@ -239,6 +239,7 @@ type DataStore interface {
 	IsStartBonusClaimed(userID string) (bool, error)
 	ClaimStartBonus(userID string, source string, at time.Time) (bool, error)
 	RecordReferral(newUserID, referrerID string) error
+	ConfirmReferralAndRewardReferrer(newUserID string, rewardDays int64, at time.Time) (string, bool, error)
 	GetReferralsCount(userID string) int
 }
 
@@ -1000,6 +1001,53 @@ func sendChannelBonusOffer(bot *tgbotapi.BotAPI, chatID int64) {
 		),
 	)
 	_, _ = bot.Send(msg)
+}
+
+func sendReferralSubscriptionPrompt(bot *tgbotapi.BotAPI, chatID int64) {
+	text := fmt.Sprintf("чтобы пригласившему начислилось +%d дней, подпишись на наш канал и нажми «проверить».", referralBonusDays)
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.DisableWebPagePreview = true
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("подписаться", channelURLEff),
+			tgbotapi.NewInlineKeyboardButtonData("проверить", "claim_sub_bonus"),
+		),
+	)
+	_, _ = bot.Send(msg)
+}
+
+func finalizeReferralAfterSubscription(bot *tgbotapi.BotAPI, newUserID int64, newUsername string, xrCfg *xraySettings) (bool, error) {
+	newUserIDStr := strconv.FormatInt(newUserID, 10)
+	referrerID, granted, err := userStore.ConfirmReferralAndRewardReferrer(newUserIDStr, int64(referralBonusDays), time.Now())
+	if err != nil {
+		return false, err
+	}
+	if !granted || strings.TrimSpace(referrerID) == "" {
+		return false, nil
+	}
+
+	_, _ = ensureXrayAccess(xrCfg, referrerID, fallbackEmail(referrerID), int64(referralBonusDays), true)
+
+	newUserLabel := fmt.Sprintf("ID:%d", newUserID)
+	if strings.TrimSpace(newUsername) != "" {
+		newUserLabel = "@" + newUsername
+	}
+
+	if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
+		refDays, _ := userStore.GetDays(referrerID)
+		refCount := userStore.GetReferralsCount(referrerID)
+		refMsg := fmt.Sprintf("🎉 <b>%s подтвердил подписку по вашей реферальной ссылке!</b>\n\n🎁 <b>вам начислено: +%d дней</b>\n👥 <b>всего рефералов:</b> %d\n⏱ <b>баланс:</b> %d дн.", newUserLabel, referralBonusDays, refCount, refDays)
+		nmsg := tgbotapi.NewMessage(refChatID, refMsg)
+		nmsg.ParseMode = "HTML"
+		_, _ = bot.Send(nmsg)
+	}
+
+	adminMsg := fmt.Sprintf("✅ <b>%s</b> (ID:%s) подтвердил подписку, пригласившему <code>%s</code> начислено +%d дней", newUserLabel, newUserIDStr, referrerID, referralBonusDays)
+	amsg := tgbotapi.NewMessage(logChatID, adminMsg)
+	amsg.ParseMode = "HTML"
+	_, _ = bot.Send(amsg)
+
+	return true, nil
 }
 
 func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
@@ -2010,30 +2058,21 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 
 	if referrerID != "" && referrerID != userID {
 		if err := userStore.RecordReferral(userID, referrerID); err == nil {
-			_ = userStore.AddDays(referrerID, 15)
-			_, _ = ensureXrayAccess(xrayCfg, referrerID, fallbackEmail(referrerID), 15, true)
 			if ok, _ := userStore.ClaimStartBonus(userID, "referral", time.Now()); ok {
 				_ = userStore.AddDays(userID, 7)
 				_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 7, true)
 			}
-			if refChatID, err := strconv.ParseInt(referrerID, 10, 64); err == nil {
-				refDays, _ := userStore.GetDays(referrerID)
-				refCount := userStore.GetReferralsCount(referrerID)
-				newUserName := msg.From.UserName
-				if newUserName == "" {
-					newUserName = fmt.Sprintf("ID:%s", userID)
-				} else {
-					newUserName = fmt.Sprintf("@%s", newUserName)
-				}
-				refMsg := fmt.Sprintf("🎉 <b>по вашей реферальной ссылке зарегистрировался %s!</b>\n\n🎁 <b>вам начислено: +15 дней</b>\n👥 <b>всего рефералов:</b> %d\n⏱ <b>баланс:</b> %d дн.", newUserName, refCount, refDays)
-				nmsg := tgbotapi.NewMessage(refChatID, refMsg)
-				nmsg.ParseMode = "HTML"
-				_, _ = bot.Send(nmsg)
 
-				adminMsg := fmt.Sprintf("🎁 <b>%s</b> (ID:%s) перешёл по ссылке пользователя <code>%s</code> (ID:%s)", newUserName, userID, referrerID, referrerID)
-				amsg := tgbotapi.NewMessage(logChatID, adminMsg)
-				amsg.ParseMode = "HTML"
-				_, _ = bot.Send(amsg)
+			subscribed, subErr := isSubscribedToChannel(bot, msg.From.ID)
+			if subErr != nil {
+				log.Printf("subscription check on start failed: %v", subErr)
+				sendReferralSubscriptionPrompt(bot, chatID)
+			} else if subscribed {
+				if _, err := finalizeReferralAfterSubscription(bot, msg.From.ID, msg.From.UserName, xrayCfg); err != nil {
+					log.Printf("finalize referral on start failed: %v", err)
+				}
+			} else {
+				sendReferralSubscriptionPrompt(bot, chatID)
 			}
 		} else {
 			log.Printf("referral record failed: user=%s ref=%s err=%v", userID, referrerID, err)
@@ -2732,11 +2771,6 @@ func handleClaimSubscriptionBonus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQue
 	userID := int64(cq.From.ID)
 	userIDStr := strconv.FormatInt(userID, 10)
 
-	if claimed, err := userStore.IsStartBonusClaimed(userIDStr); err == nil && claimed {
-		ackCallback(bot, cq, "бонус уже получен")
-		return
-	}
-
 	ok, err := isSubscribedToChannel(bot, userID)
 	if err != nil {
 		log.Printf("subscription check failed: %v", err)
@@ -2745,6 +2779,22 @@ func handleClaimSubscriptionBonus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQue
 	}
 	if !ok {
 		ackCallback(bot, cq, "сначала подпишитесь на канал")
+		return
+	}
+
+	refRewardGranted := false
+	if granted, err := finalizeReferralAfterSubscription(bot, userID, cq.From.UserName, xrCfg); err != nil {
+		log.Printf("finalize referral on claim_sub_bonus failed: %v", err)
+	} else {
+		refRewardGranted = granted
+	}
+
+	if claimed, err := userStore.IsStartBonusClaimed(userIDStr); err == nil && claimed {
+		if refRewardGranted {
+			ackCallback(bot, cq, "пригласившему начислено +15 дней")
+		} else {
+			ackCallback(bot, cq, "бонус уже получен")
+		}
 		return
 	}
 
@@ -2770,6 +2820,10 @@ func handleClaimSubscriptionBonus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQue
 	}
 
 	_ = sendAccess(info, userIDStr, chatID, channelBonusDays, userID, xrCfg, bot, session)
+	if refRewardGranted {
+		ackCallback(bot, cq, "бонус выдан, пригласившему +15 дней")
+		return
+	}
 	ackCallback(bot, cq, "бонус выдан")
 }
 
