@@ -23,6 +23,9 @@ type UserData struct {
 	ReferredBy          string `json:"referred_by"`     // ID пользователя, который пригласил
 	ReferralUsed        bool   `json:"referral_used"`   // использовал ли свой реферальный бонус
 	ReferralsCount      int    `json:"referrals_count"` // сколько человек пригласил
+	ReferralConfirmed   bool   `json:"referral_confirmed"`
+	ReferralConfirmedAt string `json:"referral_confirmed_at"`
+	ReferrerRewardGiven bool   `json:"referrer_reward_given"`
 	Email               string `json:"email"`
 	SubscriptionID      string `json:"subscription_id"`
 	StartBonusClaimed   bool   `json:"start_bonus_claimed"`
@@ -376,12 +379,64 @@ func (s *Store) RecordReferral(newUserID, referrerID string) error {
 	newUser.ReferralUsed = true
 	db[newUserID] = newUser
 
-	// Увеличиваем счетчик рефералов у пригласившего
+	return s.saveUsersLocked()
+}
+
+// ConfirmReferralAndRewardReferrer confirms referral subscription for new user and rewards referrer once.
+// Returns referrerID and whether reward was granted in this call.
+func (s *Store) ConfirmReferralAndRewardReferrer(newUserID string, rewardDays int64, at time.Time) (string, bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	newUser, exists := db[newUserID]
+	if !exists {
+		return "", false, nil
+	}
+	referrerID := strings.TrimSpace(newUser.ReferredBy)
+	if referrerID == "" {
+		return "", false, nil
+	}
+
+	changed := false
+	if !newUser.ReferralConfirmed {
+		if at.IsZero() {
+			at = time.Now()
+		}
+		newUser.ReferralConfirmed = true
+		newUser.ReferralConfirmedAt = at.UTC().Format(time.RFC3339)
+		changed = true
+	}
+
+	if newUser.ReferrerRewardGiven {
+		if changed {
+			db[newUserID] = newUser
+			if err := s.saveUsersLocked(); err != nil {
+				return referrerID, false, err
+			}
+		}
+		return referrerID, false, nil
+	}
+
 	referrer := db[referrerID]
 	referrer.ReferralsCount++
+	if rewardDays != 0 {
+		referrer.Days += rewardDays
+		if referrer.LastDeduct == "" {
+			referrer.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+		}
+	}
 	db[referrerID] = referrer
 
-	return s.saveUsersLocked()
+	newUser.ReferrerRewardGiven = true
+	db[newUserID] = newUser
+
+	if err := s.saveUsersLocked(); err != nil {
+		return referrerID, false, err
+	}
+
+	return referrerID, true, nil
 }
 
 // GetReferralsCount возвращает количество приглашенных пользователей

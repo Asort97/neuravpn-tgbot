@@ -1,4 +1,4 @@
-package instruct
+﻿package instruct
 
 import (
 	"fmt"
@@ -77,8 +77,8 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		photoPath string
 		caption   string
 	}{
-		{"", `скачайте <a href="https://github.com/Asort97/neuravpn-client/releases/tag/v1.0.0">neuravpn client</a>`},
-		{"", "после завершения загрузки выполните следующие действия:\n1) найдите загруженный файл release1.0.0.zip.\n2) щелкните правой кнопкой мыши на файле и выберите «извлечь все...» или воспользуйтесь архиватором, например, winrar или 7-zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
+		{"", `скачайте последнюю версию <a href="https://github.com/Asort97/neuravpn-client/releases">neuravpn client</a>`},
+		{"", "после завершения загрузки выполните следующие действия:\n1) найдите загруженный файл neuravpn.zip.\n2) щелкните правой кнопкой мыши на файле и выберите «извлечь все...» или воспользуйтесь архиватором, например, winrar или 7-zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
 		{"", "откройте папку с распакованными файлами. найдите файл neuravpn.exe. щелкните по нему правой кнопкой мыши и запустите от имени администратора."},
 		{"InstructionPhotos/Windows/0.mp4", "предварительно скопировав ключ доступа, в программе нажмите на кнопку «вставить из буфера»"},
 		{"InstructionPhotos/Windows/1.mp4", "подключитесь к vpn, нажав по большой кнопке в центру. вы подключены!"},
@@ -106,7 +106,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 
 	if step == 0 {
 		linkRow := tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("скачать ↗️", "https://github.com/Mahdi-zarei/nekoray/releases/download/4.3.5/nekoray-4.3.5-2025-05-16-windows64.zip"),
+			tgbotapi.NewInlineKeyboardButtonURL("скачать ↗️", "https://github.com/Asort97/neuravpn-client/releases"),
 		)
 
 		rows = append(rows, linkRow)
