@@ -2053,13 +2053,14 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		}
 	}
 
+	startAction := "start"
 	if isNew {
-		startAction := "новый пользователь"
+		startAction = "новый пользователь"
 		if referrerID != "" && referrerID != userID {
 			startAction = "новый пользователь по рефералке"
 		}
-		logAction(bot, msg.From.ID, msg.From.UserName, startAction, true)
 	}
+	logAction(bot, msg.From.ID, msg.From.UserName, startAction, isNew)
 
 	if adTag := extractAdTag(msg); adTag != "" {
 		adStats.record(adTag, userID)
