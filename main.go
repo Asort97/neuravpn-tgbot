@@ -2036,9 +2036,6 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	chatID := msg.Chat.ID
 	userID := strconv.FormatInt(msg.From.ID, 10)
 	isNew := userStore.IsNewUser(userID)
-	if isNew {
-		logAction(bot, msg.From.ID, msg.From.UserName, "", true)
-	}
 	args := strings.TrimSpace(msg.CommandArguments())
 	args = strings.TrimPrefix(args, "=")
 	if fields := strings.Fields(args); len(fields) > 0 {
@@ -2057,16 +2054,11 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	}
 
 	if isNew {
-		newUserLabel := formatUserLabel(msg.From.UserName, msg.From.ID)
-		adminMsg := ""
+		startAction := "новый пользователь"
 		if referrerID != "" && referrerID != userID {
-			adminMsg = fmt.Sprintf("🎁 НОВЫЙ ПОЛЬЗОВАТЕЛЬ <b>%s</b> (ID:%s) перешёл по реферальной ссылке пользователя <code>%s</code> (ID:%s)", newUserLabel, userID, referrerID, referrerID)
-		} else {
-			adminMsg = fmt.Sprintf("👤 НОВЫЙ ПОЛЬЗОВАТЕЛЬ <b>%s</b> (ID:%s)", newUserLabel, userID)
+			startAction = "новый пользователь по рефералке"
 		}
-		amsg := tgbotapi.NewMessage(logChatID, adminMsg)
-		amsg.ParseMode = "HTML"
-		_, _ = bot.Send(amsg)
+		logAction(bot, msg.From.ID, msg.From.UserName, startAction, true)
 	}
 
 	if adTag := extractAdTag(msg); adTag != "" {
