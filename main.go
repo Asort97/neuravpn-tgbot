@@ -3225,15 +3225,24 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 			"пришло друзей: %d\nнакопленный бонус: %d дней.",
 		link, count, bonus,
 	)
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("поделиться ссылкой", shareURL),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("меню", "nav_menu"),
-		),
-	)
-	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
+	share := shareURL
+	kbRaw := rawInlineKeyboardMarkup{
+		InlineKeyboard: [][]rawInlineKeyboardButton{
+			{
+				{
+					Text:              "поделиться ссылкой",
+					URL:               &share,
+					IconCustomEmojiID: "5345823764720426390",
+				},
+			},
+			{
+				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
+			},
+		},
+	}
+	if err := updateSessionTextRaw(bot, chatID, session, stateMenu, text, "HTML", kbRaw); err != nil {
+		log.Printf("handleReferral raw keyboard error: %v", err)
+	}
 }
 func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
