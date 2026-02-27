@@ -239,7 +239,7 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 			tgbotapi.NewInlineKeyboardButtonData("✅ Я оплатил", "check_payment"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад в меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("Назад в меню", "nav_menu"),
 		),
 	)
 
