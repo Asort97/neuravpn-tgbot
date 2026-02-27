@@ -3247,6 +3247,17 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
 	text := "<tg-emoji emoji-id=\"5346123042336573193\">📞</tg-emoji> поддержка\n\nесть вопросы или предложения? пиши: @asortiment97\nответим лично, никаких почтовых ящиков."
+	kbRaw := rawInlineKeyboardMarkup{
+		InlineKeyboard: [][]rawInlineKeyboardButton{
+			{
+				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
+			},
+		},
+	}
+	if err := updateSessionTextRaw(bot, chatID, session, stateMenu, text, "HTML", kbRaw); err == nil {
+		ackCallback(bot, cq, "поддержка")
+		return
+	}
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("меню", "nav_menu"),
