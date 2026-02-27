@@ -2995,20 +2995,24 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 	chatID := cq.Message.Chat.ID
 	instruct.ResetState(chatID)
 	text := "📖 инструкции\nвыбери платформу:"
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🖥️ Windows", "windows"),
-			tgbotapi.NewInlineKeyboardButtonData("📱 Android", "android"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🍏 iOS", "ios"),
-			tgbotapi.NewInlineKeyboardButtonData("💻 MacOS", "macos"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
-		),
-	)
-	_ = updateSessionText(bot, chatID, session, stateInstructions, text, "HTML", kb)
+	kbRaw := rawInlineKeyboardMarkup{
+		InlineKeyboard: [][]rawInlineKeyboardButton{
+			{
+				rawCallbackButton("🖥️ Windows", "windows", "", ""),
+				rawCallbackButton("📱 Android", "android", "", ""),
+			},
+			{
+				rawCallbackButton("🍏 iOS", "ios", "", ""),
+				rawCallbackButton("💻 MacOS", "macos", "", ""),
+			},
+			{
+				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
+			},
+		},
+	}
+	if err := updateSessionTextRaw(bot, chatID, session, stateInstructions, text, "HTML", kbRaw); err != nil {
+		log.Printf("handleInstructionsMenu raw keyboard error: %v", err)
+	}
 }
 func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, xrCfg *xraySettings, platform instruct.InstructType, step int) error {
 	prevMessageID := session.MessageID
