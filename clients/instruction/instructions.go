@@ -96,11 +96,11 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	var row []tgbotapi.InlineKeyboardButton
 
 	if step > 0 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", fmt.Sprintf("win_prev_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("назад", fmt.Sprintf("win_prev_%d", step)))
 	}
 	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "win_current"))
 	if step < len(steps)-1 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд ➡️", fmt.Sprintf("win_next_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд", fmt.Sprintf("win_next_%d", step)))
 	}
 	rows = append(rows, row)
 
@@ -234,11 +234,11 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	var row []tgbotapi.InlineKeyboardButton
 
 	if step > 0 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", fmt.Sprintf("android_prev_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("назад", fmt.Sprintf("android_prev_%d", step)))
 	}
 	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "android_current"))
 	if step < len(steps)-1 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд ➡️", fmt.Sprintf("android_next_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд", fmt.Sprintf("android_next_%d", step)))
 	}
 
 	rows = append(rows, row)
@@ -359,11 +359,11 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	var row []tgbotapi.InlineKeyboardButton
 
 	if step > 0 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", fmt.Sprintf("ios_prev_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("назад", fmt.Sprintf("ios_prev_%d", step)))
 	}
 	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "ios_current"))
 	if step < len(steps)-1 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд ➡️", fmt.Sprintf("ios_next_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд", fmt.Sprintf("ios_next_%d", step)))
 	}
 
 	rows = append(rows, row)
@@ -496,11 +496,11 @@ func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error)
 	var row []tgbotapi.InlineKeyboardButton
 
 	if step > 0 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", fmt.Sprintf("macos_prev_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("назад", fmt.Sprintf("macos_prev_%d", step)))
 	}
 	row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "macos_current"))
 	if step < len(steps)-1 {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд ➡️", fmt.Sprintf("macos_next_%d", step)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData("вперёд", fmt.Sprintf("macos_next_%d", step)))
 	}
 
 	rows = append(rows, row)

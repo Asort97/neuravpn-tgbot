@@ -1069,7 +1069,7 @@ func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
 		rows = append(rows, row)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_status"),
+		tgbotapi.NewInlineKeyboardButtonData("назад", "nav_status"),
 	))
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
@@ -1097,7 +1097,7 @@ func choosePayKeyboard(plan RatePlan) tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("💳 картой (%.0f ₽)", plan.Amount), "pay_card_"+plan.ID),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_topup"),
+			tgbotapi.NewInlineKeyboardButtonData("назад", "nav_topup"),
 			tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
 		),
 	)
@@ -2417,7 +2417,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 				tgbotapi.NewInlineKeyboardButtonURL("оплатить ⭐", link),
 			),
 			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_topup"),
+				tgbotapi.NewInlineKeyboardButtonData("назад", "nav_topup"),
 				tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
 			),
 		)
@@ -2439,7 +2439,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 				"<b>Продолжая и вводя e-mail, ты соглашаешься с <a href=\"https://telegra.ph/POLZOVATELSKOE-SOGLASHENIE-PUBLICHNAYA-OFERTA-SERVISA-HAPPY-CAT-VPN-10-27\">пользовательским соглашением</a>.</b>"
 			kb := tgbotapi.NewInlineKeyboardMarkup(
 				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_topup"),
+					tgbotapi.NewInlineKeyboardButtonData("назад", "nav_topup"),
 					tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
 				),
 			)
@@ -2927,8 +2927,8 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
-			{rawCallbackButton("✏️ e-mail", "edit_email", "", "")},
-			{rawCallbackButton("⬅️ меню", "nav_menu", "", "")},
+			{rawCallbackButton("e-mail", "edit_email", "", "5264870816671113060")},
+			{rawCallbackButton("меню", "nav_menu", "", "5264852846527941278")},
 		},
 	}
 	if err := updateSessionTextRaw(bot, chatID, session, stateStatus, profileText, "HTML", kbRaw); err == nil {
@@ -2943,7 +2943,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 			tgbotapi.NewInlineKeyboardButtonData("✏️ e-mail", "edit_email"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("меню", "nav_menu"),
 		),
 	)
 
@@ -2984,7 +2984,7 @@ func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *
 	text := "✏️ отправь новый e-mail сообщением."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("назад", "nav_status"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateEditEmail, text, "HTML", kb)
@@ -3005,7 +3005,7 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 			tgbotapi.NewInlineKeyboardButtonData("💻 MacOS", "macos"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("меню", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateInstructions, text, "HTML", kb)
@@ -3226,7 +3226,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 			tgbotapi.NewInlineKeyboardButtonURL("поделиться ссылкой", shareURL),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("меню", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
@@ -3236,7 +3236,7 @@ func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Us
 	text := "<tg-emoji emoji-id=\"5346123042336573193\">📞</tg-emoji> поддержка\n\nесть вопросы или предложения? пиши: @asortiment97\nответим лично, никаких почтовых ящиков."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("меню", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
