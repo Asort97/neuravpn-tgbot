@@ -738,10 +738,10 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 	session.LastLink = info.link
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
-			{rawCallbackButton("инструкции", "nav_instructions", "", "")},
+			{rawCallbackButton("инструкции", "nav_instructions", "", "5264991913274019640")},
 			{
 				rawCallbackButton("профиль", "nav_status", "", "5343693752999383705"),
-				rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
 			},
 		},
 	}
@@ -2943,7 +2943,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 			tgbotapi.NewInlineKeyboardButtonData("✏️ e-mail", "edit_email"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
 		),
 	)
 
@@ -3005,7 +3005,7 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 			tgbotapi.NewInlineKeyboardButtonData("💻 MacOS", "macos"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
 		),
 	)
 	_ = updateSessionText(bot, chatID, session, stateInstructions, text, "HTML", kb)
