@@ -2889,7 +2889,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	refBonus := refCount * referralBonusDays
 
 	header := fmt.Sprintf(
-		"<tg-emoji emoji-id=\"5343693752999383705\">👤</tg-emoji> профиль\n🪪 id: <code>%d</code>\n📧 mail: %s\n<tg-emoji emoji-id=\"5345823764720426390\">🎁</tg-emoji> рефералы: %d (дней: %d)",
+		"<tg-emoji emoji-id=\"5343693752999383705\">👤</tg-emoji> профиль\n• id: <code>%d</code>\n• mail: %s\n• рефералы: %d (дней: %d)",
 		userID, emailEsc, refCount, refBonus,
 	)
 
