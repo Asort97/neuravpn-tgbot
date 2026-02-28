@@ -2424,7 +2424,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		userID := strconv.FormatInt(cq.From.ID, 10)
 		if email, _ := userStore.GetEmail(userID); strings.TrimSpace(email) == "" {
 			text := "📧 Для оплаты картой нужен e-mail для чека.\nОтправь e-mail следующим сообщением (пример: name@example.com).\n\n" +
-				"<b>Продолжая и вводя e-mail, ты соглашаешься с <a href=\"https://telegra.ph/POLZOVATELSKOE-SOGLASHENIE-PUBLICHNAYA-OFERTA-SERVISA-HAPPY-CAT-VPN-10-27\">пользовательским соглашением</a>.</b>"
+				"<b>Продолжи, введя e-mail.</b>"
 			kb := tgbotapi.NewInlineKeyboardMarkup(
 				tgbotapi.NewInlineKeyboardRow(
 					tgbotapi.NewInlineKeyboardButtonData("назад", "nav_topup"),
@@ -2969,7 +2969,7 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 
 func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "✏️ отправь новый e-mail сообщением."
+	text := "<tg-emoji emoji-id=\"5264870816671113060\">✏️</tg-emoji> отправь новый e-mail сообщением."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("назад", "nav_status"),
