@@ -2982,7 +2982,7 @@ func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *
 func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
 	instruct.ResetState(chatID)
-	text := "📖 инструкции\nвыбери платформу:"
+	text := "<tg-emoji emoji-id=\"5264991913274019640\">🛠️</tg-emoji> инструкции\nвыбери платформу:"
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{
