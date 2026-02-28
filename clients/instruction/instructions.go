@@ -23,8 +23,8 @@ const (
 )
 
 const (
-	instructionIconBackID     = "5343693752999383705"
-	instructionIconNextID     = "5264991913274019640"
+	instructionIconBackID     = "5264852846527941278"
+	instructionIconNextID     = "5262783080313164902"
 	instructionIconDownloadID = "5264948349420739524"
 	instructionIconExitID     = "5264852846527941278"
 )
