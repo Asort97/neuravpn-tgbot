@@ -1301,6 +1301,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("bot init error: %v", err)
 	}
+	instruct.ValidateCustomEmojiIDs(bot)
 
 	loadExpiryReminderState()
 	startExpiryReminder(bot, xrayCfg)
