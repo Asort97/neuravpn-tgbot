@@ -23,6 +23,7 @@ import (
 	xray "github.com/Asort97/vpnBot/clients/Xray"
 	instruct "github.com/Asort97/vpnBot/clients/instruction"
 	pgstore "github.com/Asort97/vpnBot/clients/postgres"
+	rawkbd "github.com/Asort97/vpnBot/clients/rawkbd"
 	sqlite "github.com/Asort97/vpnBot/clients/sqLite"
 	yookassa "github.com/Asort97/vpnBot/clients/yooKassa"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -833,26 +834,12 @@ func replaceSessionWithDocument(bot *tgbotapi.BotAPI, chatID int64, session *Use
 	return nil
 }
 
-type rawInlineKeyboardButton struct {
-	Text              string  `json:"text"`
-	CallbackData      *string `json:"callback_data,omitempty"`
-	URL               *string `json:"url,omitempty"`
-	Style             string  `json:"style,omitempty"`
-	IconCustomEmojiID string  `json:"icon_custom_emoji_id,omitempty"`
-}
+type rawInlineKeyboardButton = rawkbd.Button
 
-type rawInlineKeyboardMarkup struct {
-	InlineKeyboard [][]rawInlineKeyboardButton `json:"inline_keyboard"`
-}
+type rawInlineKeyboardMarkup = rawkbd.Markup
 
 func rawCallbackButton(text, callbackData, style, iconCustomEmojiID string) rawInlineKeyboardButton {
-	cb := callbackData
-	return rawInlineKeyboardButton{
-		Text:              text,
-		CallbackData:      &cb,
-		Style:             style,
-		IconCustomEmojiID: iconCustomEmojiID,
-	}
+	return rawkbd.CallbackButton(text, callbackData, style, iconCustomEmojiID)
 }
 
 func sendMessageRaw(bot *tgbotapi.BotAPI, chatID int64, text string, parseMode string, replyMarkup interface{}) (int, error) {
