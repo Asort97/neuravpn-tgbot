@@ -1795,6 +1795,14 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 	chatID := msg.Chat.ID
 	session := getSession(chatID)
 
+	// Логируем slash-команды так же, как действия с кнопок.
+	// /start логируется отдельно внутри handleStart с более детальным контекстом.
+	if msg.IsCommand() {
+		if action := getCommandActionName(msg.Command()); action != "" {
+			logAction(bot, msg.From.ID, msg.From.UserName, action, false)
+		}
+	}
+
 	// Команда рассылки для админа
 	if msg.IsCommand() && msg.Command() == "notify" {
 		isAdmin := false
@@ -3189,6 +3197,31 @@ func getActionName(data string) string {
 	}
 
 	return data
+}
+
+func getCommandActionName(command string) string {
+	cmd := strings.ToLower(strings.TrimSpace(command))
+	switch cmd {
+	case "start":
+		return ""
+	case "topup", "пополнить", "пополнить_баланс":
+		return getActionName("nav_topup")
+	case "getvpn", "vpn", "подключить", "получитьvpn":
+		return getActionName("nav_get_vpn")
+	case "status", "profile", "профиль":
+		return getActionName("nav_status")
+	case "instructions", "инструкции":
+		return getActionName("nav_instructions")
+	case "referral", "рефералы":
+		return getActionName("nav_referral")
+	case "support", "поддержка":
+		return getActionName("nav_support")
+	default:
+		if cmd == "" {
+			return ""
+		}
+		return "/" + cmd
+	}
 }
 
 func notifyAdmins(bot *tgbotapi.BotAPI, userID int64, username, action string) {
