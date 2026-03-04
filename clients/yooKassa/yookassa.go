@@ -277,12 +277,6 @@ func (y *YooKassaClient) FindSucceededPayment(chatID int64) (*YooKassaPaymentRes
 	// обходим от самого нового к старому
 	for i := len(ids) - 1; i >= 0; i-- {
 		id := ids[i]
-		payMu.Lock()
-		already := processedPayments[id]
-		payMu.Unlock()
-		if already {
-			continue
-		}
 
 		payment, err := y.GetYooKassaPaymentStatus(id)
 		if err != nil {
@@ -290,9 +284,6 @@ func (y *YooKassaClient) FindSucceededPayment(chatID int64) (*YooKassaPaymentRes
 			continue
 		}
 		if payment.Status == "succeeded" || payment.Paid {
-			payMu.Lock()
-			processedPayments[id] = true
-			payMu.Unlock()
 			return payment, true, nil
 		}
 	}
