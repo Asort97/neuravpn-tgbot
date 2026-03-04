@@ -17,21 +17,28 @@ type Store struct {
 }
 
 type UserData struct {
-	Days                int64  `json:"days"`
-	CertRef             string `json:"certref"`
-	LastDeduct          string `json:"last_deduct"`     // ISO8601 timestamp
-	ReferredBy          string `json:"referred_by"`     // ID пользователя, который пригласил
-	ReferralUsed        bool   `json:"referral_used"`   // использовал ли свой реферальный бонус
-	ReferralsCount      int    `json:"referrals_count"` // сколько человек пригласил
-	ReferralConfirmed   bool   `json:"referral_confirmed"`
-	ReferralConfirmedAt string `json:"referral_confirmed_at"`
-	ReferrerRewardGiven bool   `json:"referrer_reward_given"`
-	Email               string `json:"email"`
-	SubscriptionID      string `json:"subscription_id"`
-	StartBonusClaimed   bool   `json:"start_bonus_claimed"`
-	StartBonusSource    string `json:"start_bonus_source"`
-	StartBonusClaimedAt string `json:"start_bonus_claimed_at"`
-	ConsentAt           string `json:"consent_at"` // ISO8601 timestamp, когда принял политику
+	Days                int64                         `json:"days"`
+	CertRef             string                        `json:"certref"`
+	LastDeduct          string                        `json:"last_deduct"`     // ISO8601 timestamp
+	ReferredBy          string                        `json:"referred_by"`     // ID пользователя, который пригласил
+	ReferralUsed        bool                          `json:"referral_used"`   // использовал ли свой реферальный бонус
+	ReferralsCount      int                           `json:"referrals_count"` // сколько человек пригласил
+	ReferralConfirmed   bool                          `json:"referral_confirmed"`
+	ReferralConfirmedAt string                        `json:"referral_confirmed_at"`
+	ReferrerRewardGiven bool                          `json:"referrer_reward_given"`
+	Email               string                        `json:"email"`
+	SubscriptionID      string                        `json:"subscription_id"`
+	StartBonusClaimed   bool                          `json:"start_bonus_claimed"`
+	StartBonusSource    string                        `json:"start_bonus_source"`
+	StartBonusClaimedAt string                        `json:"start_bonus_claimed_at"`
+	ConsentAt           string                        `json:"consent_at"` // ISO8601 timestamp, когда принял политику
+	AppliedPayments     map[string]AppliedPaymentMeta `json:"applied_payments,omitempty"`
+}
+
+type AppliedPaymentMeta struct {
+	Provider  string `json:"provider"`
+	PlanID    string `json:"plan_id"`
+	AppliedAt string `json:"applied_at"`
 }
 
 var (
@@ -450,4 +457,81 @@ func (s *Store) GetReferralsCount(userID string) int {
 		return userData.ReferralsCount
 	}
 	return 0
+}
+
+func (s *Store) IsPaymentApplied(userID, paymentID string) (bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	paymentID = strings.TrimSpace(paymentID)
+	if paymentID == "" {
+		return false, fmt.Errorf("paymentID is empty")
+	}
+
+	if ud, ok := db[userID]; ok && ud.AppliedPayments != nil {
+		if _, exists := ud.AppliedPayments[paymentID]; exists {
+			return true, nil
+		}
+	}
+
+	for _, ud := range db {
+		if ud.AppliedPayments == nil {
+			continue
+		}
+		if _, exists := ud.AppliedPayments[paymentID]; exists {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	userID = strings.TrimSpace(userID)
+	paymentID = strings.TrimSpace(paymentID)
+	provider = strings.TrimSpace(provider)
+	planID = strings.TrimSpace(planID)
+
+	if userID == "" {
+		return false, fmt.Errorf("userID is empty")
+	}
+	if paymentID == "" {
+		return false, fmt.Errorf("paymentID is empty")
+	}
+	if provider == "" {
+		return false, fmt.Errorf("provider is empty")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	ud := db[userID]
+	if ud.AppliedPayments == nil {
+		ud.AppliedPayments = make(map[string]AppliedPaymentMeta)
+	}
+	if _, exists := ud.AppliedPayments[paymentID]; exists {
+		return false, nil
+	}
+
+	ud.AppliedPayments[paymentID] = AppliedPaymentMeta{
+		Provider:  provider,
+		PlanID:    planID,
+		AppliedAt: at.UTC().Format(time.RFC3339),
+	}
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	db[userID] = ud
+
+	if err := s.saveUsersLocked(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

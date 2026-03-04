@@ -242,6 +242,8 @@ type DataStore interface {
 	RecordReferral(newUserID, referrerID string) error
 	ConfirmReferralAndRewardReferrer(newUserID string, rewardDays int64, at time.Time) (string, bool, error)
 	GetReferralsCount(userID string) int
+	IsPaymentApplied(userID, paymentID string) (bool, error)
+	MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error)
 }
 
 var ratePlans = []RatePlan{
@@ -1952,8 +1954,43 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			_ = updateSessionText(bot, chatID, session, stateTopUp, "Платёж есть, но тариф не ясен. Напиши в поддержку.", "", mainMenuInlineKeyboard())
 			return
 		}
+
+		userIDStr := strconv.FormatInt(msg.From.ID, 10)
+		paymentID := resolveStarsPaymentID(msg.SuccessfulPayment)
+		if paymentID == "" {
+			paymentID = strings.TrimSpace(msg.SuccessfulPayment.InvoicePayload)
+		}
+		if paymentID == "" {
+			paymentID = fmt.Sprintf("msg:%d", msg.MessageID)
+		}
+		paymentKey := buildAppliedPaymentKey("stars", paymentID)
+		alreadyApplied, err := userStore.IsPaymentApplied(userIDStr, paymentKey)
+		if err != nil {
+			log.Printf("stars IsPaymentApplied error: %v", err)
+			sendPaymentAlert(bot, "payment apply check failed", msg.From.ID, msg.From.UserName, paymentKey, plan.ID, err.Error())
+			return
+		}
+		if alreadyApplied {
+			if canProceedKey(msg.From.ID, "pay_skip_"+paymentKey, 5*time.Minute) {
+				sendPaymentAlert(bot, "payment apply skipped (already applied)", msg.From.ID, msg.From.UserName, paymentKey, plan.ID, "duplicate successful payment update")
+			}
+			return
+		}
+
 		if err := handleSuccessfulPayment(bot, msg, xrCfg, plan, session); err != nil {
 			log.Printf("handleSuccessfulPayment error: %v", err)
+			sendPaymentAlert(bot, "payment succeeded but access failed", msg.From.ID, msg.From.UserName, paymentKey, plan.ID, err.Error())
+			return
+		}
+
+		marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "stars", plan.ID, time.Now())
+		if err != nil {
+			log.Printf("stars MarkPaymentApplied error: %v", err)
+			sendPaymentAlert(bot, "access issued but mark applied failed", msg.From.ID, msg.From.UserName, paymentKey, plan.ID, err.Error())
+			return
+		}
+		if !marked && canProceedKey(msg.From.ID, "pay_skip_mark_"+paymentKey, 5*time.Minute) {
+			sendPaymentAlert(bot, "payment apply skipped (already applied)", msg.From.ID, msg.From.UserName, paymentKey, plan.ID, "mark returned duplicate")
 		}
 		return
 	}
@@ -2743,6 +2780,9 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 
 func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, xrCfg *xraySettings) {
 	chatID := cq.Message.Chat.ID
+	userID := int64(cq.From.ID)
+	userIDStr := strconv.FormatInt(userID, 10)
+
 	payment, ok, err := yookassaClient.FindSucceededPayment(chatID)
 	if err != nil {
 		log.Printf("FindSucceededPayment error: %v", err)
@@ -2754,7 +2794,6 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 		return
 	}
 
-	yookassaClient.ClearPayments(chatID)
 	meta := payment.Metadata
 	plan := resolvePlanFromMetadata(meta, session)
 	if plan.Title == "" {
@@ -2762,13 +2801,54 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 		return
 	}
 
-	fake := &tgbotapi.Message{Chat: cq.Message.Chat, From: cq.From}
-	if err := handleSuccessfulPayment(bot, fake, xrCfg, plan, session); err != nil {
-		log.Printf("handleSuccessfulPayment error: %v", err)
-		ackCallback(bot, cq, "Не удалось выдать доступ")
+	paymentKey := buildAppliedPaymentKey("yookassa", strings.TrimSpace(payment.ID))
+	if paymentKey == "" {
+		log.Printf("empty yookassa payment key for chat=%d", chatID)
+		ackCallback(bot, cq, "Ошибка проверки платежа, попробуй ещё раз")
 		return
 	}
 
+	alreadyApplied, err := userStore.IsPaymentApplied(userIDStr, paymentKey)
+	if err != nil {
+		log.Printf("yookassa IsPaymentApplied error: %v", err)
+		sendPaymentAlert(bot, "payment apply check failed", userID, cq.From.UserName, paymentKey, plan.ID, err.Error())
+		ackCallback(bot, cq, "Ошибка проверки платежа")
+		return
+	}
+	if alreadyApplied {
+		yookassaClient.ClearPayments(chatID)
+		if canProceedKey(userID, "pay_skip_"+paymentKey, 5*time.Minute) {
+			sendPaymentAlert(bot, "payment apply skipped (already applied)", userID, cq.From.UserName, paymentKey, plan.ID, "user retried check after applied")
+		}
+		ackCallback(bot, cq, "Платёж уже обработан")
+		return
+	}
+
+	fake := &tgbotapi.Message{Chat: cq.Message.Chat, From: cq.From}
+	if err := handleSuccessfulPayment(bot, fake, xrCfg, plan, session); err != nil {
+		log.Printf("handleSuccessfulPayment error: %v", err)
+		sendPaymentAlert(bot, "payment succeeded but access failed", userID, cq.From.UserName, paymentKey, plan.ID, err.Error())
+		ackCallback(bot, cq, "Оплата получена, но доступ пока не выдался. Нажми «Я оплатил» ещё раз через минуту или напиши в поддержку.")
+		return
+	}
+
+	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, time.Now())
+	if err != nil {
+		log.Printf("yookassa MarkPaymentApplied error: %v", err)
+		sendPaymentAlert(bot, "access issued but mark applied failed", userID, cq.From.UserName, paymentKey, plan.ID, err.Error())
+		ackCallback(bot, cq, "Доступ выдан, но возникла ошибка фиксации платежа. Мы уже разбираемся.")
+		return
+	}
+	if !marked {
+		yookassaClient.ClearPayments(chatID)
+		if canProceedKey(userID, "pay_skip_mark_"+paymentKey, 5*time.Minute) {
+			sendPaymentAlert(bot, "payment apply skipped (already applied)", userID, cq.From.UserName, paymentKey, plan.ID, "mark returned duplicate")
+		}
+		ackCallback(bot, cq, "Платёж уже обработан")
+		return
+	}
+
+	yookassaClient.ClearPayments(chatID)
 	ackCallback(bot, cq, fmt.Sprintf("Платеж за %s подтверждён", plan.Title))
 }
 
@@ -3140,6 +3220,54 @@ func resolvePlanFromMetadata(meta map[string]interface{}, session *UserSession) 
 		}
 	}
 	return plan
+}
+
+func buildAppliedPaymentKey(provider, paymentID string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	paymentID = strings.TrimSpace(paymentID)
+	if provider == "" || paymentID == "" {
+		return ""
+	}
+	return provider + ":" + paymentID
+}
+
+func resolveStarsPaymentID(p *tgbotapi.SuccessfulPayment) string {
+	if p == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(p.TelegramPaymentChargeID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(p.ProviderPaymentChargeID)
+}
+
+func sendPaymentAlert(bot *tgbotapi.BotAPI, event string, userID int64, username, paymentKey, planID, details string) {
+	if bot == nil {
+		return
+	}
+
+	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">ID:%d</a>`, userID, userID)
+	if strings.TrimSpace(username) != "" {
+		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, html.EscapeString(username), html.EscapeString(username), userID)
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("⚠️ <b>%s</b>\n", html.EscapeString(event)))
+	b.WriteString(fmt.Sprintf("user: %s\n", userLink))
+	if strings.TrimSpace(paymentKey) != "" {
+		b.WriteString(fmt.Sprintf("payment: <code>%s</code>\n", html.EscapeString(paymentKey)))
+	}
+	if strings.TrimSpace(planID) != "" {
+		b.WriteString(fmt.Sprintf("plan: <code>%s</code>\n", html.EscapeString(planID)))
+	}
+	if strings.TrimSpace(details) != "" {
+		b.WriteString(fmt.Sprintf("details: <code>%s</code>", html.EscapeString(details)))
+	}
+
+	msg := tgbotapi.NewMessage(logChatID, b.String())
+	msg.ParseMode = "HTML"
+	msg.DisableWebPagePreview = true
+	_, _ = bot.Send(msg)
 }
 
 func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id int64) {

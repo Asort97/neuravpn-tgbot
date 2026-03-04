@@ -510,6 +510,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 
 	// First ensure on primary inbound, capturing UUID and expiry
 	primaryID := inboundIDs[0]
+	primaryEmail := buildXrayClientEmail(email, tgID, primaryID)
 	primaryClient, err := x.GetClientByTelegram(primaryID, tgID)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -518,7 +519,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 	if primaryClient == nil {
 		primaryClient = &Client{
 			ID:      uuid.New().String(),
-			Email:   email,
+			Email:   primaryEmail,
 			Enable:  true,
 			Flow:    "xtls-rprx-vision",
 			LimitIP: 0,
@@ -532,8 +533,8 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		}
 	} else {
 		// normalize fields
-		if strings.TrimSpace(primaryClient.Email) == "" || primaryClient.Email != email {
-			primaryClient.Email = email
+		if strings.TrimSpace(primaryClient.Email) == "" || primaryClient.Email != primaryEmail {
+			primaryClient.Email = primaryEmail
 		}
 		primaryClient.Enable = true
 		primaryClient.Flow = "xtls-rprx-vision"
@@ -567,7 +568,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		// Prepare client data with same UUID and expiry from primary
 		clientData := &Client{
 			ID:         primaryClient.ID, // keep same UUID across inbounds
-			Email:      tagEmailForInbound(email, inboundID),
+			Email:      buildXrayClientEmail(email, tgID, inboundID),
 			Enable:     true,
 			Flow:       "xtls-rprx-vision",
 			LimitIP:    0,
@@ -598,17 +599,44 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 	return primaryClient, exp, nil
 }
 
-// tagEmailForInbound returns a unique email per inbound to avoid duplicate email errors.
-// If email contains '@', inserts "+inb<id>" before domain. Otherwise appends suffix.
-func tagEmailForInbound(email string, inboundID int) string {
-	email = strings.TrimSpace(email)
-	if email == "" {
-		return fmt.Sprintf("user_inb%d@happycat", inboundID)
+// buildXrayClientEmail returns a deterministic technical email for Xray client identity.
+// It is unique per Telegram user and inbound, while preserving the base domain if billing email is provided.
+func buildXrayClientEmail(billingEmail, tgID string, inboundID int) string {
+	billingEmail = strings.TrimSpace(billingEmail)
+	tgID = sanitizeEmailToken(tgID)
+	if tgID == "" {
+		tgID = "unknown"
 	}
-	parts := strings.SplitN(email, "@", 2)
+
+	parts := strings.SplitN(billingEmail, "@", 2)
 	if len(parts) == 2 {
-		local, domain := parts[0], parts[1]
-		return fmt.Sprintf("%s+inb%d@%s", local, inboundID, domain)
+		local := sanitizeEmailToken(parts[0])
+		domain := strings.TrimSpace(parts[1])
+		if local != "" && domain != "" {
+			return fmt.Sprintf("%s+tg%s+inb%d@%s", local, tgID, inboundID, domain)
+		}
 	}
-	return fmt.Sprintf("%s_inb%d@happycat", strings.ReplaceAll(email, "@", "_"), inboundID)
+
+	return fmt.Sprintf("tg%s_inb%d@happycat", tgID, inboundID)
+}
+
+func sanitizeEmailToken(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-' || r == '.':
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), ".")
 }

@@ -66,6 +66,20 @@ CREATE TABLE IF NOT EXISTS users (
 			ADD COLUMN IF NOT EXISTS referral_confirmed_at TIMESTAMPTZ,
 			ADD COLUMN IF NOT EXISTS referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE;
 	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS applied_payments (
+			payment_id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			plan_id TEXT,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_applied_payments_user_id ON applied_payments(user_id);
+	`)
 	return err
 }
 
@@ -409,6 +423,58 @@ func (s *Store) GetReferralsCount(userID string) int {
 		return 0
 	}
 	return count
+}
+
+func (s *Store) IsPaymentApplied(userID, paymentID string) (bool, error) {
+	ctx := context.Background()
+	paymentID = strings.TrimSpace(paymentID)
+	if paymentID == "" {
+		return false, fmt.Errorf("paymentID is empty")
+	}
+
+	var exists bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM applied_payments
+			WHERE payment_id = $1
+		)
+	`, paymentID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error) {
+	ctx := context.Background()
+	userID = strings.TrimSpace(userID)
+	paymentID = strings.TrimSpace(paymentID)
+	provider = strings.TrimSpace(provider)
+	planID = strings.TrimSpace(planID)
+
+	if userID == "" {
+		return false, fmt.Errorf("userID is empty")
+	}
+	if paymentID == "" {
+		return false, fmt.Errorf("paymentID is empty")
+	}
+	if provider == "" {
+		return false, fmt.Errorf("provider is empty")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO applied_payments (payment_id, user_id, provider, plan_id, applied_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (payment_id) DO NOTHING
+	`, paymentID, userID, provider, planID, at.UTC())
+	if err != nil {
+		return false, err
+	}
+
+	return tag.RowsAffected() > 0, nil
 }
 
 // GetAllUserIDs возвращает список всех user id из таблицы users
