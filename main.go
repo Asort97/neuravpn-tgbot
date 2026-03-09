@@ -323,6 +323,7 @@ var (
 	adminIDs       []int64
 	logChatID      int64 = -1003334019708
 	userSessions         = make(map[int64]*UserSession)
+	testMode       bool
 )
 
 var (
@@ -419,6 +420,25 @@ func isSubscribedToChannel(bot *tgbotapi.BotAPI, userID int64) (bool, error) {
 }
 
 func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addDays int64, createIfMissing bool) (*accessInfo, error) {
+	// В тестовом режиме возвращаем заглушку
+	if testMode {
+		fakeExpiry := time.Now().Add(30 * 24 * time.Hour)
+		fakeClient := &xray.Client{
+			ID:         "test-uuid-" + telegramUser,
+			Email:      email,
+			Enable:     true,
+			ExpiryTime: fakeExpiry.UnixMilli(),
+			SubID:      "test-sub-" + telegramUser,
+			TgID:       telegramUser,
+		}
+		return &accessInfo{
+			client:   fakeClient,
+			expireAt: fakeExpiry,
+			daysLeft: 30,
+			link:     "vless://test-key-for-" + telegramUser + "@example.com:443",
+		}, nil
+	}
+
 	if cfg == nil || cfg.client == nil {
 		return nil, fmt.Errorf("xray not configured")
 	}
@@ -1167,6 +1187,12 @@ func main() {
 	privacyURL = os.Getenv("PRIVACY_URL")
 	dbDSN := strings.TrimSpace(os.Getenv("DB_DSN"))
 
+	// Включаем тестовый режим по переменной окружения
+	testMode = strings.ToLower(strings.TrimSpace(os.Getenv("TEST_MODE"))) == "true"
+	if testMode {
+		log.Println("🧪 TEST MODE ENABLED - using mock data")
+	}
+
 	// Optional: override channel settings without code changes
 	if v := strings.TrimSpace(os.Getenv("CHANNEL_USERNAME")); v != "" {
 		if !strings.HasPrefix(v, "@") {
@@ -1224,8 +1250,12 @@ func main() {
 	serverPort, _ := strconv.Atoi(os.Getenv("XRAY_SERVER_PORT"))
 
 	xClient := xray.New(xrayUser, xrayPass, xrayHost, xrayPort, xrayBasePath)
-	if err := xClient.LoginToServer(); err != nil {
-		log.Fatalf("login to xray failed: %v", err)
+	if !testMode {
+		if err := xClient.LoginToServer(); err != nil {
+			log.Fatalf("login to xray failed: %v", err)
+		}
+	} else {
+		log.Println("🧪 Skipping xray login in test mode")
 	}
 
 	xrayCfg = &xraySettings{
@@ -2687,29 +2717,39 @@ func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNe
 
 		newMsgID := 0
 		if msgID == 0 {
-			msg := tgbotapi.NewMessage(logChatID, text)
-			msg.ParseMode = "HTML"
-			msg.DisableWebPagePreview = true
-			if sent, err := bot.Send(msg); err == nil {
-				newMsgID = sent.MessageID
+			if testMode {
+				// В тестовом режиме просто логируем без отправки
+				log.Printf("[TEST MODE] log action: %s", text)
 			} else {
-				log.Printf("log action send failed: %v", err)
+				msg := tgbotapi.NewMessage(logChatID, text)
+				msg.ParseMode = "HTML"
+				msg.DisableWebPagePreview = true
+				if sent, err := bot.Send(msg); err == nil {
+					newMsgID = sent.MessageID
+				} else {
+					log.Printf("log action send failed: %v", err)
+				}
 			}
 		} else {
-			edit := tgbotapi.NewEditMessageText(logChatID, msgID, text)
-			edit.ParseMode = "HTML"
-			edit.DisableWebPagePreview = true
-			if _, err := bot.Send(edit); err != nil {
-				if strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
-					// no-op: same text already in log message
-				} else {
-					msg := tgbotapi.NewMessage(logChatID, text)
-					msg.ParseMode = "HTML"
-					msg.DisableWebPagePreview = true
-					if sent, err2 := bot.Send(msg); err2 == nil {
-						newMsgID = sent.MessageID
+			if testMode {
+				// В тестовом режиме просто логируем
+				log.Printf("[TEST MODE] log action update: %s", text)
+			} else {
+				edit := tgbotapi.NewEditMessageText(logChatID, msgID, text)
+				edit.ParseMode = "HTML"
+				edit.DisableWebPagePreview = true
+				if _, err := bot.Send(edit); err != nil {
+					if strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
+						// no-op: same text already in log message
 					} else {
-						log.Printf("log action edit failed: %v; fallback send failed: %v", err, err2)
+						msg := tgbotapi.NewMessage(logChatID, text)
+						msg.ParseMode = "HTML"
+						msg.DisableWebPagePreview = true
+						if sent, err2 := bot.Send(msg); err2 == nil {
+							newMsgID = sent.MessageID
+						} else {
+							log.Printf("log action edit failed: %v; fallback send failed: %v", err, err2)
+						}
 					}
 				}
 			}
@@ -3090,6 +3130,7 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 		log.Printf("handleInstructionsMenu raw keyboard error: %v", err)
 	}
 }
+
 func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, xrCfg *xraySettings, platform instruct.InstructType, step int) error {
 	prevMessageID := session.MessageID
 	instruct.ResetState(chatID)

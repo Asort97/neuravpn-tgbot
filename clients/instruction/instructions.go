@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -211,15 +212,18 @@ func instructionURLButton(bot *tgbotapi.BotAPI, text, url, iconID, fallbackEmoji
 }
 
 func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
+	downloadURL := "https://asort97.github.io/neuravpn-site"
+	keyStep := 3
+
 	steps := []struct {
 		photoPath string
 		caption   string
 	}{
-		{"", `скачайте последнюю версию <a href="https://github.com/Asort97/neuravpn-client/releases">neuravpn client</a>`},
-		{"", "после завершения загрузки выполните следующие действия:\n1) найдите загруженный файл neuravpn.zip.\n2) щелкните правой кнопкой мыши на файле и выберите «извлечь все...» или воспользуйтесь архиватором, например, winrar или 7-zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
+		{"InstructionPhotos/Windows/neuravpn_app/0.png", `скачайте последнюю версию neuravpn c <a href="https://asort97.github.io/neuravpn-site/">сайта</a>, нажав кнопку "Скачать для Windows"`},
+		{"", "после завершения загрузки выполните следующие действия:\n1) найдите загруженный файл neuravpn_windows_vX.X.X.zip.\n2) щелкните правой кнопкой мыши на файле и выберите «извлечь все...» или воспользуйтесь архиватором, например, winrar или 7-zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
 		{"", "откройте папку с распакованными файлами. найдите файл neuravpn.exe. щелкните по нему правой кнопкой мыши и запустите от имени администратора."},
-		{"InstructionPhotos/Windows/0.mp4", "предварительно скопировав ключ доступа, в программе нажмите на кнопку «вставить из буфера»"},
-		{"InstructionPhotos/Windows/1.mp4", "подключитесь к vpn, нажав по большой кнопке в центру. вы подключены!"},
+		{"InstructionPhotos/Windows/0.mp4", "предварительно скопировав ключ доступа, в программе нажмите на кнопку «вставить из буфера» или просто нажмите на кнопку ниже \"авто-подключение\""},
+		{"InstructionPhotos/Windows/1.mp4", "подключитесь к vpn, нажав по большой кнопке в центру."},
 	}
 
 	// Границы
@@ -242,17 +246,26 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	}
 	rows = append(rows, row)
 
-	if step == 0 {
+	if step == 0 && strings.TrimSpace(downloadURL) != "" {
 		linkRow := []rawkbd.Button{
 			instructionURLButton(
 				bot,
 				"скачать",
-				"https://github.com/Asort97/neuravpn-client/releases",
+				downloadURL,
 				instructionIconDownloadID,
 				"⬇️",
 			),
 		}
 		rows = append(rows, linkRow)
+	}
+
+	if step == keyStep {
+		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
+			autoURL := "https://asort97.github.io/neuravpn-site/?open=1&auto=1&v=" + url.QueryEscape(key)
+			rows = append(rows, []rawkbd.Button{
+				instructionURLButton(bot, "авто-подключение", autoURL, "", "🔗"),
+			})
+		}
 	}
 
 	rows = append(rows, []rawkbd.Button{
@@ -262,7 +275,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	kb := rawkbd.Markup{InlineKeyboard: rows}
 
 	caption := steps[step].caption
-	if step == 3 {
+	if step == keyStep {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
 			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
 		}
@@ -324,6 +337,9 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 }
 
 func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
+	downloadURL := "https://play.google.com/store/apps/details?id=com.v2raytun.android&hl=ru"
+	keyStep := 1
+
 	steps := []struct {
 		photoPath string
 		caption   string
@@ -354,12 +370,12 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 
 	rows = append(rows, row)
 
-	if step == 0 {
+	if step == 0 && strings.TrimSpace(downloadURL) != "" {
 		linkRow := []rawkbd.Button{
 			instructionURLButton(
 				bot,
 				"скачать",
-				"https://play.google.com/store/apps/details?id=com.v2raytun.android&hl=ru",
+				downloadURL,
 				instructionIconDownloadID,
 				"⬇️",
 			),
@@ -374,7 +390,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	kb := rawkbd.Markup{InlineKeyboard: rows}
 
 	caption := steps[step].caption
-	if step == 1 {
+	if step == keyStep {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
 			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
 		}
