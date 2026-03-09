@@ -223,7 +223,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	}{
 		{"InstructionPhotos/Windows/neuravpn_app/0.png", `скачайте последнюю версию neuravpn c <a href="https://asort97.github.io/neuravpn-site/">сайта</a>, нажав кнопку «скачать для windows»`},
 		{"", "после завершения загрузки выполните следующие действия:\n\n1) найдите загруженный файл <code>neuravpn_windows_vX.X.X</code>.\n2) щелкните правой кнопкой мыши на файле и выберите «извлечь все»."},
-		{"", "откройте папку с распакованными файлами. найдите файл neuravpn.exe. щелкните по нему правой кнопкой мыши и запустите от имени администратора."},
+		{"", "откройте папку с распакованными файлами. найдите файл <code>neuravpn.exe</code>. щелкните по нему правой кнопкой мыши и запустите от имени администратора."},
 		{"InstructionPhotos/Windows/0.mp4", "предварительно скопировав ключ доступа, в программе нажмите на кнопку «вставить из буфера» или просто нажмите на кнопку ниже «авто-подключение»"},
 		{"InstructionPhotos/Windows/1.mp4", "подключитесь к vpn, нажав по большой кнопке в центру."},
 	}
@@ -348,7 +348,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	}{
 		{"InstructionPhotos/Android/0.MP4", `скачайте <a href="https://play.google.com/store/apps/details?id=com.v2raytun.android&hl=ru">v2raytun</a> из google play`},
 		{"InstructionPhotos/Android/1.MP4", "заходим в приложение и вставляем ключ из буфера обмена. предварительно вы должны скопировать ключ-подключения который мы вам отправили"},
-		{"InstructionPhotos/Android/2.MP4", "далее жмём на кнопку включения и vpn работает!"},
+		{"InstructionPhotos/Android/2.MP4", "далее жмём на кнопку включения и vpn работает."},
 	}
 
 	// Границы
@@ -456,7 +456,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	}{
 		{"InstructionPhotos/Ios/0.MP4", `скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">v2raytun</a> из app store`},
 		{"InstructionPhotos/Ios/1.MP4", "заходим в приложение и вставляем ключ из буфера обмена. предварительно вы должны скопировать ключ-подключения который мы вам отправили"},
-		{"InstructionPhotos/Ios/2.MP4", "далее жмём на кнопку включения и vpn работает!"},
+		{"InstructionPhotos/Ios/2.MP4", "далее жмём на кнопку включения и vpn работает."},
 	}
 
 	// Границы
@@ -568,7 +568,7 @@ func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error)
 	}{
 		{"", `скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">v2raytun</a> из app store`},
 		{"", "заходим в приложение и вставляем ключ из буфера обмена. предварительно вы должны скопировать ключ-подключения который мы вам отправили"},
-		{"", "далее жмём на кнопку включения и vpn работает!"},
+		{"", "далее жмём на кнопку включения и vpn работает."},
 	}
 
 	// Границы

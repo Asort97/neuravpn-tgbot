@@ -735,9 +735,9 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 	keyLine := "ключ будет сгенерирован позже"
 	subURL := generateSubscriptionURL(cfg, info.client)
 	if strings.TrimSpace(subURL) != "" {
-		keyLine = fmt.Sprintf("<code>%s</code>", subURL)
+		keyLine = fmt.Sprintf("<code>%s</code>", html.EscapeString(subURL))
 	} else if strings.TrimSpace(info.link) != "" {
-		keyLine = fmt.Sprintf("<code>%s</code>", info.link)
+		keyLine = fmt.Sprintf("<code>%s</code>", html.EscapeString(info.link))
 	}
 
 	text := fmt.Sprintf(`<tg-emoji emoji-id="5346325906526868503">🔌</tg-emoji> подключить neuravpn
@@ -747,7 +747,7 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 
 <b>ваш ключ:</b>
 %s
-<tg-emoji emoji-id=\"5264948349420739524\">✏️</tg-emoji> нажмите чтобы скопировать
+<tg-emoji emoji-id="5264948349420739524">✏️</tg-emoji> нажмите чтобы скопировать
 
 перейдите в раздел «инструкции» — мы подробно объясним, что и куда нужно вставить.
 
