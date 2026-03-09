@@ -279,7 +279,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	caption := steps[step].caption
 	if step == keyStep {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
-			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n\n%s\n\n<code>%s</code>\n\n<tg-emoji emoji-id=\"5264948349420739524\">✏️</tg-emoji> нажмите чтобы копировать", caption, html.EscapeString(key))
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n\n<tg-emoji emoji-id=\"5264948349420739524\">✏️</tg-emoji> нажмите чтобы копировать", caption, html.EscapeString(key))
 		}
 	}
 
