@@ -222,7 +222,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		{"InstructionPhotos/Windows/neuravpn_app/0.png", `скачайте последнюю версию neuravpn c <a href="https://asort97.github.io/neuravpn-site/">сайта</a>, нажав кнопку "Скачать для Windows"`},
 		{"", "после завершения загрузки выполните следующие действия:\n1) найдите загруженный файл neuravpn_windows_vX.X.X.zip.\n2) щелкните правой кнопкой мыши на файле и выберите «извлечь все...» или воспользуйтесь архиватором, например, winrar или 7-zip, чтобы распаковать содержимое в удобное для вас место на компьютере."},
 		{"", "откройте папку с распакованными файлами. найдите файл neuravpn.exe. щелкните по нему правой кнопкой мыши и запустите от имени администратора."},
-		{"InstructionPhotos/Windows/0.mp4", "предварительно скопировав ключ доступа, в программе нажмите на кнопку «вставить из буфера» или просто нажмите на кнопку ниже \"авто-подключение\""},
+		{"InstructionPhotos/Windows/0.mp4", "предварительно скопировав ключ доступа, в программе нажмите на кнопку «вставить из буфера» или просто нажмите на кнопку ниже «авто-подключение»"},
 		{"InstructionPhotos/Windows/1.mp4", "подключитесь к vpn, нажав по большой кнопке в центру."},
 	}
 
@@ -277,7 +277,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	caption := steps[step].caption
 	if step == keyStep {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
-			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
 		}
 	}
 
@@ -392,7 +392,7 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	caption := steps[step].caption
 	if step == keyStep {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
-			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
 		}
 	}
 
@@ -500,7 +500,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	caption := steps[step].caption
 	if step == 1 {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
-			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
 		}
 	}
 
@@ -612,7 +612,7 @@ func InstructionMacOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error)
 	caption := steps[step].caption
 	if step == 1 {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
-			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
+			caption = fmt.Sprintf("%s\n\n<code>%s</code>\n\n(нажмите чтобы копировать)", caption, html.EscapeString(key))
 		}
 	}
 
