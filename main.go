@@ -1406,6 +1406,64 @@ func generateSubscriptionURL(cfg *xraySettings, c *xray.Client) string {
 }
 
 // Admin-only: sync clients across all inbounds, creating missing ones.
+func handleAddDays(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	chatID := msg.Chat.ID
+
+	isAdmin := false
+	for _, id := range adminIDs {
+		if id == msg.From.ID {
+			isAdmin = true
+			break
+		}
+	}
+	if !isAdmin {
+		m := tgbotapi.NewMessage(chatID, "⛔️ Только для админа")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	// /add <userID> <days>
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) != 2 {
+		m := tgbotapi.NewMessage(chatID, "Использование: <code>/add userID days</code>\nПример: <code>/add 123456789 30</code>")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	targetUserID := strings.TrimSpace(args[0])
+	if _, err := strconv.ParseInt(targetUserID, 10, 64); err != nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Неверный userID: "+targetUserID)
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	days, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || days <= 0 {
+		m := tgbotapi.NewMessage(chatID, "❌ Количество дней должно быть положительным числом")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	info, err := ensureXrayAccess(xrCfg, targetUserID, fallbackEmail(targetUserID), days, true)
+	if err != nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Ошибка: "+err.Error())
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	text := fmt.Sprintf("✅ Пользователю <code>%s</code> добавлено <b>%d</b> дн.\nОсталось дней: <b>%d</b>", targetUserID, days, info.daysLeft)
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = "HTML"
+	_, _ = bot.Send(m)
+
+	logAction(bot, msg.From.ID, msg.From.UserName, fmt.Sprintf("/add %s %d дн.", targetUserID, days), false)
+}
+
 func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
 	chatID := msg.Chat.ID
 	// Admin check
@@ -2034,6 +2092,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleAdLink(bot, msg)
 		case "adcheck":
 			handleAdCheck(bot, msg)
+		case "add":
+			handleAddDays(bot, msg, xrCfg)
 		case "sync_inbounds":
 			handleSyncInbounds(bot, msg, xrCfg)
 		case "migrate_users":
