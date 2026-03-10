@@ -742,9 +742,6 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 
 	text := fmt.Sprintf(`<tg-emoji emoji-id="5346325906526868503">🔌</tg-emoji> подключить neuravpn
 
-наше приложение для ios, android и windows сейчас в разработке, но мы нашли оптимальный компромисс.
-временный доступ осуществляется через сторонние клиенты — они отлично работают!
-
 <b>ваш ключ:</b>
 %s
 <tg-emoji emoji-id="5264948349420739524">✏️</tg-emoji> нажмите чтобы скопировать
