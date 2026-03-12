@@ -2540,7 +2540,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 				rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
 			},
 		}}
-		_ = updateSessionTextRaw(bot, chatID, session, stateChoosePay, text, "", kbRaw)
+		_ = updateSessionTextRaw(bot, chatID, session, stateChoosePay, text, "HTML", kbRaw)
 		ackCallback(bot, cq, "готово")
 		return
 	case strings.HasPrefix(data, "pay_card_"):
