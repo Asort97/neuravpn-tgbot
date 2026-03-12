@@ -1098,20 +1098,16 @@ func starsAmountForPlan(plan RatePlan) int {
 	return n
 }
 
-func choosePayKeyboard(plan RatePlan) tgbotapi.InlineKeyboardMarkup {
+func choosePayKeyboardRaw(plan RatePlan) rawInlineKeyboardMarkup {
 	stars := starsAmountForPlan(plan)
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("⭐ звёздами (%d ⭐)", stars), "pay_stars_"+plan.ID),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("💳 картой (%.0f ₽)", plan.Amount), "pay_card_"+plan.ID),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("назад", "nav_topup"),
-			tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
-		),
-	)
+	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton(fmt.Sprintf("⭐ звёздами (%d ⭐)", stars), "pay_stars_"+plan.ID, "", "")},
+		{rawCallbackButton(fmt.Sprintf("💳 картой (%.0f ₽)", plan.Amount), "pay_card_"+plan.ID, "", "")},
+		{
+			rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
+			rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+		},
+	}}
 }
 
 func sendStarsInvoice(bot *tgbotapi.BotAPI, chatID int64, plan RatePlan) error {
@@ -2856,7 +2852,7 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 		"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nвыберите способ оплаты:",
 		plan.Days, plan.Amount, stars,
 	)
-	_ = updateSessionText(bot, chatID, session, stateChoosePay, text, "HTML", choosePayKeyboard(plan))
+	_ = updateSessionTextRaw(bot, chatID, session, stateChoosePay, text, "HTML", choosePayKeyboardRaw(plan))
 	ackCallback(bot, cq, "выберите способ оплаты")
 }
 func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan) error {
