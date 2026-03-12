@@ -862,6 +862,10 @@ func rawCallbackButton(text, callbackData, style, iconCustomEmojiID string) rawI
 	return rawkbd.CallbackButton(text, callbackData, style, iconCustomEmojiID)
 }
 
+func rawURLButton(text, url, iconCustomEmojiID string) rawInlineKeyboardButton {
+	return rawkbd.URLButton(text, url, iconCustomEmojiID)
+}
+
 func sendMessageRaw(bot *tgbotapi.BotAPI, chatID int64, text string, parseMode string, replyMarkup interface{}) (int, error) {
 	params := tgbotapi.Params{}
 	params.AddNonZero64("chat_id", chatID)
@@ -2533,16 +2537,14 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nнажми «оплатить ⭐».",
 			p.Days, p.Amount, stars,
 		)
-		kb := tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonURL("оплатить ⭐", link),
-			),
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("назад", "nav_topup"),
-				tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
-			),
-		)
-		_ = updateSessionText(bot, chatID, session, stateChoosePay, text, "", kb)
+		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawURLButton("оплатить ⭐", link, "")},
+			{
+				rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
+				rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+			},
+		}}
+		_ = updateSessionTextRaw(bot, chatID, session, stateChoosePay, text, "", kbRaw)
 		ackCallback(bot, cq, "готово")
 		return
 	case strings.HasPrefix(data, "pay_card_"):
@@ -2558,13 +2560,13 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		if email, _ := userStore.GetEmail(userID); strings.TrimSpace(email) == "" {
 			text := "📧 Для оплаты картой нужен e-mail для чека.\nОтправь e-mail следующим сообщением (пример: name@example.com).\n\n" +
 				"<b>Продолжи, введя e-mail.</b>"
-			kb := tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData("назад", "nav_topup"),
-					tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
-				),
-			)
-			_ = updateSessionText(bot, chatID, session, stateCollectEmail, text, "HTML", kb)
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{
+					rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
+					rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+				},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateCollectEmail, text, "HTML", kbRaw)
 			ackCallback(bot, cq, "пришли e-mail")
 			return
 		}
