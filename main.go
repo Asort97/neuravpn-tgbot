@@ -1087,7 +1087,7 @@ const (
 )
 
 func starsAmountForPlan(plan RatePlan) int {
-	n := int(math.Round(plan.Amount * 1.5))
+	n := int(math.Round(plan.Amount * 0.9))
 	if n < 1 {
 		n = 1
 	}
@@ -2837,9 +2837,10 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 	chatID := cq.Message.Chat.ID
 	session.PendingPlanID = ""
 	var builder strings.Builder
-	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nпосле выбора можно оплатить картой или звёздами.\n\nтарифы:\n")
+	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\n<b>оплата ⭐ звездами - скидка 10%.</b>\n\nтарифы:\n")
 	for _, plan := range ratePlans {
-		builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽\n", plan.Days, plan.Amount))
+		stars := starsAmountForPlan(plan)
+		builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount, stars))
 	}
 	header := strings.TrimSuffix(builder.String(), "\n")
 	_ = updateSessionText(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboard())
