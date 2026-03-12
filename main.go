@@ -1061,12 +1061,12 @@ func finalizeReferralAfterSubscription(bot *tgbotapi.BotAPI, newUserID int64, ne
 	return true, nil
 }
 
-func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
+func rateKeyboardRaw() rawInlineKeyboardMarkup {
+	var rows [][]rawInlineKeyboardButton
+	var row []rawInlineKeyboardButton
 	for _, p := range ratePlans {
-		label := fmt.Sprintf("%d дней — %.0f₽", p.Days, p.Amount)
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, "rate_"+p.ID))
+		label := fmt.Sprintf("%d дней", p.Days)
+		row = append(row, rawCallbackButton(label, "rate_"+p.ID, "", ""))
 		if len(row) == 2 {
 			rows = append(rows, row)
 			row = nil
@@ -1075,10 +1075,10 @@ func rateKeyboard() tgbotapi.InlineKeyboardMarkup {
 	if len(row) > 0 {
 		rows = append(rows, row)
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("назад", "nav_status"),
-	))
-	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+	rows = append(rows, []rawInlineKeyboardButton{
+		rawCallbackButton("назад", "nav_status", "", "5264852846527941278"),
+	})
+	return rawInlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 const (
@@ -2130,7 +2130,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
-			_ = updateSessionText(bot, chatID, session, stateTopUp, "Тариф не найден, выбери заново.", "HTML", rateKeyboard())
+			_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, "Тариф не найден, выбери заново.", "HTML", rateKeyboardRaw())
 			return
 		}
 		if err := startPaymentForPlan(bot, chatID, session, plan); err != nil {
@@ -2837,13 +2837,13 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 	chatID := cq.Message.Chat.ID
 	session.PendingPlanID = ""
 	var builder strings.Builder
-	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\n<b>оплата ⭐ звездами - скидка 10%.</b>\n\nтарифы:\n")
+	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nоплата ⭐ звездами - <b>скидка 10%.</b>\n\nтарифы:\n")
 	for _, plan := range ratePlans {
 		stars := starsAmountForPlan(plan)
 		builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount, stars))
 	}
 	header := strings.TrimSuffix(builder.String(), "\n")
-	_ = updateSessionText(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboard())
+	_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboardRaw())
 }
 func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, plan RatePlan) {
 	chatID := cq.Message.Chat.ID
