@@ -3493,7 +3493,7 @@ func handleReferral(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *U
 }
 func handleSupport(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "<tg-emoji emoji-id=\"5346123042336573193\">📞</tg-emoji> поддержка\n\nесть вопросы или предложения? пиши: @asortiment97\nответим лично, никаких почтовых ящиков."
+	text := "<tg-emoji emoji-id=\"5346123042336573193\">📞</tg-emoji> поддержка\n\nесть вопросы или предложения? пиши: @neuravpn_support\nответим лично, никаких почтовых ящиков."
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{
