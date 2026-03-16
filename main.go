@@ -1465,6 +1465,14 @@ func handleAddDays(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySetti
 }
 
 func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	handleSyncInboundsInternal(bot, msg, xrCfg, false)
+}
+
+func handleSyncActiveInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	handleSyncInboundsInternal(bot, msg, xrCfg, true)
+}
+
+func handleSyncInboundsInternal(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings, activeOnly bool) {
 	chatID := msg.Chat.ID
 	// Admin check
 	isAdmin := false
@@ -1532,7 +1540,16 @@ func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 	created := 0
 	updated := 0
 	failed := 0
+	skippedInactive := 0
 	for _, uid := range userIDs {
+		if activeOnly {
+			days, err := userStore.GetDays(uid)
+			if err != nil || days <= 0 {
+				skippedInactive++
+				continue
+			}
+		}
+
 		email := fallbackEmail(uid)
 		// Ensure client across all inbounds without changing expiry (daysToAdd=0)
 		// ensure secure subID per user
@@ -1553,6 +1570,9 @@ func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xray
 	}
 
 	text := fmt.Sprintf("Синхронизация завершена. Обновлено: %d, создано: %d, ошибок: %d", updated, created, failed)
+	if activeOnly {
+		text += fmt.Sprintf(", пропущено неактивных: %d", skippedInactive)
+	}
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ParseMode = "HTML"
 	_, _ = bot.Send(m)
@@ -2096,6 +2116,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleAddDays(bot, msg, xrCfg)
 		case "sync_inbounds":
 			handleSyncInbounds(bot, msg, xrCfg)
+		case "sync_active_inbounds":
+			handleSyncActiveInbounds(bot, msg, xrCfg)
 		case "migrate_users":
 			handleMigrateUsers(bot, msg, xrCfg)
 		case "migrate_expiry_from_old":
