@@ -356,11 +356,45 @@ func (x *XRayClient) GenerateVLESSLink(client *Client, serverAddress string, por
 	return link
 }
 
+func inferFlowFromInbound(inbound InboundData) string {
+	stream := strings.ToLower(strings.TrimSpace(inbound.StreamSettings))
+	if stream == "" {
+		return ""
+	}
+
+	if strings.Contains(stream, `"network":"xhttp"`) ||
+		strings.Contains(stream, `"network":"ws"`) ||
+		strings.Contains(stream, `"network":"grpc"`) ||
+		strings.Contains(stream, `"network":"httpupgrade"`) ||
+		strings.Contains(stream, `"network":"splithttp"`) {
+		return ""
+	}
+
+	if strings.Contains(stream, `"network":"tcp"`) && strings.Contains(stream, `"security":"reality"`) {
+		return "xtls-rprx-vision"
+	}
+
+	return ""
+}
+
+func (x *XRayClient) defaultFlowForInbound(inboundID int) string {
+	inbounds, err := x.GetAllInbounds()
+	if err != nil {
+		return ""
+	}
+	for _, inbound := range inbounds {
+		if inbound.ID == inboundID {
+			return inferFlowFromInbound(inbound)
+		}
+	}
+	return ""
+}
+
 func (x *XRayClient) AddClient(inboundID int, tgUserId string) (string, error) {
 	client := Client{
 		ID:         uuid.New().String(),
 		Email:      tgUserId,
-		Flow:       "xtls-rprx-vision",
+		Flow:       x.defaultFlowForInbound(inboundID),
 		LimitIP:    0,
 		TotalGB:    0,
 		ExpiryTime: 0,
@@ -384,8 +418,9 @@ func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, e
 	if client.ID == "" {
 		client.ID = uuid.New().String()
 	}
+	client.Flow = strings.TrimSpace(client.Flow)
 	if client.Flow == "" {
-		client.Flow = "xtls-rprx-vision"
+		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
 	jsonBody, err := buildClientPayload(inboundID, client)
@@ -437,8 +472,9 @@ func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 	if client.ID == "" {
 		return fmt.Errorf("client uuid is empty")
 	}
+	client.Flow = strings.TrimSpace(client.Flow)
 	if client.Flow == "" {
-		client.Flow = "xtls-rprx-vision"
+		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
 	url := fmt.Sprintf("%s/panel/api/inbounds/updateClient/%s", x.serverURL, client.ID)
@@ -511,6 +547,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 	// First ensure on primary inbound, capturing UUID and expiry
 	primaryID := inboundIDs[0]
 	primaryEmail := buildXrayClientEmail(email, tgID, primaryID)
+	primaryFlow := x.defaultFlowForInbound(primaryID)
 	primaryClient, err := x.GetClientByTelegram(primaryID, tgID)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -521,7 +558,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 			ID:      uuid.New().String(),
 			Email:   primaryEmail,
 			Enable:  true,
-			Flow:    "xtls-rprx-vision",
+			Flow:    primaryFlow,
 			LimitIP: 0,
 			TotalGB: 0,
 			TgID:    tgID,
@@ -537,7 +574,7 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 			primaryClient.Email = primaryEmail
 		}
 		primaryClient.Enable = true
-		primaryClient.Flow = "xtls-rprx-vision"
+		primaryClient.Flow = primaryFlow
 		primaryClient.TgID = tgID
 		if strings.TrimSpace(subID) != "" {
 			primaryClient.SubID = strings.TrimSpace(subID)
@@ -566,11 +603,12 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		}
 
 		// Prepare client data with same UUID and expiry from primary
+		inboundFlow := x.defaultFlowForInbound(inboundID)
 		clientData := &Client{
 			ID:         primaryClient.ID, // keep same UUID across inbounds
 			Email:      buildXrayClientEmail(email, tgID, inboundID),
 			Enable:     true,
-			Flow:       "xtls-rprx-vision",
+			Flow:       inboundFlow,
 			LimitIP:    0,
 			TotalGB:    0,
 			ExpiryTime: exp.UnixMilli(), // use expiry from primary
