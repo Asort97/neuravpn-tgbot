@@ -651,11 +651,11 @@ func buildXrayClientEmail(billingEmail, tgID string, inboundID int) string {
 		local := sanitizeEmailToken(parts[0])
 		domain := strings.TrimSpace(parts[1])
 		if local != "" && domain != "" {
-			return fmt.Sprintf("%s+tg%s+inb%d@%s", local, tgID, inboundID, domain)
+			return fmt.Sprintf("%s+vk%s+inb%d@%s", local, tgID, inboundID, domain)
 		}
 	}
 
-	return fmt.Sprintf("tg%s_inb%d@happycat", tgID, inboundID)
+	return fmt.Sprintf("vk%s_inb%d@happycat", tgID, inboundID)
 }
 
 func sanitizeEmailToken(s string) string {

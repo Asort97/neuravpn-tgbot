@@ -9,13 +9,12 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type YooKassaClient struct {
 	yookassaShopID    string
 	yookassaSecretKey string
+	returnURL         string // URL to return after payment (e.g. https://vk.com/club123)
 }
 
 type YooKassaPaymentRequest struct {
@@ -73,7 +72,13 @@ func New(shopID, apiKey string) *YooKassaClient {
 	return &YooKassaClient{
 		yookassaShopID:    shopID,
 		yookassaSecretKey: apiKey,
+		returnURL:         "https://vk.com",
 	}
+}
+
+// SetReturnURL overrides the default return URL after payment.
+func (y *YooKassaClient) SetReturnURL(url string) {
+	y.returnURL = url
 }
 
 func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description string, chatID int64, product string, extraMeta map[string]interface{}, userEmail string) (*YooKassaPaymentResponse, error) {
@@ -83,9 +88,14 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	paymentReq.Amount.Currency = "RUB"
 	paymentReq.Capture = true
 
+	returnURL := y.returnURL
+	if returnURL == "" {
+		returnURL = "https://vk.com"
+	}
+
 	paymentReq.Confirmation = map[string]interface{}{
 		"type":       "redirect",
-		"return_url": "https://t.me/happyCatVpnBot",
+		"return_url": returnURL,
 	}
 
 	paymentReq.Description = description
@@ -194,93 +204,45 @@ func (y *YooKassaClient) GetYooKassaPaymentStatus(paymentID string) (*YooKassaPa
 	return &paymentResp, nil
 }
 
-func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string) (int, bool, error) {
+// CreatePaymentURL creates a YooKassa payment and returns the confirmation URL.
+// Records the payment ID in user history for later checking.
+func (y *YooKassaClient) CreatePaymentURL(peerID int64, amount float64, productName string, metadata map[string]interface{}, userEmail string) (confirmationURL string, err error) {
 	payment, err := y.CreateYooKassaPayment(
 		amount,
 		productName,
-		chatID,
+		peerID,
 		productName,
 		metadata,
 		userEmail,
 	)
 	if err != nil {
-		return messageID, false, fmt.Errorf("не удалось создать платёж: %v", err)
+		return "", fmt.Errorf("не удалось создать платёж: %v", err)
 	}
 
 	// записываем ID платежа в историю пользователя
 	payMu.Lock()
-	userPayments[chatID] = append(userPayments[chatID], payment.ID)
-	// ограничим историю до 5 последних записей, чтобы не разрасталась
-	if len(userPayments[chatID]) > 5 {
-		userPayments[chatID] = userPayments[chatID][len(userPayments[chatID])-5:]
+	userPayments[peerID] = append(userPayments[peerID], payment.ID)
+	if len(userPayments[peerID]) > 5 {
+		userPayments[peerID] = userPayments[peerID][len(userPayments[peerID])-5:]
 	}
 	payMu.Unlock()
 
-	confirmationURL := ""
 	if confirmation, ok := payment.Confirmation["confirmation_url"].(string); ok {
-		confirmationURL = confirmation
-	} else {
-		return messageID, false, fmt.Errorf("не получена ссылка на оплату от YooKassa")
+		return confirmation, nil
 	}
-
-	message := fmt.Sprintf(`💳 *%s*
-
-💰 Сумма к оплате: *%.2f ₽*
-📝 Описание: %s
-
-Нажмите «Оплатить», чтобы продолжить.`,
-		productName, amount, productName)
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("💳 Оплатить", confirmationURL),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Я оплатил", "check_payment"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Назад в меню", "nav_menu"),
-		),
-	)
-
-	if messageID > 0 {
-		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, message, keyboard)
-		edit.ParseMode = "Markdown"
-		if _, err := bot.Send(edit); err == nil {
-			return messageID, false, nil
-		}
-	}
-
-	msg := tgbotapi.NewMessage(chatID, message)
-	msg.ParseMode = "Markdown"
-	msg.ReplyMarkup = keyboard
-
-	sent, err := bot.Send(msg)
-	if err != nil {
-		return messageID, false, err
-	}
-
-	return sent.MessageID, true, nil
-}
-
-func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string) (int, bool, error) {
-	return y.sendYooKassaPaymentButton(bot, chatID, messageID, amount, productName, metadata, userEmail)
+	return "", fmt.Errorf("не получена ссылка на оплату от YooKassa")
 }
 
 // FindSucceededPayment ищет любой успешный платёж среди последних платежей пользователя.
-// Возвращает платёж и true, если найден успешно оплаченный и ещё не обработанный.
 func (y *YooKassaClient) FindSucceededPayment(chatID int64) (*YooKassaPaymentResponse, bool, error) {
 	payMu.Lock()
-	ids := append([]string(nil), userPayments[chatID]...) // копия
+	ids := append([]string(nil), userPayments[chatID]...)
 	payMu.Unlock()
 
-	// обходим от самого нового к старому
 	for i := len(ids) - 1; i >= 0; i-- {
 		id := ids[i]
-
 		payment, err := y.GetYooKassaPaymentStatus(id)
 		if err != nil {
-			// пропускаем сбойные
 			continue
 		}
 		if payment.Status == "succeeded" || payment.Paid {
