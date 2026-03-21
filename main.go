@@ -1043,6 +1043,7 @@ func composeMenuText() string {
 	base := strings.TrimSpace(startText)
 	if vkGroupURL != "" {
 		base += "\n\nнаша группа: " + vkGroupURL
+		base += "\nнаш основной бот в Telegram: " + "t.me/neuravpn_bot"
 	}
 	return base
 }
