@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS users (
 			ADD COLUMN IF NOT EXISTS start_bonus_claimed_at TIMESTAMPTZ,
 			ADD COLUMN IF NOT EXISTS referral_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
 			ADD COLUMN IF NOT EXISTS referral_confirmed_at TIMESTAMPTZ,
-			ADD COLUMN IF NOT EXISTS referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE;
+			ADD COLUMN IF NOT EXISTS referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE,
+			ADD COLUMN IF NOT EXISTS link_token TEXT,
+			ADD COLUMN IF NOT EXISTS linked_to TEXT;
 	`)
 	if err != nil {
 		return err
@@ -475,6 +477,69 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	}
 
 	return tag.RowsAffected() > 0, nil
+}
+
+func (s *Store) SetLinkToken(userID, token string) error {
+	ctx := context.Background()
+	_ = s.ensureUser(ctx, userID)
+	_, err := s.pool.Exec(ctx, `UPDATE users SET link_token = $1, updated_at = NOW() WHERE id = $2`, token, userID)
+	return err
+}
+
+func (s *Store) GetUserByLinkToken(token string) (string, error) {
+	ctx := context.Background()
+	var userID string
+	err := s.pool.QueryRow(ctx, `SELECT id FROM users WHERE link_token = $1`, token).Scan(&userID)
+	if err != nil {
+		return "", fmt.Errorf("token not found: %w", err)
+	}
+	return userID, nil
+}
+
+func (s *Store) ClearLinkToken(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `UPDATE users SET link_token = NULL, updated_at = NOW() WHERE id = $1`, userID)
+	return err
+}
+
+func (s *Store) SetLinkedTo(userID, linkedTo string) error {
+	ctx := context.Background()
+	_ = s.ensureUser(ctx, userID)
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO users (id, linked_to, last_deduct, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (id) DO UPDATE SET
+			linked_to = EXCLUDED.linked_to,
+			updated_at = NOW()`, userID, linkedTo)
+	return err
+}
+
+func (s *Store) GetLinkedTo(userID string) (string, error) {
+	ctx := context.Background()
+	var linked string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(linked_to, '') FROM users WHERE id = $1`, userID).Scan(&linked)
+	if err != nil {
+		return "", err
+	}
+	return linked, nil
+}
+
+func (s *Store) GetLinkedVKUsers(tgUserID string) ([]string, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `SELECT id FROM users WHERE linked_to = $1 AND id LIKE 'vk_%'`, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // GetAllUserIDs возвращает список всех user id из таблицы users
