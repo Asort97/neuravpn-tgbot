@@ -244,6 +244,12 @@ type DataStore interface {
 	GetReferralsCount(userID string) int
 	IsPaymentApplied(userID, paymentID string) (bool, error)
 	MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error)
+	SetLinkToken(userID, token string) error
+	GetUserByLinkToken(token string) (string, error)
+	ClearLinkToken(userID string) error
+	SetLinkedTo(userID, linkedTo string) error
+	GetLinkedTo(userID string) (string, error)
+	GetLinkedVKUsers(tgUserID string) ([]string, error)
 }
 
 var ratePlans = []RatePlan{
@@ -2384,6 +2390,9 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		handleSupport(bot, cq, session)
 	case data == "edit_email":
 		handleEditEmail(bot, cq, session)
+	case data == "link_vk":
+		handleLinkVK(bot, cq, session)
+		return
 	case data == "nav_instructions":
 		handleInstructionsMenu(bot, cq, session)
 	case data == "claim_sub_bonus":
@@ -3100,6 +3109,12 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		userID, emailEsc, refCount, refBonus,
 	)
 
+	// Show linked VK account if any
+	linkedVK, _ := userStore.GetLinkedVKUsers(userIDStr)
+	if len(linkedVK) > 0 {
+		header += fmt.Sprintf("\n• вк: привязан (%s)", html.EscapeString(linkedVK[0]))
+	}
+
 	var accessBlock string
 	if days > 0 {
 		expTime := time.Time{}
@@ -3123,24 +3138,29 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
 			{rawCallbackButton("e-mail", "edit_email", "", "5264870816671113060")},
-			{rawCallbackButton("меню", "nav_menu", "", "5264852846527941278")},
 		},
 	}
+	if len(linkedVK) == 0 {
+		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
+			[]rawInlineKeyboardButton{rawCallbackButton("🔗 связать с ВК", "link_vk", "", "")},
+		)
+	}
+	kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
+		[]rawInlineKeyboardButton{rawCallbackButton("меню", "nav_menu", "", "5264852846527941278")},
+	)
 	if err := updateSessionTextRaw(bot, chatID, session, stateStatus, profileText, "HTML", kbRaw); err == nil {
 		return
 	}
 
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 оплата", "nav_topup"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✏️ e-mail", "edit_email"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu"),
-		),
-	)
+	kbRows := [][]tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("💰 оплата", "nav_topup")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("✏️ e-mail", "edit_email")),
+	}
+	if len(linkedVK) == 0 {
+		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔗 связать с ВК", "link_vk")))
+	}
+	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu")))
+	kb := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: kbRows}
 
 	_ = updateSessionText(bot, chatID, session, stateStatus, profileText, "HTML", kb)
 }
@@ -3184,6 +3204,51 @@ func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *
 	)
 	_ = updateSessionText(bot, chatID, session, stateEditEmail, text, "HTML", kb)
 	ackCallback(bot, cq, "жду e-mail")
+}
+
+func handleLinkVK(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
+	chatID := cq.Message.Chat.ID
+	userIDStr := strconv.FormatInt(cq.From.ID, 10)
+
+	// Check if already linked
+	linked, _ := userStore.GetLinkedVKUsers(userIDStr)
+	if len(linked) > 0 {
+		text := fmt.Sprintf("ℹ️ аккаунт уже привязан к вк: <code>%s</code>", html.EscapeString(linked[0]))
+		_ = updateSessionText(bot, chatID, session, stateStatus, text, "HTML",
+			tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_status")),
+			))
+		ackCallback(bot, cq, "уже привязан")
+		return
+	}
+
+	token := randomSlug(16)
+	if err := userStore.SetLinkToken(userIDStr, token); err != nil {
+		log.Printf("link token error: %v", err)
+		ackCallback(bot, cq, "ошибка, попробуйте позже")
+		return
+	}
+
+	code := "link_" + token
+	text := fmt.Sprintf(
+		"🔗 <b>привязка ВК</b>\n\n"+
+			"отправьте это сообщение нашему VK-боту:\n\n"+
+			"<code>%s</code>\n\n"+
+			"после привязки подписка и данные станут общими.\n\n"+
+			"⚠️ токен одноразовый.",
+		html.EscapeString(code),
+	)
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("🔗 перейти в ВК", "https://vk.com/neuravpn"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_status"),
+		),
+	)
+	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
+	ackCallback(bot, cq, "")
 }
 
 func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
