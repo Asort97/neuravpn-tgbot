@@ -32,6 +32,8 @@ type UserData struct {
 	StartBonusSource    string                        `json:"start_bonus_source"`
 	StartBonusClaimedAt string                        `json:"start_bonus_claimed_at"`
 	ConsentAt           string                        `json:"consent_at"` // ISO8601 timestamp, когда принял политику
+	LinkToken           string                        `json:"link_token,omitempty"`
+	LinkedTo            string                        `json:"linked_to,omitempty"`
 	AppliedPayments     map[string]AppliedPaymentMeta `json:"applied_payments,omitempty"`
 }
 
@@ -534,4 +536,58 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *Store) SetLinkToken(userID, token string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	u := db[userID]
+	u.LinkToken = token
+	db[userID] = u
+	return s.saveUsersLocked()
+}
+
+func (s *Store) GetUserByLinkToken(token string) (string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	token = strings.TrimSpace(token)
+	for id, u := range db {
+		if u.LinkToken == token {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("token not found")
+}
+
+func (s *Store) ClearLinkToken(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	u := db[userID]
+	u.LinkToken = ""
+	db[userID] = u
+	return s.saveUsersLocked()
+}
+
+func (s *Store) SetLinkedTo(userID, linkedTo string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	u := db[userID]
+	u.LinkedTo = linkedTo
+	db[userID] = u
+	return s.saveUsersLocked()
+}
+
+func (s *Store) GetLinkedTo(userID string) (string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	u, ok := db[userID]
+	if !ok {
+		return "", nil
+	}
+	return u.LinkedTo, nil
 }

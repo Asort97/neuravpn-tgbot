@@ -258,6 +258,11 @@ type DataStore interface {
 	GetReferralsCount(userID string) int
 	IsPaymentApplied(userID, paymentID string) (bool, error)
 	MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error)
+	SetLinkToken(userID, token string) error
+	GetUserByLinkToken(token string) (string, error)
+	ClearLinkToken(userID string) error
+	SetLinkedTo(userID, linkedTo string) error
+	GetLinkedTo(userID string) (string, error)
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -317,6 +322,7 @@ var (
 	logPeerID      int // VK peer_id for admin log messages (could be a chat or user)
 	userSessions   = make(map[int64]*UserSession)
 	testMode       bool
+	tgBotName      string // e.g. "neuravpn_bot"
 )
 
 var (
@@ -345,6 +351,39 @@ func parseVKUserID(dbID string) (int, bool) {
 		return id, true
 	}
 	return 0, false
+}
+
+// ────────────────────────────────────────────────────────────────
+// Linked-account resolution: VK peer → actual DB user ID
+// ────────────────────────────────────────────────────────────────
+
+var (
+	linkedAccountsMu sync.RWMutex
+	linkedAccounts   = make(map[int]string)
+)
+
+// resolvedUserID returns the DB user ID to use for all operations.
+// If the VK user is linked to a TG user, returns the TG user ID.
+func resolvedUserID(peerID int) string {
+	linkedAccountsMu.RLock()
+	if resolved, ok := linkedAccounts[peerID]; ok {
+		linkedAccountsMu.RUnlock()
+		return resolved
+	}
+	linkedAccountsMu.RUnlock()
+
+	vkID := vkUserIDStr(peerID)
+	if userStore == nil {
+		return vkID
+	}
+	linked, err := userStore.GetLinkedTo(vkID)
+	if err == nil && strings.TrimSpace(linked) != "" {
+		linkedAccountsMu.Lock()
+		linkedAccounts[peerID] = linked
+		linkedAccountsMu.Unlock()
+		return linked
+	}
+	return vkID
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -855,7 +894,7 @@ func startPaymentForPlan(bot *vkbot.Bot, peerID int, session *UserSession, plan 
 		"plan_days":   plan.Days,
 		"plan_amount": plan.Amount,
 	}
-	email, _ := userStore.GetEmail(vkUserIDStr(peerID))
+	email, _ := userStore.GetEmail(resolvedUserID(peerID))
 	confirmationURL, err := yookassaClient.CreatePaymentURL(int64(peerID), plan.Amount, plan.Title, metadata, email)
 	if err != nil {
 		return err
@@ -877,7 +916,7 @@ func startPaymentForPlan(bot *vkbot.Bot, peerID int, session *UserSession, plan 
 }
 
 func handleCheckPayment(bot *vkbot.Bot, peerID int, userID int, eventID string, session *UserSession, xrCfg *xraySettings) {
-	userIDStr := vkUserIDStr(userID)
+	userIDStr := resolvedUserID(userID)
 
 	payment, ok, err := yookassaClient.FindSucceededPayment(int64(peerID))
 	if err != nil {
@@ -938,7 +977,7 @@ func handleCheckPayment(bot *vkbot.Bot, peerID int, userID int, eventID string, 
 }
 
 func handleSuccessfulPayment(bot *vkbot.Bot, peerID, userID int, xrCfg *xraySettings, plan RatePlan, session *UserSession) error {
-	userIDStr := vkUserIDStr(userID)
+	userIDStr := resolvedUserID(userID)
 
 	waitingText := fmt.Sprintf("готовлю доступ по тарифу %s...", plan.Title)
 	_ = updateSessionText(bot, peerID, session, stateTopUp, waitingText, mainMenuKeyboard())
@@ -1097,7 +1136,7 @@ func sendReferralSubscriptionPrompt(bot *vkbot.Bot, peerID int) {
 // ────────────────────────────────────────────────────────────────
 
 func finalizeReferralAfterSubscription(bot *vkbot.Bot, peerID int, xrCfg *xraySettings) (bool, error) {
-	userIDStr := vkUserIDStr(peerID)
+	userIDStr := resolvedUserID(peerID)
 	referrerID, granted, err := userStore.ConfirmReferralAndRewardReferrer(userIDStr, int64(referralBonusDays), time.Now())
 	if err != nil {
 		return false, err
@@ -1130,7 +1169,7 @@ func finalizeReferralAfterSubscription(bot *vkbot.Bot, peerID int, xrCfg *xraySe
 // ────────────────────────────────────────────────────────────────
 
 func handleStart(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xraySettings, firstMessage string) {
-	userIDStr := vkUserIDStr(peerID)
+	userIDStr := resolvedUserID(peerID)
 	isNew := userStore.IsNewUser(userIDStr)
 
 	// Parse referral from first message text
@@ -1198,7 +1237,7 @@ func handleStart(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xraySe
 }
 
 func handleGetVPN(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xraySettings) {
-	userIDStr := vkUserIDStr(peerID)
+	userIDStr := resolvedUserID(peerID)
 
 	info, err := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, true)
 	if err != nil {
@@ -1214,7 +1253,7 @@ func handleGetVPN(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xrayS
 }
 
 func handleStatus(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xraySettings) {
-	userIDStr := vkUserIDStr(peerID)
+	userIDStr := resolvedUserID(peerID)
 
 	info, _ := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, false)
 	days, _ := userStore.GetDays(userIDStr)
@@ -1229,7 +1268,12 @@ func handleStatus(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xrayS
 	refCount := userStore.GetReferralsCount(userIDStr)
 	refBonus := refCount * referralBonusDays
 
-	header := fmt.Sprintf("👤 профиль\n• id: vk_%d\n• mail: %s\n• рефералы: %d (дней: %d)", peerID, email, refCount, refBonus)
+	vkID := vkUserIDStr(peerID)
+	idLine := fmt.Sprintf("vk_%d", peerID)
+	if vkID != userIDStr {
+		idLine += fmt.Sprintf(" → связан с %s", userIDStr)
+	}
+	header := fmt.Sprintf("👤 профиль\n• id: %s\n• mail: %s\n• рефералы: %d (дней: %d)", idLine, email, refCount, refBonus)
 
 	var accessBlock string
 	if days > 0 {
@@ -1270,7 +1314,7 @@ func handleTopUp(bot *vkbot.Bot, peerID int, session *UserSession) {
 
 func handleRateSelection(bot *vkbot.Bot, peerID int, eventID string, session *UserSession, plan RatePlan) {
 	session.PendingPlanID = plan.ID
-	userIDStr := vkUserIDStr(peerID)
+	userIDStr := resolvedUserID(peerID)
 
 	// Check if email is on file
 	if email, _ := userStore.GetEmail(userIDStr); strings.TrimSpace(email) == "" {
@@ -1298,7 +1342,7 @@ func handleRateSelection(bot *vkbot.Bot, peerID int, eventID string, session *Us
 }
 
 func handleReferral(bot *vkbot.Bot, peerID int, session *UserSession) {
-	userIDStr := vkUserIDStr(peerID)
+	userIDStr := resolvedUserID(peerID)
 	refCode := fmt.Sprintf("ref_vk_%d", peerID)
 	count := userStore.GetReferralsCount(userIDStr)
 	bonus := count * referralBonusDays
@@ -1347,6 +1391,74 @@ func handleEditEmail(bot *vkbot.Bot, peerID int, session *UserSession) {
 	_ = updateSessionText(bot, peerID, session, stateEditEmail, text, kb)
 }
 
+func handleLinkAccount(bot *vkbot.Bot, peerID int, fromID int, session *UserSession, token string, xrCfg *xraySettings) {
+	vkUserID := vkUserIDStr(peerID)
+
+	// Check if already linked
+	if existing, err := userStore.GetLinkedTo(vkUserID); err == nil && strings.TrimSpace(existing) != "" {
+		_ = updateSessionText(bot, peerID, session, stateMenu,
+			"ℹ️ аккаунт уже привязан к telegram.", mainMenuKeyboard())
+		return
+	}
+
+	// Find TG user by token
+	tgUserID, err := userStore.GetUserByLinkToken(token)
+	if err != nil {
+		log.Printf("link token lookup failed: %v", err)
+		_ = updateSessionText(bot, peerID, session, stateMenu,
+			"⚠️ ссылка недействительна или уже использована.\nпопробуйте создать новую ссылку в telegram-боте.", mainMenuKeyboard())
+		return
+	}
+
+	if tgUserID == vkUserID {
+		_ = updateSessionText(bot, peerID, session, stateMenu,
+			"ℹ️ этот токен принадлежит текущему аккаунту.", mainMenuKeyboard())
+		return
+	}
+
+	// Transfer VK days to TG user before linking
+	vkDays, _ := userStore.GetDays(vkUserID)
+	tgDays, _ := userStore.GetDays(tgUserID)
+	if vkDays > 0 {
+		if err := userStore.AddDays(tgUserID, vkDays); err != nil {
+			log.Printf("link: AddDays to TG user failed: %v", err)
+		}
+		_ = userStore.SetDays(vkUserID, 0)
+	}
+
+	// Set linked_to: VK user → TG user
+	if err := userStore.SetLinkedTo(vkUserID, tgUserID); err != nil {
+		log.Printf("link: SetLinkedTo failed: %v", err)
+		_ = updateSessionText(bot, peerID, session, stateMenu,
+			"⚠️ ошибка привязки, попробуйте позже.", mainMenuKeyboard())
+		return
+	}
+
+	// Update cache
+	linkedAccountsMu.Lock()
+	linkedAccounts[peerID] = tgUserID
+	linkedAccountsMu.Unlock()
+
+	// Clear the token so it can't be reused
+	_ = userStore.ClearLinkToken(tgUserID)
+
+	totalDays := tgDays + vkDays
+
+	// Log to admin
+	if logPeerID != 0 {
+		logText := fmt.Sprintf("🔗 привязка: %s → %s\nvk_days=%d перенесено, итого у TG=%d",
+			vkUserID, tgUserID, vkDays, totalDays)
+		_, _ = bot.SendMessage(logPeerID, logText, nil)
+	}
+
+	resultText := fmt.Sprintf("✅ аккаунт привязан к telegram!\n\n"+
+		"• перенесено дней из вк: %d\n"+
+		"• итого у аккаунта: %d дней\n\n"+
+		"теперь все данные (дни, ключ, почта) общие\nмежду telegram и вк.", vkDays, totalDays)
+
+	_ = updateSessionText(bot, peerID, session, stateMenu, resultText, mainMenuKeyboard())
+}
+
 func handleInstructionsMenu(bot *vkbot.Bot, peerID int, session *UserSession) {
 	instruct.ResetState(int64(peerID))
 	text := "🛠️ инструкции\nвыбери платформу:"
@@ -1370,7 +1482,7 @@ func startInstructionFlow(bot *vkbot.Bot, peerID int, session *UserSession, xrCf
 	prevMessageID := session.MessageID
 	instruct.ResetState(int64(peerID))
 
-	userIDStr := vkUserIDStr(peerID)
+	userIDStr := resolvedUserID(peerID)
 	key := ""
 	if xrCfg != nil {
 		if info, _ := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, true); info != nil {
@@ -1412,7 +1524,7 @@ func startInstructionFlow(bot *vkbot.Bot, peerID int, session *UserSession, xrCf
 }
 
 func handleClaimSubscriptionBonus(bot *vkbot.Bot, peerID int, eventID string, session *UserSession, xrCfg *xraySettings) {
-	userIDStr := vkUserIDStr(peerID)
+	userIDStr := resolvedUserID(peerID)
 
 	ok, err := isGroupMember(bot, peerID)
 	if err != nil {
@@ -2183,7 +2295,7 @@ func handleMessage(bot *vkbot.Bot, msg events.MessageNewObject, xrCfg *xraySetti
 
 	// State: collect email
 	if session.State == stateCollectEmail {
-		userIDStr := vkUserIDStr(fromID)
+		userIDStr := resolvedUserID(fromID)
 		addr, err := mail.ParseAddress(text)
 		if err != nil || addr.Address == "" || !strings.Contains(addr.Address, "@") {
 			_ = updateSessionText(bot, peerID, session, stateCollectEmail, "Неверный e-mail, пример: name@example.com", mainMenuKeyboard())
@@ -2206,7 +2318,7 @@ func handleMessage(bot *vkbot.Bot, msg events.MessageNewObject, xrCfg *xraySetti
 
 	// State: edit email
 	if session.State == stateEditEmail {
-		userIDStr := vkUserIDStr(fromID)
+		userIDStr := resolvedUserID(fromID)
 		addr, err := mail.ParseAddress(text)
 		if err != nil || addr.Address == "" || !strings.Contains(addr.Address, "@") {
 			_ = updateSessionText(bot, peerID, session, stateEditEmail, "Неверный e-mail.", mainMenuKeyboard())
@@ -2215,6 +2327,17 @@ func handleMessage(bot *vkbot.Bot, msg events.MessageNewObject, xrCfg *xraySetti
 		_ = userStore.SetEmail(userIDStr, addr.Address)
 		handleStatus(bot, peerID, session, xrCfg)
 		return
+	}
+
+	// link_<token> from Telegram link flow
+	if strings.HasPrefix(strings.ToLower(text), "link_") {
+		token := strings.TrimPrefix(text, "link_")
+		token = strings.TrimPrefix(token, "Link_")
+		token = strings.TrimSpace(token)
+		if len(token) >= 8 {
+			handleLinkAccount(bot, peerID, fromID, session, token, xrCfg)
+			return
+		}
 	}
 
 	// Referral code (first message): ref_vk_12345 or ref_12345
@@ -2226,7 +2349,7 @@ func handleMessage(bot *vkbot.Bot, msg events.MessageNewObject, xrCfg *xraySetti
 
 	// Ad tag
 	if strings.HasPrefix(strings.ToLower(text), "ad_") {
-		userIDStr := vkUserIDStr(fromID)
+		userIDStr := resolvedUserID(fromID)
 		adTag := strings.TrimPrefix(text, "ad_")
 		if f := strings.Fields(adTag); len(f) > 0 {
 			adStats.record(f[0], userIDStr)
@@ -2253,6 +2376,7 @@ func main() {
 	if testMode {
 		log.Println("🧪 TEST MODE ENABLED - using mock data")
 	}
+	tgBotName = strings.TrimSpace(os.Getenv("TG_BOT_NAME"))
 
 	// VK group settings
 	if v := strings.TrimSpace(os.Getenv("VK_GROUP_ID")); v != "" {
