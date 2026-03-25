@@ -1,15 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
-	"image"
-	"image/color"
-	"image/png"
 	"io/fs"
 	"log"
 	"math"
@@ -63,15 +59,6 @@ var (
 	logSessionMu       sync.Mutex
 	logSessions        = make(map[int64]*logSession) // key: userID
 )
-
-// blankPNG — минимальное 1x1 белое изображение для editMessageMedia при переходе photo→text.
-var blankPNG = func() []byte {
-	img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
-	img.Set(0, 0, color.White)
-	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
-	return buf.Bytes()
-}()
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
@@ -813,25 +800,16 @@ func issuePlanAccess(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, p
 
 func updateSessionText(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, state SessionState, text string, parseMode string, keyboard tgbotapi.InlineKeyboardMarkup) error {
 	if session.MessageID != 0 {
-		if session.ContentType == "photo" {
-			if err := editMessageMediaRaw(bot, chatID, session.MessageID, blankPNG, "blank.png", text, parseMode, keyboard); err == nil {
-				instruct.ResetState(chatID)
-				session.State = state
-				session.ContentType = "photo"
-				return nil
-			}
-		} else {
-			edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, session.MessageID, text, keyboard)
-			if parseMode != "" {
-				edit.ParseMode = parseMode
-			}
-			edit.DisableWebPagePreview = true
-			if _, err := bot.Send(edit); err == nil {
-				instruct.ResetState(chatID)
-				session.State = state
-				session.ContentType = "text"
-				return nil
-			}
+		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, session.MessageID, text, keyboard)
+		if parseMode != "" {
+			edit.ParseMode = parseMode
+		}
+		edit.DisableWebPagePreview = true
+		if _, err := bot.Send(edit); err == nil {
+			instruct.ResetState(chatID)
+			session.State = state
+			session.ContentType = "text"
+			return nil
 		}
 	}
 	return replaceSessionWithText(bot, chatID, session, state, text, parseMode, keyboard)
@@ -1002,20 +980,12 @@ func editMessageTextRaw(bot *tgbotapi.BotAPI, chatID int64, messageID int, text 
 
 func updateSessionTextRaw(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, state SessionState, text string, parseMode string, keyboard rawInlineKeyboardMarkup) error {
 	if session.MessageID != 0 {
-		if session.ContentType == "photo" {
-			if err := editMessageMediaRaw(bot, chatID, session.MessageID, blankPNG, "blank.png", text, parseMode, keyboard); err == nil {
-				instruct.ResetState(chatID)
-				session.State = state
-				session.ContentType = "photo"
-				return nil
-			}
-		} else {
-			if err := editMessageTextRaw(bot, chatID, session.MessageID, text, parseMode, keyboard); err == nil {
-				instruct.ResetState(chatID)
-				session.State = state
-				session.ContentType = "text"
-				return nil
-			}
+		err := editMessageTextRaw(bot, chatID, session.MessageID, text, parseMode, keyboard)
+		if err == nil {
+			instruct.ResetState(chatID)
+			session.State = state
+			session.ContentType = "text"
+			return nil
 		}
 	}
 
