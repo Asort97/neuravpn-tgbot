@@ -909,6 +909,49 @@ func sendMessageRaw(bot *tgbotapi.BotAPI, chatID int64, text string, parseMode s
 	return sent.MessageID, nil
 }
 
+func editMessageMediaRaw(bot *tgbotapi.BotAPI, chatID int64, messageID int, photoBytes []byte, fileName string, caption string, parseMode string, replyMarkup interface{}) error {
+	mediaObj := map[string]string{
+		"type":  "photo",
+		"media": "attach://file-0",
+	}
+	if caption != "" {
+		mediaObj["caption"] = caption
+	}
+	if parseMode != "" {
+		mediaObj["parse_mode"] = parseMode
+	}
+	mediaJSON, err := json.Marshal(mediaObj)
+	if err != nil {
+		return err
+	}
+
+	params := tgbotapi.Params{}
+	params.AddNonZero64("chat_id", chatID)
+	params.AddNonZero("message_id", messageID)
+	params["media"] = string(mediaJSON)
+	if replyMarkup != nil {
+		if err := params.AddInterface("reply_markup", replyMarkup); err != nil {
+			return err
+		}
+	}
+
+	files := []tgbotapi.RequestFile{
+		{
+			Name: "file-0",
+			Data: tgbotapi.FileBytes{Name: fileName, Bytes: photoBytes},
+		},
+	}
+
+	resp, err := bot.UploadFiles("editMessageMedia", params, files)
+	if err != nil {
+		return err
+	}
+	if !resp.Ok {
+		return fmt.Errorf("telegram editMessageMedia error %d: %s", resp.ErrorCode, resp.Description)
+	}
+	return nil
+}
+
 func editMessageTextRaw(bot *tgbotapi.BotAPI, chatID int64, messageID int, text string, parseMode string, replyMarkup interface{}) error {
 	params := tgbotapi.Params{}
 	params.AddNonZero64("chat_id", chatID)
@@ -3096,29 +3139,16 @@ func handleQRCode(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		return
 	}
 
-	caption := fmt.Sprintf("<b>QR-код вашего ключа</b>\n\nотсканируйте камерой или приложением для QR\n\n<b>ключ:</b>\n<code>%s</code>", html.EscapeString(link))
+	caption := fmt.Sprintf("<b>qr-код вашего ключа</b>\n\n<b>ключ:</b>\n<code>%s</code>", html.EscapeString(link))
 
-	media := tgbotapi.NewInputMediaPhoto(tgbotapi.FileBytes{Name: "qr.png", Bytes: png})
-	media.Caption = caption
-	media.ParseMode = "HTML"
-
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_get_vpn"),
-			tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
-		),
-	)
-
-	edit := tgbotapi.EditMessageMediaConfig{
-		BaseEdit: tgbotapi.BaseEdit{
-			ChatID:      chatID,
-			MessageID:   session.MessageID,
-			ReplyMarkup: &kb,
+	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{
+			rawCallbackButton("назад", "nav_get_vpn", "", "5264852846527941278"),
+			rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
 		},
-		Media: media,
-	}
+	}}
 
-	if _, err := bot.Send(edit); err != nil {
+	if err := editMessageMediaRaw(bot, chatID, session.MessageID, png, "qr.png", caption, "HTML", kbRaw); err != nil {
 		log.Printf("editMessageMedia error: %v", err)
 		return
 	}
