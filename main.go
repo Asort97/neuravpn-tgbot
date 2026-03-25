@@ -79,6 +79,9 @@ func resolveAdStatsPath() string {
 // throttling map (keyed by user id and action key)
 var lastActionKey = make(map[int64]map[string]time.Time)
 
+// in-memory cache for accessInfo (key: telegramUserID)
+var accessCache sync.Map // map[string]*accessInfo
+
 func sessionAction(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, action string, isNewUser bool) {
 	now := time.Now()
 	if session.SessionID == 0 {
@@ -449,6 +452,14 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 	if cfg == nil || cfg.client == nil {
 		return nil, fmt.Errorf("xray not configured")
 	}
+
+	// Кеш: при addDays==0 отдаём из памяти если есть
+	if addDays == 0 {
+		if cached, ok := accessCache.Load(telegramUser); ok {
+			return cached.(*accessInfo), nil
+		}
+	}
+
 	// Determine target inbound IDs: if list is empty, try to load all inbounds dynamically
 	inboundIDs := cfg.inboundIDs
 	if len(inboundIDs) == 0 {
@@ -497,6 +508,7 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 			info.link = cfg.client.GenerateVLESSLink(c, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
 		}
 		_ = userStore.SetDays(telegramUser, info.daysLeft)
+		accessCache.Store(telegramUser, info)
 		return info, nil
 	}
 
@@ -521,12 +533,14 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 		link = cfg.client.GenerateVLESSLink(primaryClient, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
 	}
 
-	return &accessInfo{
+	result := &accessInfo{
 		client:   primaryClient,
 		expireAt: expireAt,
 		daysLeft: daysLeft,
 		link:     link,
-	}, nil
+	}
+	accessCache.Store(telegramUser, result)
+	return result, nil
 }
 
 func fallbackEmail(userID string) string {
