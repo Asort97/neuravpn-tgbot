@@ -27,6 +27,7 @@ import (
 	sqlite "github.com/Asort97/vpnBot/clients/sqLite"
 	yookassa "github.com/Asort97/vpnBot/clients/yooKassa"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 const (
@@ -766,6 +767,7 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("инструкции", "nav_instructions", "", "5264991913274019640")},
+			{rawCallbackButton("QR-код", "nav_qrcode", "", "")},
 			{
 				rawCallbackButton("профиль", "nav_status", "", "5343693752999383705"),
 				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
@@ -2393,6 +2395,9 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	case data == "link_vk":
 		handleLinkVK(bot, cq, session)
 		return
+	case data == "nav_qrcode":
+		handleQRCode(bot, cq, session, xrCfg)
+		return
 	case data == "nav_instructions":
 		handleInstructionsMenu(bot, cq, session)
 	case data == "claim_sub_bonus":
@@ -3064,6 +3069,64 @@ func handlePreCheckout(bot *tgbotapi.BotAPI, pcq *tgbotapi.PreCheckoutQuery) {
 	}
 }
 
+func handleQRCode(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, xrCfg *xraySettings) {
+	chatID := cq.Message.Chat.ID
+	userID := int64(cq.From.ID)
+	userIDStr := strconv.FormatInt(userID, 10)
+
+	info, err := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, true)
+	if err != nil || info == nil || info.client == nil {
+		ackCallback(bot, cq, "не удалось получить ключ")
+		return
+	}
+
+	link := generateSubscriptionURL(xrCfg, info.client)
+	if strings.TrimSpace(link) == "" {
+		link = info.link
+	}
+	if strings.TrimSpace(link) == "" {
+		ackCallback(bot, cq, "ключ недоступен")
+		return
+	}
+
+	png, err := qrcode.Encode(link, qrcode.Medium, 512)
+	if err != nil {
+		log.Printf("qrcode encode error: %v", err)
+		ackCallback(bot, cq, "не удалось создать QR-код")
+		return
+	}
+
+	caption := fmt.Sprintf("<b>QR-код вашего ключа</b>\n\nотсканируйте камерой или приложением для QR\n\n<b>ключ:</b>\n<code>%s</code>", html.EscapeString(link))
+
+	media := tgbotapi.NewInputMediaPhoto(tgbotapi.FileBytes{Name: "qr.png", Bytes: png})
+	media.Caption = caption
+	media.ParseMode = "HTML"
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_get_vpn"),
+			tgbotapi.NewInlineKeyboardButtonData("🏠 меню", "nav_menu"),
+		),
+	)
+
+	edit := tgbotapi.EditMessageMediaConfig{
+		BaseEdit: tgbotapi.BaseEdit{
+			ChatID:      chatID,
+			MessageID:   session.MessageID,
+			ReplyMarkup: &kb,
+		},
+		Media: media,
+	}
+
+	if _, err := bot.Send(edit); err != nil {
+		log.Printf("editMessageMedia error: %v", err)
+		return
+	}
+
+	session.State = stateGetVPN
+	session.ContentType = "photo"
+}
+
 func handleGetVPN(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, xrCfg *xraySettings) {
 	chatID := cq.Message.Chat.ID
 	userID := int64(cq.From.ID)
@@ -3258,12 +3321,12 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{
-				rawCallbackButton("🖥️ Windows", "windows", "", ""),
-				rawCallbackButton("📱 Android", "android", "", ""),
+				rawCallbackButton("windows", "windows", "", ""),
+				rawCallbackButton("android", "android", "", ""),
 			},
 			{
-				rawCallbackButton("🍏 iOS", "ios", "", ""),
-				rawCallbackButton("💻 MacOS", "macos", "", ""),
+				rawCallbackButton("ios", "ios", "", ""),
+				rawCallbackButton("macos", "macos", "", ""),
 			},
 			{
 				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
