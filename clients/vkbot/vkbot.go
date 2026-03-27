@@ -282,6 +282,88 @@ func (b *Bot) UploadDoc(peerID int, filePath string) (string, error) {
 	return att, nil
 }
 
+// UploadPhotoBytes uploads a photo from raw bytes and returns the attachment string.
+func (b *Bot) UploadPhotoBytes(peerID int, data []byte, filename string) (string, error) {
+	server, err := b.VK.PhotosGetMessagesUploadServer(api.Params{
+		"peer_id": peerID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("get upload server: %w", err)
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, err := w.CreateFormFile("photo", filename)
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		return "", fmt.Errorf("write data: %w", err)
+	}
+	w.Close()
+
+	req, err := http.NewRequest("POST", server.UploadURL, &buf)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var uploadResp struct {
+		Server int    `json:"server"`
+		Photo  string `json:"photo"`
+		Hash   string `json:"hash"`
+	}
+	if err := json.Unmarshal(body, &uploadResp); err != nil {
+		return "", fmt.Errorf("unmarshal upload response: %w", err)
+	}
+
+	photos, err := b.VK.PhotosSaveMessagesPhoto(api.Params{
+		"server": uploadResp.Server,
+		"photo":  uploadResp.Photo,
+		"hash":   uploadResp.Hash,
+	})
+	if err != nil {
+		return "", fmt.Errorf("save photo: %w", err)
+	}
+	if len(photos) == 0 {
+		return "", fmt.Errorf("no photos returned from save")
+	}
+
+	att := fmt.Sprintf("photo%d_%d", photos[0].OwnerID, photos[0].ID)
+	if photos[0].AccessKey != "" {
+		att += "_" + photos[0].AccessKey
+	}
+	return att, nil
+}
+
+// SendPhotoBytes sends a message with a photo from raw bytes, text, and optional keyboard.
+func (b *Bot) SendPhotoBytes(peerID int, data []byte, filename, text string, keyboard *object.MessagesKeyboard) (int, error) {
+	att, err := b.UploadPhotoBytes(peerID, data, filename)
+	if err != nil {
+		log.Printf("upload photo bytes failed: %v, sending text only", err)
+		return b.SendMessage(peerID, text, keyboard)
+	}
+
+	params := api.Params{
+		"peer_id":    peerID,
+		"message":    text,
+		"attachment": att,
+		"random_id":  randomID(),
+	}
+	if keyboard != nil {
+		kb, _ := json.Marshal(keyboard)
+		params["keyboard"] = string(kb)
+	}
+	msgID, err := b.VK.MessagesSend(params)
+	return msgID, err
+}
+
 // SendPhoto sends a message with a photo attachment, text, and optional keyboard.
 func (b *Bot) SendPhoto(peerID int, photoPath, text string, keyboard *object.MessagesKeyboard) (int, error) {
 	att, err := b.UploadPhoto(peerID, photoPath)

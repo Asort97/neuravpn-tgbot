@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io/fs"
 	"log"
 	"math/rand"
@@ -28,6 +29,7 @@ import (
 	"github.com/SevereCloud/vksdk/v3/api"
 	"github.com/SevereCloud/vksdk/v3/events"
 	longpoll "github.com/SevereCloud/vksdk/v3/longpoll-bot"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 // ────────────────────────────────────────────────────────────────
@@ -325,6 +327,9 @@ var (
 	tgBotName      string // e.g. "neuravpn_bot"
 )
 
+// in-memory cache for accessInfo (key: userIDStr)
+var accessCache sync.Map // map[string]*accessInfo
+
 var (
 	expiryReminderMu    sync.Mutex
 	expiryReminderState = make(map[int64]map[string]string)
@@ -561,6 +566,13 @@ func ensureXrayAccess(cfg *xraySettings, userIDStr string, email string, addDays
 		return nil, fmt.Errorf("xray not configured")
 	}
 
+	// Кеш: при addDays==0 отдаём из памяти если есть
+	if addDays == 0 {
+		if cached, ok := accessCache.Load(userIDStr); ok {
+			return cached.(*accessInfo), nil
+		}
+	}
+
 	inboundIDs := cfg.inboundIDs
 	if len(inboundIDs) == 0 {
 		inbounds, err := cfg.client.GetAllInbounds()
@@ -603,6 +615,7 @@ func ensureXrayAccess(cfg *xraySettings, userIDStr string, email string, addDays
 			info.link = cfg.client.GenerateVLESSLink(c, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
 		}
 		_ = userStore.SetDays(userIDStr, info.daysLeft)
+		accessCache.Store(userIDStr, info)
 		return info, nil
 	}
 
@@ -626,12 +639,14 @@ func ensureXrayAccess(cfg *xraySettings, userIDStr string, email string, addDays
 		link = cfg.client.GenerateVLESSLink(primaryClient, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
 	}
 
-	return &accessInfo{
+	result := &accessInfo{
 		client:   primaryClient,
 		expireAt: expireAt,
 		daysLeft: daysLeft,
 		link:     link,
-	}, nil
+	}
+	accessCache.Store(userIDStr, result)
+	return result, nil
 }
 
 func generateSubscriptionURL(cfg *xraySettings, c *xray.Client) string {
@@ -884,6 +899,7 @@ func sendAccess(info *accessInfo, userIDStr string, peerID int, addedDays int, c
 	kb := rawkbd.Markup{
 		Buttons: [][]rawkbd.Button{
 			{rawkbd.CallbackButton("🛠 инструкции", "nav_instructions", "", "")},
+			{rawkbd.CallbackButton("📷 QR-код", "nav_qrcode", "", "")},
 			{
 				rawkbd.CallbackButton("👤 профиль", "nav_status", "", ""),
 				rawkbd.CallbackButton("🏠 меню", "nav_menu", "", ""),
@@ -1268,6 +1284,57 @@ func handleGetVPN(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xrayS
 		log.Printf("sendAccess error: %v", err)
 		_ = updateSessionText(bot, peerID, session, stateGetVPN, "Не получилось отправить ссылку.", mainMenuKeyboard())
 	}
+}
+
+func handleQRCode(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xraySettings) {
+	userIDStr := resolvedUserID(peerID)
+
+	info, err := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, true)
+	if err != nil || info == nil || info.client == nil {
+		_, _ = bot.SendMessage(peerID, "не удалось получить ключ", nil)
+		return
+	}
+
+	link := generateSubscriptionURL(xrCfg, info.client)
+	if strings.TrimSpace(link) == "" {
+		link = info.link
+	}
+	if strings.TrimSpace(link) == "" {
+		_, _ = bot.SendMessage(peerID, "ключ недоступен", nil)
+		return
+	}
+
+	png, err := qrcode.Encode(link, qrcode.Medium, 512)
+	if err != nil {
+		log.Printf("qrcode encode error: %v", err)
+		_, _ = bot.SendMessage(peerID, "не удалось создать QR-код", nil)
+		return
+	}
+
+	caption := fmt.Sprintf("📷 QR-код вашего ключа\n\nотсканируйте камерой или приложением для QR\n\nключ:\n%s", html.EscapeString(link))
+
+	kb := rawkbd.Markup{
+		Buttons: [][]rawkbd.Button{
+			{
+				rawkbd.CallbackButton("⬅️ назад", "nav_get_vpn", "", ""),
+				rawkbd.CallbackButton("🏠 меню", "nav_menu", "", ""),
+			},
+		},
+	}
+	vkKb := kb.ToVKKeyboard()
+
+	// VK не поддерживает редактирование сообщения с добавлением фото — delete+resend
+	if session.MessageID != 0 {
+		_ = bot.DeleteMessage(peerID, []int{session.MessageID})
+	}
+	msgID, err := bot.SendPhotoBytes(peerID, png, "qr.png", caption, vkKb)
+	if err != nil {
+		log.Printf("send QR photo error: %v", err)
+		return
+	}
+	session.MessageID = msgID
+	session.State = stateGetVPN
+	session.ContentType = "photo"
 }
 
 func handleStatus(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xraySettings) {
@@ -2160,6 +2227,8 @@ func handleEvent(bot *vkbot.Bot, obj events.MessageEventObject, xrCfg *xraySetti
 		_ = showMainMenu(bot, peerID, session)
 	case data == "nav_get_vpn":
 		handleGetVPN(bot, peerID, session, xrCfg)
+	case data == "nav_qrcode":
+		handleQRCode(bot, peerID, session, xrCfg)
 	case data == "nav_topup":
 		handleTopUp(bot, peerID, session)
 	case data == "nav_status":
