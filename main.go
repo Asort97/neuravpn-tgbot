@@ -676,7 +676,9 @@ func collectExpiryByVKUser(cfg *xraySettings) (map[int]time.Time, error) {
 		return nil, fmt.Errorf("no inbounds for reminder")
 	}
 
-	result := make(map[int]time.Time)
+	// Collect expiry for ALL clients (both VK and TG) by their TgID.
+	allExpiry := make(map[string]time.Time)
+	var vkPeers []int
 	for _, inboundID := range inboundIDs {
 		clients, err := cfg.client.GetInboundById(inboundID)
 		if err != nil {
@@ -686,14 +688,30 @@ func collectExpiryByVKUser(cfg *xraySettings) (map[int]time.Time, error) {
 			if !c.Enable || c.ExpiryTime <= 0 {
 				continue
 			}
-			peerID, ok := parseVKUserID(strings.TrimSpace(c.TgID))
-			if !ok {
+			tgID := strings.TrimSpace(c.TgID)
+			exp := time.UnixMilli(c.ExpiryTime)
+			if existing, has := allExpiry[tgID]; !has || exp.After(existing) {
+				allExpiry[tgID] = exp
+			}
+			if peerID, ok := parseVKUserID(tgID); ok {
+				vkPeers = append(vkPeers, peerID)
+			}
+		}
+	}
+
+	// For linked VK users, use the TG client's expiry instead.
+	result := make(map[int]time.Time)
+	for _, peerID := range vkPeers {
+		resolved := resolvedUserID(peerID)
+		vkID := vkUserIDStr(peerID)
+		if resolved != vkID {
+			if tgExp, ok := allExpiry[resolved]; ok {
+				result[peerID] = tgExp
 				continue
 			}
-			exp := time.UnixMilli(c.ExpiryTime)
-			if existing, has := result[peerID]; !has || exp.After(existing) {
-				result[peerID] = exp
-			}
+		}
+		if exp, ok := allExpiry[vkID]; ok {
+			result[peerID] = exp
 		}
 	}
 	return result, nil
