@@ -2430,6 +2430,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "android_next_") ||
 			strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "ios_next_") ||
 			strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "macos_next_") ||
+			strings.HasPrefix(data, "chregion_prev_") || strings.HasPrefix(data, "chregion_next_") ||
 			strings.HasSuffix(data, "_current") || data == "copy_key" || data == "nav_menu") {
 		logAction(bot, userID, username, actionName, false)
 	}
@@ -2608,6 +2609,32 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 					session.State = stateInstructions
 				} else if err != nil {
 					log.Printf("macos next step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
+			}
+		}
+	case strings.HasPrefix(data, "chregion_prev_"):
+		parts := strings.Split(data, "chregion_prev_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				if msgID, err := instruct.InstructionChangeRegionIOS(chatID, bot, n-1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("chregion prev step error: %v", err)
+					ackText = "Не удалось обновить шаг"
+				}
+			}
+		}
+	case strings.HasPrefix(data, "chregion_next_"):
+		parts := strings.Split(data, "chregion_next_")
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				if msgID, err := instruct.InstructionChangeRegionIOS(chatID, bot, n+1); err == nil && msgID != 0 {
+					session.MessageID = msgID
+					session.State = stateInstructions
+				} else if err != nil {
+					log.Printf("chregion next step error: %v", err)
 					ackText = "Не удалось обновить шаг"
 				}
 			}
@@ -3615,10 +3642,10 @@ func getActionName(data string) string {
 		}
 		return "выбор суммы"
 	}
-	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "macos_prev_") {
+	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "chregion_prev_") {
 		return "инструкция: назад"
 	}
-	if strings.HasPrefix(data, "win_next_") || strings.HasPrefix(data, "android_next_") || strings.HasPrefix(data, "ios_next_") || strings.HasPrefix(data, "macos_next_") {
+	if strings.HasPrefix(data, "win_next_") || strings.HasPrefix(data, "android_next_") || strings.HasPrefix(data, "ios_next_") || strings.HasPrefix(data, "macos_next_") || strings.HasPrefix(data, "chregion_next_") {
 		return "инструкция: дальше"
 	}
 
