@@ -301,8 +301,16 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
-			state.MessageID = 0
+			if err := editInstructionMediaInPlace(bot, chatID, state.MessageID, steps[step].photoPath, caption, kb); err != nil {
+				log.Printf("windows editMessageMedia failed: %v, falling back to resend", err)
+				_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = true
+				windowsStates[chatID] = state
+				return state.MessageID, nil
+			}
 		case !needsImage && !state.HasImage:
 			if err := editInstructionText(bot, chatID, state.MessageID, caption, kb); err != nil {
 				log.Printf("windows edit text failed: %v", err)
@@ -416,8 +424,16 @@ func InstructionAndroid(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
-			state.MessageID = 0
+			if err := editInstructionMediaInPlace(bot, chatID, state.MessageID, steps[step].photoPath, caption, kb); err != nil {
+				log.Printf("android editMessageMedia failed: %v, falling back to resend", err)
+				_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = true
+				androidStates[chatID] = state
+				return state.MessageID, nil
+			}
 		case !needsImage && !state.HasImage:
 			if err := editInstructionText(bot, chatID, state.MessageID, caption, kb); err != nil {
 				log.Printf("android edit text failed: %v", err)
@@ -524,8 +540,16 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
-			state.MessageID = 0
+			if err := editInstructionMediaInPlace(bot, chatID, state.MessageID, steps[step].photoPath, caption, kb); err != nil {
+				log.Printf("ios editMessageMedia failed: %v, falling back to resend", err)
+				_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = true
+				iosStates[chatID] = state
+				return state.MessageID, nil
+			}
 		case !needsImage && !state.HasImage:
 			if err := editInstructionText(bot, chatID, state.MessageID, caption, kb); err != nil {
 				log.Printf("ios edit text failed: %v", err)
@@ -790,6 +814,39 @@ func editInstructionPhotoInPlace(bot *tgbotapi.BotAPI, chatID int64, messageID i
 	// Update keyboard with raw markup
 	if err := editInstructionReplyMarkup(bot, chatID, messageID, kb); err != nil {
 		log.Printf("editInstructionPhotoInPlace: failed to update reply markup: %v", err)
+	}
+
+	return nil
+}
+
+func editInstructionMediaInPlace(bot *tgbotapi.BotAPI, chatID int64, messageID int, mediaPath, caption string, kb rawkbd.Markup) error {
+	var media interface{}
+	if isAnimationPath(mediaPath) {
+		m := tgbotapi.NewInputMediaAnimation(tgbotapi.FilePath(mediaPath))
+		m.Caption = caption
+		m.ParseMode = "HTML"
+		media = m
+	} else {
+		m := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(mediaPath))
+		m.Caption = caption
+		m.ParseMode = "HTML"
+		media = m
+	}
+
+	edit := tgbotapi.EditMessageMediaConfig{
+		BaseEdit: tgbotapi.BaseEdit{
+			ChatID:    chatID,
+			MessageID: messageID,
+		},
+		Media: media,
+	}
+
+	if _, err := bot.Send(edit); err != nil {
+		return fmt.Errorf("editMessageMedia: %w", err)
+	}
+
+	if err := editInstructionReplyMarkup(bot, chatID, messageID, kb); err != nil {
+		log.Printf("editInstructionMediaInPlace: failed to update reply markup: %v", err)
 	}
 
 	return nil
