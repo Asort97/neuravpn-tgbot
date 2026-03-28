@@ -829,7 +829,7 @@ func InstructionChangeRegionIOS(chatID int64, bot *tgbotapi.BotAPI, step int) (i
 		{"InstructionPhotos/ChangeRegion/1.png", "перейдите в настройки аккаунта, нажав на ваше имя и почту"},
 		{"InstructionPhotos/ChangeRegion/2.png", "нажмите на кнопку «страна/регион»"},
 		{"InstructionPhotos/ChangeRegion/3.png", "в списке стран выберите страну Казахстан"},
-		{"InstructionPhotos/ChangeRegion/4.png", "заполните данные, как показано на картинке и нажмите на done, чтобы подтвердить смену региона.\n Street - <code>Абая</code>\nCity/Town - <code>Кокшетау</code>\nRegion - <code>Aqmola</code>\nPostcode - <code>020000</code>\nPhone <code>77011234567</code>"},
+		{"InstructionPhotos/ChangeRegion/4.png", "заполните данные, как показано на картинке и нажмите на done, чтобы подтвердить смену региона.\nStreet - <code>Абая</code>\nCity/Town - <code>Кокшетау</code>\nRegion - <code>Aqmola</code>\nPostcode - <code>020000</code>\nPhone <code>77011234567</code>"},
 	}
 
 	if step < 0 {
