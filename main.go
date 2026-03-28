@@ -2502,6 +2502,11 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			log.Printf("macos instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
+	case data == "change_region_ios":
+		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.ChangeRegionIOS, 0); err != nil {
+			log.Printf("change_region_ios instruction error: %v", err)
+			ackText = "Не удалось открыть инструкцию"
+		}
 	case strings.HasPrefix(data, "win_prev_"):
 		// win_prev_<currentStep>
 		parts := strings.Split(data, "win_prev_")
@@ -3373,6 +3378,9 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 				rawCallbackButton("macos", "macos", "", ""),
 			},
 			{
+				rawCallbackButton("смена региона ios", "change_region_ios", "", ""),
+			},
+			{
 				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
 			},
 		},
@@ -3413,6 +3421,8 @@ func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSessi
 		msgID, err = instruct.InstructionIos(chatID, bot, step)
 	case instruct.MacOS:
 		msgID, err = instruct.InstructionMacOS(chatID, bot, step)
+	case instruct.ChangeRegionIOS:
+		msgID, err = instruct.InstructionChangeRegionIOS(chatID, bot, step)
 	default:
 		return fmt.Errorf("unsupported instruction platform: %v", platform)
 	}

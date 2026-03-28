@@ -21,6 +21,7 @@ const (
 	Android
 	IOS
 	MacOS
+	ChangeRegionIOS
 )
 
 const (
@@ -39,11 +40,12 @@ type InstructionState struct {
 }
 
 var (
-	windowsStates   = make(map[int64]*InstructionState)
-	androidStates   = make(map[int64]*InstructionState)
-	iosStates       = make(map[int64]*InstructionState)
-	macosStates     = make(map[int64]*InstructionState)
-	instructionKeys = make(map[int64]string)
+	windowsStates         = make(map[int64]*InstructionState)
+	androidStates         = make(map[int64]*InstructionState)
+	iosStates             = make(map[int64]*InstructionState)
+	macosStates           = make(map[int64]*InstructionState)
+	changeRegionIOSStates = make(map[int64]*InstructionState)
+	instructionKeys       = make(map[int64]string)
 
 	instructionEmojiCheckOnce sync.Once
 	instructionEmojiCheckMu   sync.RWMutex
@@ -90,6 +92,13 @@ func SetInstructKeyboard(messageID int, chatID int64, instructType InstructType)
 		}
 	case MacOS:
 		macosStates[chatID] = &InstructionState{
+			CurrentStep: -1,
+			MessageID:   messageID,
+			ChatID:      chatID,
+			HasImage:    false,
+		}
+	case ChangeRegionIOS:
+		changeRegionIOSStates[chatID] = &InstructionState{
 			CurrentStep: -1,
 			MessageID:   messageID,
 			ChatID:      chatID,
@@ -782,11 +791,105 @@ func editInstructionMedia(bot *tgbotapi.BotAPI, chatID int64, messageID int, med
 	return nil
 }
 
+// ────────────────────────────────────────────────────────────────
+// Change Region iOS
+// ────────────────────────────────────────────────────────────────
+
+func InstructionChangeRegionIOS(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
+	steps := []struct {
+		photoPath string
+		caption   string
+	}{
+		{"InstructionPhotos/ChangeRegion/0.png", "зайдите в <b>AppStore</b> и нажмите на иконку профиля"},
+		{"InstructionPhotos/ChangeRegion/1.png", "перейдите в настройки аккаунта, нажав на ваше имя и почту"},
+		{"InstructionPhotos/ChangeRegion/2.png", "нажмите на кнопку «страна/регион»"},
+		{"InstructionPhotos/ChangeRegion/3.png", "в списке стран выберите страну Казахстан"},
+		{"InstructionPhotos/ChangeRegion/4.png", "заполните данные, как показано на картинке и нажмите на done, чтобы подтвердить смену региона.\n Street - <code>Абая</code>\nCity/Town - <code>Кокшетау</code>\nRegion - <code>Aqmola</code>\nPostcode - <code>020000</code>\nPhone <code>77011234567</code>"},
+	}
+
+	if step < 0 {
+		step = 0
+	}
+	if step >= len(steps) {
+		step = len(steps) - 1
+	}
+
+	var rows [][]rawkbd.Button
+	var row []rawkbd.Button
+
+	if step > 0 {
+		row = append(row, instructionCallbackButton(bot, "назад", fmt.Sprintf("chregion_prev_%d", step), instructionIconBackID, "⬅️"))
+	}
+	row = append(row, rawkbd.CallbackButton(fmt.Sprintf("шаг %d/%d", step+1, len(steps)), "chregion_current", "", ""))
+	if step < len(steps)-1 {
+		row = append(row, instructionCallbackButton(bot, "вперёд", fmt.Sprintf("chregion_next_%d", step), instructionIconNextID, "➡️"))
+	}
+
+	rows = append(rows, row)
+
+	rows = append(rows, []rawkbd.Button{
+		instructionCallbackButton(bot, "выйти", "nav_instructions", instructionIconExitID, "✖️"),
+	})
+
+	kb := rawkbd.Markup{InlineKeyboard: rows}
+
+	caption := steps[step].caption
+
+	needsImage := strings.TrimSpace(steps[step].photoPath) != ""
+	state, ok := changeRegionIOSStates[chatID]
+	if !ok || state == nil {
+		state = &InstructionState{ChatID: chatID}
+	}
+
+	if state.MessageID != 0 {
+		switch {
+		case needsImage && state.HasImage:
+			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+			state.MessageID = 0
+		case !needsImage && !state.HasImage:
+			if err := editInstructionText(bot, chatID, state.MessageID, caption, kb); err != nil {
+				log.Printf("changeRegionIOS edit text failed: %v", err)
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = false
+				changeRegionIOSStates[chatID] = state
+				return state.MessageID, nil
+			}
+		default:
+			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+			state.MessageID = 0
+		}
+	}
+
+	var msgID int
+	if needsImage {
+		msgID2, err := sendInstructionPhoto(bot, chatID, steps[step].photoPath, caption, kb)
+		if err != nil {
+			return 0, err
+		}
+		msgID = msgID2
+	} else {
+		msgID2, err := sendInstructionText(bot, chatID, caption, kb)
+		if err != nil {
+			return 0, err
+		}
+		msgID = msgID2
+	}
+
+	state.MessageID = msgID
+	state.CurrentStep = step
+	state.HasImage = needsImage
+	changeRegionIOSStates[chatID] = state
+	return msgID, nil
+}
+
 func ResetState(chatID int64) {
 	delete(windowsStates, chatID)
 	delete(androidStates, chatID)
 	delete(iosStates, chatID)
 	delete(macosStates, chatID)
+	delete(changeRegionIOSStates, chatID)
 	delete(instructionKeys, chatID)
 }
 
