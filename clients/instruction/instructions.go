@@ -770,6 +770,31 @@ func editInstructionReplyMarkup(bot *tgbotapi.BotAPI, chatID int64, messageID in
 	return nil
 }
 
+func editInstructionPhotoInPlace(bot *tgbotapi.BotAPI, chatID int64, messageID int, photoPath, caption string, kb rawkbd.Markup) error {
+	media := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(photoPath))
+	media.Caption = caption
+	media.ParseMode = "HTML"
+
+	edit := tgbotapi.EditMessageMediaConfig{
+		BaseEdit: tgbotapi.BaseEdit{
+			ChatID:    chatID,
+			MessageID: messageID,
+		},
+		Media: media,
+	}
+
+	if _, err := bot.Send(edit); err != nil {
+		return fmt.Errorf("editMessageMedia: %w", err)
+	}
+
+	// Update keyboard with raw markup
+	if err := editInstructionReplyMarkup(bot, chatID, messageID, kb); err != nil {
+		log.Printf("editInstructionPhotoInPlace: failed to update reply markup: %v", err)
+	}
+
+	return nil
+}
+
 func editInstructionMedia(bot *tgbotapi.BotAPI, chatID int64, messageID int, mediaType, mediaPath, caption string, kb rawkbd.Markup) error {
 	// Delete old message and send new one (simpler than editMessageMedia with files)
 	_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, messageID))
@@ -844,8 +869,17 @@ func InstructionChangeRegionIOS(chatID int64, bot *tgbotapi.BotAPI, step int) (i
 	if state.MessageID != 0 {
 		switch {
 		case needsImage && state.HasImage:
-			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
-			state.MessageID = 0
+			// photo→photo: edit in place via editMessageMedia
+			if err := editInstructionPhotoInPlace(bot, chatID, state.MessageID, steps[step].photoPath, caption, kb); err != nil {
+				log.Printf("changeRegionIOS editMessageMedia failed: %v, falling back to resend", err)
+				_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, state.MessageID))
+				state.MessageID = 0
+			} else {
+				state.CurrentStep = step
+				state.HasImage = true
+				changeRegionIOSStates[chatID] = state
+				return state.MessageID, nil
+			}
 		case !needsImage && !state.HasImage:
 			if err := editInstructionText(bot, chatID, state.MessageID, caption, kb); err != nil {
 				log.Printf("changeRegionIOS edit text failed: %v", err)
