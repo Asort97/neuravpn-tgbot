@@ -571,6 +571,14 @@ func (s *Store) DisableAutopay(userID string) error {
 	return err
 }
 
+func (s *Store) ClearAutopay(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users SET autopay_enabled = FALSE, autopay_method_id = NULL, autopay_plan_id = NULL, updated_at = NOW() WHERE id = $1
+	`, userID)
+	return err
+}
+
 func (s *Store) GetAutopay(userID string) (string, string, bool, error) {
 	ctx := context.Background()
 	var methodID, planID string

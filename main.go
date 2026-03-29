@@ -256,6 +256,7 @@ type DataStore interface {
 	GetLinkedVKUsers(tgUserID string) ([]string, error)
 	SetAutopay(userID, methodID, planID string) error
 	DisableAutopay(userID string) error
+	ClearAutopay(userID string) error
 	GetAutopay(userID string) (methodID, planID string, enabled bool, err error)
 	GetUsersWithAutopay() ([]AutopayUser, error)
 }
@@ -2945,6 +2946,12 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		ackText = "автопродление отключено ❌"
 		handleStatus(bot, cq, session, xrCfg)
 
+	case data == "unbind_card":
+		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
+		_ = userStore.ClearAutopay(userIDStr)
+		ackText = "карта отвязана ✅"
+		handleStatus(bot, cq, session, xrCfg)
+
 	}
 
 	ackCallback(bot, cq, ackText)
@@ -3562,6 +3569,11 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 			[]rawInlineKeyboardButton{rawCallbackButton("включить автопродление", "enable_autopay", "", "5345823764720426390")},
 		)
 	}
+	if apMethodID != "" {
+		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
+			[]rawInlineKeyboardButton{rawCallbackButton("отвязать карту", "unbind_card", "", "5264863854529124844")},
+		)
+	}
 	kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
 		[]rawInlineKeyboardButton{rawCallbackButton("меню", "nav_menu", "", "5264852846527941278")},
 	)
@@ -3580,6 +3592,9 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("❌ отключить автопродление", "disable_autopay")))
 	} else if apMethodID != "" && apPlanID != "" {
 		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔄 включить автопродление", "enable_autopay")))
+	}
+	if apMethodID != "" {
+		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🗑 отвязать карту", "unbind_card")))
 	}
 	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu")))
 	kb := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: kbRows}

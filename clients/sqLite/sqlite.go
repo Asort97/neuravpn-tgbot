@@ -633,6 +633,18 @@ func (s *Store) DisableAutopay(userID string) error {
 	return s.saveUsersLocked()
 }
 
+func (s *Store) ClearAutopay(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	ud := db[userID]
+	ud.AutopayEnabled = false
+	ud.AutopayMethodID = ""
+	ud.AutopayPlanID = ""
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
 func (s *Store) GetAutopay(userID string) (string, string, bool, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
