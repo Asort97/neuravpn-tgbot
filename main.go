@@ -1606,6 +1606,9 @@ func main() {
 	startExpiryReminder(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
 
+	// TODO: убрать после скриншота для YooKassa
+	_ = userStore.SetAutopay("623290294", "fake-method-id", "30d")
+
 	// Профилактический re-login к XRAY раз в час
 	go func() {
 		for {
