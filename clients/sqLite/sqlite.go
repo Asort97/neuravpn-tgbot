@@ -35,6 +35,9 @@ type UserData struct {
 	AppliedPayments     map[string]AppliedPaymentMeta `json:"applied_payments,omitempty"`
 	LinkToken           string                        `json:"link_token,omitempty"`
 	LinkedTo            string                        `json:"linked_to,omitempty"`
+	AutopayMethodID     string                        `json:"autopay_method_id,omitempty"`
+	AutopayPlanID       string                        `json:"autopay_plan_id,omitempty"`
+	AutopayEnabled      bool                          `json:"autopay_enabled,omitempty"`
 }
 
 type AppliedPaymentMeta struct {
@@ -599,4 +602,57 @@ func (s *Store) GetLinkedVKUsers(tgUserID string) ([]string, error) {
 		}
 	}
 	return ids, nil
+}
+
+// AutopayUser holds autopay info for a single user.
+type AutopayUser = struct {
+	UserID   string
+	MethodID string
+	PlanID   string
+}
+
+func (s *Store) SetAutopay(userID, methodID, planID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	ud := db[userID]
+	ud.AutopayMethodID = methodID
+	ud.AutopayPlanID = planID
+	ud.AutopayEnabled = true
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) DisableAutopay(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	ud := db[userID]
+	ud.AutopayEnabled = false
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) GetAutopay(userID string) (string, string, bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	ud, ok := db[userID]
+	if !ok {
+		return "", "", false, nil
+	}
+	return ud.AutopayMethodID, ud.AutopayPlanID, ud.AutopayEnabled, nil
+}
+
+func (s *Store) GetUsersWithAutopay() ([]AutopayUser, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	var users []AutopayUser
+	for id, ud := range db {
+		if ud.AutopayEnabled && ud.AutopayMethodID != "" {
+			users = append(users, AutopayUser{UserID: id, MethodID: ud.AutopayMethodID, PlanID: ud.AutopayPlanID})
+		}
+	}
+	return users, nil
 }

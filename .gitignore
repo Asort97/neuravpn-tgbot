@@ -40,3 +40,4 @@ database/data.json
 main_tg_backup.go.bak
 deploy/neuravpn-vk.service
 neuravpn_vk
+.env-vk.example

@@ -66,7 +66,10 @@ CREATE TABLE IF NOT EXISTS users (
 			ADD COLUMN IF NOT EXISTS referral_confirmed_at TIMESTAMPTZ,
 			ADD COLUMN IF NOT EXISTS referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE,
 			ADD COLUMN IF NOT EXISTS link_token TEXT,
-			ADD COLUMN IF NOT EXISTS linked_to TEXT;
+			ADD COLUMN IF NOT EXISTS linked_to TEXT,
+			ADD COLUMN IF NOT EXISTS autopay_method_id TEXT,
+			ADD COLUMN IF NOT EXISTS autopay_plan_id TEXT,
+			ADD COLUMN IF NOT EXISTS autopay_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 	`)
 	if err != nil {
 		return err
@@ -540,6 +543,70 @@ func (s *Store) GetLinkedVKUsers(tgUserID string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// AutopayUser holds autopay info for a single user.
+type AutopayUser = struct {
+	UserID   string
+	MethodID string
+	PlanID   string
+}
+
+func (s *Store) SetAutopay(userID, methodID, planID string) error {
+	ctx := context.Background()
+	_ = s.ensureUser(ctx, userID)
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET autopay_method_id = $2, autopay_plan_id = $3, autopay_enabled = TRUE, updated_at = NOW()
+		WHERE id = $1
+	`, userID, methodID, planID)
+	return err
+}
+
+func (s *Store) DisableAutopay(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users SET autopay_enabled = FALSE, updated_at = NOW() WHERE id = $1
+	`, userID)
+	return err
+}
+
+func (s *Store) GetAutopay(userID string) (string, string, bool, error) {
+	ctx := context.Background()
+	var methodID, planID string
+	var enabled bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(autopay_method_id, ''), COALESCE(autopay_plan_id, ''), autopay_enabled
+		FROM users WHERE id = $1
+	`, userID).Scan(&methodID, &planID, &enabled)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", "", false, nil
+		}
+		return "", "", false, err
+	}
+	return methodID, planID, enabled, nil
+}
+
+func (s *Store) GetUsersWithAutopay() ([]AutopayUser, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, autopay_method_id, autopay_plan_id
+		FROM users WHERE autopay_enabled = TRUE AND autopay_method_id IS NOT NULL
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []AutopayUser
+	for rows.Next() {
+		var u AutopayUser
+		if err := rows.Scan(&u.UserID, &u.MethodID, &u.PlanID); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
 }
 
 // GetAllUserIDs возвращает список всех user id из таблицы users
