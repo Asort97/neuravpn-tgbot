@@ -254,6 +254,16 @@ type DataStore interface {
 	SetLinkedTo(userID, linkedTo string) error
 	GetLinkedTo(userID string) (string, error)
 	GetLinkedVKUsers(tgUserID string) ([]string, error)
+	SetAutopay(userID, methodID, planID string) error
+	DisableAutopay(userID string) error
+	GetAutopay(userID string) (methodID, planID string, enabled bool, err error)
+	GetUsersWithAutopay() ([]AutopayUser, error)
+}
+
+type AutopayUser = struct {
+	UserID   string
+	MethodID string
+	PlanID   string
 }
 
 var ratePlans = []RatePlan{
@@ -272,19 +282,20 @@ var ratePlanByID = func() map[string]RatePlan {
 }()
 
 type UserSession struct {
-	MessageID     int
-	State         SessionState
-	ContentType   string
-	PendingPlanID string
-	LastAccess    string
-	LastLink      string
-	CertFileName  string
-	CertFileBytes []byte
-	LastAction    string
-	LastActionAt  time.Time
-	SessionID     int
-	SessionStart  time.Time
-	Actions       []string
+	MessageID            int
+	State                SessionState
+	ContentType          string
+	PendingPlanID        string
+	LastAccess           string
+	LastLink             string
+	CertFileName         string
+	CertFileBytes        []byte
+	LastAction           string
+	LastActionAt         time.Time
+	SessionID            int
+	SessionStart         time.Time
+	Actions              []string
+	AutopayProposalMsgID int
 }
 
 type logSession struct {
@@ -737,6 +748,202 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 	}()
 }
 
+// ────────────────────────────────────────────────────────────
+// Autopay loop — автоматическое списание за 1 день до окончания
+// ────────────────────────────────────────────────────────────
+
+var (
+	autopayNotifiedMu sync.Mutex
+	autopayNotified   = make(map[string]string) // userID → expiry string (чтобы не слать повторно)
+
+	// TEST_MODE: запоминаем время включения автоплатежа для каждого юзера
+	autopayTestTimeMu sync.Mutex
+	autopayTestTime   = make(map[string]time.Time) // userID → время включения
+)
+
+func startAutopayLoop(bot *tgbotapi.BotAPI, cfg *xraySettings) {
+	go func() {
+		interval := 1 * time.Hour
+		if testMode {
+			interval = 1 * time.Minute
+			log.Println("🧪 autopay loop: test mode, interval=1m, charge threshold=5m")
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			processAutopayTick(bot, cfg)
+			<-ticker.C
+		}
+	}()
+}
+
+func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("autopay panic recovered: %v", r)
+		}
+	}()
+
+	users, err := userStore.GetUsersWithAutopay()
+	if err != nil {
+		log.Printf("autopay GetUsersWithAutopay: %v", err)
+		return
+	}
+
+	now := time.Now().UTC()
+
+	for _, u := range users {
+		plan, ok := ratePlanByID[u.PlanID]
+		if !ok {
+			log.Printf("autopay unknown plan %q for user %s", u.PlanID, u.UserID)
+			continue
+		}
+
+		info, err := ensureXrayAccess(cfg, u.UserID, fallbackEmail(u.UserID), 0, false)
+		if err != nil || info == nil {
+			continue
+		}
+
+		remain := info.expireAt.Sub(now)
+		daysLeft := remain.Hours() / 24
+
+		if testMode {
+			// В тест-режиме: списание через 5 минут после включения автоплатежа
+			autopayTestTimeMu.Lock()
+			enabledAt, exists := autopayTestTime[u.UserID]
+			if !exists {
+				autopayTestTime[u.UserID] = now
+				enabledAt = now
+			}
+			autopayTestTimeMu.Unlock()
+			if now.Before(enabledAt.Add(5 * time.Minute)) {
+				left := enabledAt.Add(5 * time.Minute).Sub(now).Round(time.Second)
+				log.Printf("autopay test: user=%s ждём ещё %s до списания", u.UserID, left)
+				continue
+			}
+			log.Printf("autopay test: user=%s 5 мин прошло → списание", u.UserID)
+		} else {
+			// Уведомление за 3 дня
+			if daysLeft > 1 && daysLeft <= 3 {
+				autopayNotifyUpcoming(bot, u, plan, info.daysLeft, info.expireAt)
+				continue
+			}
+
+			// Списание: осталось ≤ 1 дня
+			if daysLeft > 1 {
+				continue
+			}
+		}
+
+		chatID, parseErr := strconv.ParseInt(u.UserID, 10, 64)
+		if parseErr != nil {
+			continue
+		}
+
+		email, _ := userStore.GetEmail(u.UserID)
+		meta := map[string]interface{}{
+			"chat_id":   chatID,
+			"plan_id":   plan.ID,
+			"plan_days": plan.Days,
+			"autopay":   true,
+		}
+
+		payment, err := yookassaClient.CreateAutoPayment(u.MethodID, plan.Amount, "Автопродление "+plan.Title, email, meta)
+		if err != nil {
+			log.Printf("autopay charge failed user=%s plan=%s: %v", u.UserID, plan.ID, err)
+			_ = userStore.DisableAutopay(u.UserID)
+
+			failText := fmt.Sprintf("⚠️ не удалось автоматически продлить подписку (%s, %.0f ₽).\nавтопродление отключено. продлите вручную в разделе «оплата».", plan.Title, plan.Amount)
+			failMsg := tgbotapi.NewMessage(chatID, failText)
+			_, _ = bot.Send(failMsg)
+
+			alertText := fmt.Sprintf("⚠️ autopay failed user=%s plan=%s: %v", u.UserID, plan.ID, err)
+			logMsg := tgbotapi.NewMessage(logChatID, alertText)
+			_, _ = bot.Send(logMsg)
+			continue
+		}
+
+		if payment.Status != "succeeded" && !payment.Paid {
+			log.Printf("autopay payment not succeeded user=%s status=%s", u.UserID, payment.Status)
+			_ = userStore.DisableAutopay(u.UserID)
+
+			failText := fmt.Sprintf("⚠️ автопродление не прошло (статус: %s).\nавтопродление отключено. продлите вручную в разделе «оплата».", payment.Status)
+			failMsg := tgbotapi.NewMessage(chatID, failText)
+			_, _ = bot.Send(failMsg)
+			continue
+		}
+
+		paymentKey := buildAppliedPaymentKey("yookassa_auto", payment.ID)
+		_, _ = userStore.MarkPaymentApplied(u.UserID, paymentKey, "yookassa_auto", plan.ID, time.Now())
+
+		// Начислить дни
+		session := getSession(chatID)
+		if err := issuePlanAccess(bot, chatID, session, plan, cfg, u.UserID, chatID); err != nil {
+			log.Printf("autopay issuePlanAccess failed user=%s: %v", u.UserID, err)
+			alertText := fmt.Sprintf("⚠️ autopay charged but access failed user=%s plan=%s: %v", u.UserID, plan.ID, err)
+			logMsg := tgbotapi.NewMessage(logChatID, alertText)
+			_, _ = bot.Send(logMsg)
+			continue
+		}
+
+		successText := fmt.Sprintf("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> подписка автоматически продлена на %d дней (%s, %.0f ₽).", plan.Days, plan.Title, plan.Amount)
+		successMsg := tgbotapi.NewMessage(chatID, successText)
+		_, _ = bot.Send(successMsg)
+
+		logText := fmt.Sprintf("💰 autopay user=%s plan=%s amount=%.0f ₽", u.UserID, plan.Title, plan.Amount)
+		logMsg := tgbotapi.NewMessage(logChatID, logText)
+		_, _ = bot.Send(logMsg)
+
+		// Сбросить кеш уведомлений для этого юзера
+		autopayNotifiedMu.Lock()
+		delete(autopayNotified, u.UserID)
+		autopayNotifiedMu.Unlock()
+
+		// TEST_MODE: сбросить таймер чтобы следующее списание тоже ждало 5 мин
+		if testMode {
+			autopayTestTimeMu.Lock()
+			autopayTestTime[u.UserID] = time.Now().UTC()
+			autopayTestTimeMu.Unlock()
+		}
+	}
+}
+
+func autopayNotifyUpcoming(bot *tgbotapi.BotAPI, u AutopayUser, plan RatePlan, daysLeft int64, expiry time.Time) {
+	expKey := expiry.Format("2006-01-02")
+
+	autopayNotifiedMu.Lock()
+	prev := autopayNotified[u.UserID]
+	autopayNotifiedMu.Unlock()
+
+	if prev == expKey {
+		return // уже уведомляли для этого expiry
+	}
+
+	chatID, err := strconv.ParseInt(u.UserID, 10, 64)
+	if err != nil {
+		return
+	}
+
+	text := fmt.Sprintf(
+		"ℹ️ через %d дн. мы автоматически продлим вашу подписку за <b>%.0f ₽</b> (тариф <b>%s</b>).\nесли хотите отменить — нажмите кнопку ниже.",
+		daysLeft, plan.Amount, plan.Title,
+	)
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("❌ отключить автопродление", "disable_autopay"),
+		),
+	)
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = kb
+	_, _ = bot.Send(msg)
+
+	autopayNotifiedMu.Lock()
+	autopayNotified[u.UserID] = expKey
+	autopayNotifiedMu.Unlock()
+}
+
 func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays int, userID int64, cfg *xraySettings, bot *tgbotapi.BotAPI, session *UserSession) error {
 	if info == nil || info.client == nil {
 		return fmt.Errorf("no access info")
@@ -772,10 +979,6 @@ func sendAccess(info *accessInfo, telegramUserID string, chatID int64, addedDays
 оставшееся время / действует до:
 %s
 `, keyLine, combined)
-	if addedDays > 0 {
-		text += fmt.Sprintf("\n\n✨ Начислено: +%d дней", addedDays)
-	}
-
 	session.LastAccess = text
 	session.LastLink = info.link
 	kbRaw := rawInlineKeyboardMarkup{
@@ -1400,6 +1603,7 @@ func main() {
 
 	loadExpiryReminderState()
 	startExpiryReminder(bot, xrayCfg)
+	startAutopayLoop(bot, xrayCfg)
 
 	// Профилактический re-login к XRAY раз в час
 	go func() {
@@ -2710,6 +2914,37 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	case data == "check_payment":
 		handleCheckPayment(bot, cq, session, xrCfg)
 
+	case data == "enable_autopay":
+		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
+		// Если это из proposal — подтверждаем
+		if session.AutopayProposalMsgID > 0 {
+			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, session.AutopayProposalMsgID))
+			session.AutopayProposalMsgID = 0
+		} else {
+			// Повторное включение из профиля — используем сохранённые method/plan
+			methodID, planID, _, _ := userStore.GetAutopay(userIDStr)
+			if methodID != "" && planID != "" {
+				_ = userStore.SetAutopay(userIDStr, methodID, planID)
+			}
+		}
+		ackText = "автопродление включено ✅"
+		handleStatus(bot, cq, session, xrCfg)
+
+	case data == "skip_autopay":
+		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
+		_ = userStore.DisableAutopay(userIDStr)
+		if session.AutopayProposalMsgID > 0 {
+			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, session.AutopayProposalMsgID))
+			session.AutopayProposalMsgID = 0
+		}
+		ackText = "автопродление отключено"
+
+	case data == "disable_autopay":
+		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
+		_ = userStore.DisableAutopay(userIDStr)
+		ackText = "автопродление отключено ❌"
+		handleStatus(bot, cq, session, xrCfg)
+
 	}
 
 	ackCallback(bot, cq, ackText)
@@ -3072,6 +3307,30 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 
 	yookassaClient.ClearPayments(chatID)
 	ackCallback(bot, cq, fmt.Sprintf("Платеж за %s подтверждён", plan.Title))
+
+	// autopay: если карта сохранена, предложить автопродление
+	if pm := payment.PaymentMethod; pm != nil && pm.Saved && pm.ID != "" {
+		if err := userStore.SetAutopay(userIDStr, pm.ID, plan.ID); err != nil {
+			log.Printf("SetAutopay error user=%s: %v", userIDStr, err)
+		} else {
+			autopayText := fmt.Sprintf(
+				"чтобы не потерять <b>доступ</b> к VPN и оставаться на <b>связи</b> предлагаем включить автопродление\nпри окончании подписки автоматически спишется <b>%.0f ₽</b> за тариф <b>%s</b>.",
+				plan.Amount, plan.Title,
+			)
+			kb := tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData("включить", "enable_autopay"),
+					tgbotapi.NewInlineKeyboardButtonData("нет, спасибо", "skip_autopay"),
+				),
+			)
+			msg := tgbotapi.NewMessage(chatID, autopayText)
+			msg.ParseMode = "HTML"
+			msg.ReplyMarkup = kb
+			if sent, err := bot.Send(msg); err == nil {
+				session.AutopayProposalMsgID = sent.MessageID
+			}
+		}
+	}
 }
 
 func handleClaimSubscriptionBonus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, xrCfg *xraySettings) {
@@ -3264,7 +3523,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		}
 		expStr := formatExpiryUTC(expTime)
 		accessBlock = fmt.Sprintf(
-			"\n\nу вас есть доступ к neuravpn 🟢\nон активен ещё %d дней\nдо %s\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!",
+			"\n\nу вас есть доступ к neuravpn 🟢\nон активен ещё <b>%d</b> дней\nдо <code>%s</code>\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!",
 			days, expStr,
 		)
 	} else {
@@ -3272,6 +3531,16 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	}
 
 	profileText := header + accessBlock
+
+	// Autopay status
+	apMethodID, apPlanID, apEnabled, _ := userStore.GetAutopay(userIDStr)
+	if apEnabled {
+		if apPlan, ok := ratePlanByID[apPlanID]; ok {
+			profileText += fmt.Sprintf("\n\n<tg-emoji emoji-id=\"5345823764720426390\">🔄️</tg-emoji> автопродление: включено (%s, %.0f ₽)", apPlan.Title, apPlan.Amount)
+		} else {
+			profileText += "\n\nавтопродление: вкл ✅"
+		}
+	}
 
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
@@ -3282,6 +3551,15 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	if len(linkedVK) == 0 {
 		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
 			[]rawInlineKeyboardButton{rawCallbackButton("🔗 связать с ВК", "link_vk", "", "")},
+		)
+	}
+	if apEnabled {
+		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
+			[]rawInlineKeyboardButton{rawCallbackButton("отключить автопродление", "disable_autopay", "", "5264863854529124844")},
+		)
+	} else if apMethodID != "" && apPlanID != "" {
+		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
+			[]rawInlineKeyboardButton{rawCallbackButton("включить автопродление", "enable_autopay", "", "5345823764720426390")},
 		)
 	}
 	kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
@@ -3297,6 +3575,11 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	}
 	if len(linkedVK) == 0 {
 		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔗 связать с ВК", "link_vk")))
+	}
+	if apEnabled {
+		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("❌ отключить автопродление", "disable_autopay")))
+	} else if apMethodID != "" && apPlanID != "" {
+		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔄 включить автопродление", "enable_autopay")))
 	}
 	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu")))
 	kb := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: kbRows}
