@@ -92,7 +92,6 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	paymentReq.Amount.Value = fmt.Sprintf("%.2f", amount)
 	paymentReq.Amount.Currency = "RUB"
 	paymentReq.Capture = true
-	paymentReq.SavePaymentMethod = true
 
 	paymentReq.Confirmation = map[string]interface{}{
 		"type":       "redirect",
