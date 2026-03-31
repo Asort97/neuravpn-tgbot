@@ -86,7 +86,7 @@ func New(shopID, apiKey string) *YooKassaClient {
 	}
 }
 
-func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description string, chatID int64, product string, extraMeta map[string]interface{}, userEmail string) (*YooKassaPaymentResponse, error) {
+func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description string, chatID int64, product string, extraMeta map[string]interface{}, userEmail string, saveCard bool) (*YooKassaPaymentResponse, error) {
 	paymentReq := YooKassaPaymentRequest{}
 
 	paymentReq.Amount.Value = fmt.Sprintf("%.2f", amount)
@@ -99,7 +99,7 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	}
 
 	paymentReq.Description = description
-	paymentReq.SavePaymentMethod = true
+	paymentReq.SavePaymentMethod = saveCard
 
 	paymentReq.Metadata = map[string]interface{}{
 		"chat_id":  chatID,
@@ -205,7 +205,7 @@ func (y *YooKassaClient) GetYooKassaPaymentStatus(paymentID string) (*YooKassaPa
 	return &paymentResp, nil
 }
 
-func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string) (int, bool, error) {
+func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string, saveCard bool) (int, bool, error) {
 	payment, err := y.CreateYooKassaPayment(
 		amount,
 		productName,
@@ -213,6 +213,7 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 		productName,
 		metadata,
 		userEmail,
+		saveCard,
 	)
 	if err != nil {
 		return messageID, false, fmt.Errorf("не удалось создать платёж: %v", err)
@@ -274,8 +275,8 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 	return sent.MessageID, true, nil
 }
 
-func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string) (int, bool, error) {
-	return y.sendYooKassaPaymentButton(bot, chatID, messageID, amount, productName, metadata, userEmail)
+func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string, saveCard bool) (int, bool, error) {
+	return y.sendYooKassaPaymentButton(bot, chatID, messageID, amount, productName, metadata, userEmail, saveCard)
 }
 
 // FindSucceededPayment ищет любой успешный платёж среди последних платежей пользователя.

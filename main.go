@@ -287,6 +287,7 @@ type UserSession struct {
 	State                SessionState
 	ContentType          string
 	PendingPlanID        string
+	PendingSaveCard      bool
 	LastAccess           string
 	LastLink             string
 	CertFileName         string
@@ -1371,7 +1372,8 @@ func choosePayKeyboardRaw(plan RatePlan) rawInlineKeyboardMarkup {
 	stars := starsAmountForPlan(plan)
 	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawCallbackButton(fmt.Sprintf("⭐ звёздами (%d ⭐)", stars), "pay_stars_"+plan.ID, "", "")},
-		{rawCallbackButton(fmt.Sprintf("💳 картой (%.0f ₽)", plan.Amount), "pay_card_"+plan.ID, "", "")},
+		{rawCallbackButton(fmt.Sprintf("💳 картой с автопродлением (%.0f ₽)", plan.Amount), "pay_card_"+plan.ID, "", "")},
+		{rawCallbackButton(fmt.Sprintf("💲 любым способом (%.0f ₽)", plan.Amount), "pay_any_"+plan.ID, "", "")},
 		{
 			rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
 			rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
@@ -2425,7 +2427,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, "Тариф не найден, выбери заново.", "HTML", rateKeyboardRaw())
 			return
 		}
-		if err := startPaymentForPlan(bot, chatID, session, plan); err != nil {
+		if err := startPaymentForPlan(bot, chatID, session, plan, session.PendingSaveCard); err != nil {
 			log.Printf("startPaymentForPlan error: %v", err)
 			_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось создать платёж.", "", mainMenuInlineKeyboard())
 		}
@@ -2881,6 +2883,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			return
 		}
 		session.PendingPlanID = p.ID
+		session.PendingSaveCard = true
 
 		userID := strconv.FormatInt(cq.From.ID, 10)
 		if email, _ := userStore.GetEmail(userID); strings.TrimSpace(email) == "" {
@@ -2897,9 +2900,43 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			return
 		}
 
-		if err := startPaymentForPlan(bot, chatID, session, p); err != nil {
+		if err := startPaymentForPlan(bot, chatID, session, p, true); err != nil {
 			log.Printf("startPaymentForPlan error: %v", err)
-			_ = updateSessionText(bot, chatID, session, stateTopUp, "𢙴 Не удалось создать платёж.", "", mainMenuInlineKeyboard())
+			_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось создать платёж.", "", mainMenuInlineKeyboard())
+			ackCallback(bot, cq, "ошибка оплаты")
+			return
+		}
+		ackCallback(bot, cq, "счёт создан")
+		return
+
+	case strings.HasPrefix(data, "pay_any_"):
+		id := strings.TrimPrefix(data, "pay_any_")
+		p, ok := ratePlanByID[id]
+		if !ok {
+			ackCallback(bot, cq, "тариф не найден")
+			return
+		}
+		session.PendingPlanID = p.ID
+		session.PendingSaveCard = false
+
+		userID := strconv.FormatInt(cq.From.ID, 10)
+		if email, _ := userStore.GetEmail(userID); strings.TrimSpace(email) == "" {
+			text := "📧 Для оплаты нужен e-mail для чека.\nОтправь e-mail следующим сообщением (пример: name@example.com).\n\n" +
+				"<b>Продолжи, введя e-mail.</b>"
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{
+					rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
+					rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+				},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateCollectEmail, text, "HTML", kbRaw)
+			ackCallback(bot, cq, "пришли e-mail")
+			return
+		}
+
+		if err := startPaymentForPlan(bot, chatID, session, p, false); err != nil {
+			log.Printf("startPaymentForPlan error: %v", err)
+			_ = updateSessionText(bot, chatID, session, stateTopUp, "Не удалось создать платёж.", "", mainMenuInlineKeyboard())
 			ackCallback(bot, cq, "ошибка оплаты")
 			return
 		}
@@ -3242,7 +3279,7 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 	_ = updateSessionTextRaw(bot, chatID, session, stateChoosePay, text, "HTML", choosePayKeyboardRaw(plan))
 	ackCallback(bot, cq, "выберите способ оплаты")
 }
-func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan) error {
+func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan, saveCard bool) error {
 	metadata := map[string]interface{}{
 		"plan_id":     plan.ID,
 		"plan_title":  plan.Title,
@@ -3251,7 +3288,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	}
 
 	email, _ := userStore.GetEmail(strconv.FormatInt(chatID, 10))
-	newID, _, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, metadata, email)
+	newID, _, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, metadata, email, saveCard)
 	if err != nil {
 		return err
 	}
