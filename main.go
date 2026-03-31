@@ -891,6 +891,7 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 
 		successText := fmt.Sprintf("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> подписка автоматически продлена на %d дней (%s, %.0f ₽).", plan.Days, plan.Title, plan.Amount)
 		successMsg := tgbotapi.NewMessage(chatID, successText)
+		successMsg.ParseMode = "HTML"
 		_, _ = bot.Send(successMsg)
 
 		logText := fmt.Sprintf("💰 autopay user=%s plan=%s amount=%.0f ₽", u.UserID, plan.Title, plan.Amount)
