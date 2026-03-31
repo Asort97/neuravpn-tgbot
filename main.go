@@ -1736,6 +1736,63 @@ func handleAddDays(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySetti
 	logAction(bot, msg.From.ID, msg.From.UserName, fmt.Sprintf("/add %s %d дн.", targetUserID, days), false)
 }
 
+func handleRemoveDays(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	chatID := msg.Chat.ID
+
+	isAdmin := false
+	for _, id := range adminIDs {
+		if id == msg.From.ID {
+			isAdmin = true
+			break
+		}
+	}
+	if !isAdmin {
+		m := tgbotapi.NewMessage(chatID, "⛔️ Только для админа")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) != 2 {
+		m := tgbotapi.NewMessage(chatID, "Использование: <code>/remove userID days</code>\nПример: <code>/remove 123456789 7</code>")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	targetUserID := strings.TrimSpace(args[0])
+	if _, err := strconv.ParseInt(targetUserID, 10, 64); err != nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Неверный userID: "+targetUserID)
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	days, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || days <= 0 {
+		m := tgbotapi.NewMessage(chatID, "❌ Количество дней должно быть положительным числом")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	info, err := ensureXrayAccess(xrCfg, targetUserID, fallbackEmail(targetUserID), -days, true)
+	if err != nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Ошибка: "+err.Error())
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	text := fmt.Sprintf("✅ У пользователя <code>%s</code> убрано <b>%d</b> дн.\nОсталось дней: <b>%d</b>", targetUserID, days, info.daysLeft)
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = "HTML"
+	_, _ = bot.Send(m)
+
+	logAction(bot, msg.From.ID, msg.From.UserName, fmt.Sprintf("/remove %s %d дн.", targetUserID, days), false)
+}
+
 func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
 	handleSyncInboundsInternal(bot, msg, xrCfg, false)
 }
@@ -2386,6 +2443,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleAdCheck(bot, msg)
 		case "add":
 			handleAddDays(bot, msg, xrCfg)
+		case "remove":
+			handleRemoveDays(bot, msg, xrCfg)
 		case "sync_inbounds":
 			handleSyncInbounds(bot, msg, xrCfg)
 		case "sync_active_inbounds":
