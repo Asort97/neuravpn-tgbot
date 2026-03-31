@@ -842,7 +842,7 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 			continue
 		}
 
-		email, _ := userStore.GetEmail(u.UserID)
+		email := fallbackEmail(u.UserID)
 		meta := map[string]interface{}{
 			"chat_id":   chatID,
 			"plan_id":   plan.ID,
@@ -1605,9 +1605,6 @@ func main() {
 	loadExpiryReminderState()
 	startExpiryReminder(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
-
-	// TODO: убрать после скриншота для YooKassa
-	_ = userStore.SetAutopay("623290294", "fake-method-id", "30d")
 
 	// Профилактический re-login к XRAY раз в час
 	go func() {
@@ -2920,15 +2917,15 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 
 	case data == "enable_autopay":
 		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
-		// Если это из proposal — подтверждаем
 		if session.AutopayProposalMsgID > 0 {
 			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, session.AutopayProposalMsgID))
 			session.AutopayProposalMsgID = 0
-		} else {
-			// Повторное включение из профиля — используем сохранённые method/plan
-			methodID, planID, _, _ := userStore.GetAutopay(userIDStr)
-			if methodID != "" && planID != "" {
-				_ = userStore.SetAutopay(userIDStr, methodID, planID)
+		}
+		// Включаем автопродление (работает и из proposal, и из профиля)
+		methodID, planID, _, _ := userStore.GetAutopay(userIDStr)
+		if methodID != "" && planID != "" {
+			if err := userStore.SetAutopay(userIDStr, methodID, planID); err != nil {
+				log.Printf("enable_autopay error user=%s: %v", userIDStr, err)
 			}
 		}
 		ackText = "автопродление включено ✅"
@@ -2945,14 +2942,34 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 
 	case data == "disable_autopay":
 		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
-		_ = userStore.DisableAutopay(userIDStr)
+		if err := userStore.DisableAutopay(userIDStr); err != nil {
+			log.Printf("disable_autopay error user=%s: %v", userIDStr, err)
+		}
 		ackText = "автопродление отключено ❌"
 		handleStatus(bot, cq, session, xrCfg)
 
 	case data == "unbind_card":
+		// Показываем подтверждение: редактируем текущее сообщение
+		confirmText := "вы отвязываете карту. автопродление отключится, и для его повторного подключения потребуется новая оплата."
+		kb := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("отвязать", "unbind_card_confirm"),
+				tgbotapi.NewInlineKeyboardButtonData("нет", "unbind_card_cancel"),
+			),
+		)
+		edit := tgbotapi.NewEditMessageText(chatID, cq.Message.MessageID, confirmText)
+		edit.ReplyMarkup = &kb
+		_, _ = bot.Send(edit)
+
+	case data == "unbind_card_confirm":
 		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
-		_ = userStore.ClearAutopay(userIDStr)
+		if err := userStore.ClearAutopay(userIDStr); err != nil {
+			log.Printf("unbind_card error user=%s: %v", userIDStr, err)
+		}
 		ackText = "карта отвязана ✅"
+		handleStatus(bot, cq, session, xrCfg)
+
+	case data == "unbind_card_cancel":
 		handleStatus(bot, cq, session, xrCfg)
 
 	}
@@ -3323,6 +3340,8 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 		if err := userStore.SetAutopay(userIDStr, pm.ID, plan.ID); err != nil {
 			log.Printf("SetAutopay error user=%s: %v", userIDStr, err)
 		} else {
+			// Сохраняем карту, но НЕ включаем — пользователь сам решит
+			_ = userStore.DisableAutopay(userIDStr)
 			autopayText := fmt.Sprintf(
 				"чтобы не потерять <b>доступ</b> к VPN и оставаться на <b>связи</b> предлагаем включить автопродление\nпри окончании подписки автоматически спишется <b>%.0f ₽</b> за тариф <b>%s</b>.",
 				plan.Amount, plan.Title,

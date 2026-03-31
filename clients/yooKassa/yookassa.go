@@ -99,6 +99,7 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	}
 
 	paymentReq.Description = description
+	paymentReq.SavePaymentMethod = true
 
 	paymentReq.Metadata = map[string]interface{}{
 		"chat_id":  chatID,
