@@ -516,8 +516,11 @@ func (x *XRayClient) EnsureExpiry(inboundID int, client *Client, daysToAdd int64
 	if expireAt.Before(now) {
 		expireAt = now
 	}
-	if daysToAdd > 0 {
+	if daysToAdd != 0 {
 		expireAt = expireAt.Add(time.Duration(daysToAdd) * 24 * time.Hour)
+		if expireAt.Before(now) {
+			expireAt = now
+		}
 	}
 
 	client.ExpiryTime = expireAt.UnixMilli()
