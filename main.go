@@ -735,9 +735,9 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 					expStr := formatExpiryUTC(exp)
 					text := ""
 					if daysLeft <= 0 {
-						text = fmt.Sprintf("⏰ ваш доступ к neuravpn закончился.\nдействовал до: %s\nпродлите в разделе «оплата».", expStr)
+						text = fmt.Sprintf("⏰ ваш доступ к neuravpn закончился.\nдействовал до: %s\nпродлите в разделе «оплата» чтобы пользоваться VPN без ограничений.", expStr)
 					} else {
-						text = fmt.Sprintf("⏰ ваш доступ к neuravpn заканчивается через %d дн.\nдействует до: %s\nпродлите в разделе «оплата».", daysLeft, expStr)
+						text = fmt.Sprintf("⏰ ваш доступ к neuravpn заканчивается через %d дн.\nдействует до: %s\nпродлите в разделе «оплата» чтобы пользоваться VPN без ограничений.", daysLeft, expStr)
 					}
 
 					msg := tgbotapi.NewMessage(userID, text)
@@ -2377,6 +2377,111 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			_, _ = bot.Send(msg)
 		}()
 		_ = updateSessionText(bot, chatID, session, stateMenu, "Рассылка запущена", "HTML", mainMenuInlineKeyboard())
+		return
+	}
+
+	// /notify_sleep — рассылка пользователям с 0 дней больше недели
+	if msg.IsCommand() && msg.Command() == "notify_sleep" {
+		isAdmin := false
+		for _, id := range adminIDs {
+			if id == msg.From.ID {
+				isAdmin = true
+				break
+			}
+		}
+		if !isAdmin {
+			_ = updateSessionText(bot, chatID, session, stateMenu, "⛔️ Только для админа", "HTML", mainMenuInlineKeyboard())
+			return
+		}
+
+		go func() {
+			var sleepIDs []string
+			threshold := time.Now().Add(-7 * 24 * time.Hour)
+
+			if pg, ok := userStore.(interface {
+				GetSleepingUsers(since time.Time) ([]string, error)
+			}); ok {
+				var err error
+				sleepIDs, err = pg.GetSleepingUsers(threshold)
+				if err != nil {
+					m := tgbotapi.NewMessage(chatID, "Ошибка: "+err.Error())
+					_, _ = bot.Send(m)
+					return
+				}
+			} else if sq, ok := userStore.(interface {
+				GetAllUsers() map[string]sqlite.UserData
+			}); ok {
+				for id, ud := range sq.GetAllUsers() {
+					if ud.Days > 0 {
+						continue
+					}
+					if ud.LastDeduct == "" {
+						continue
+					}
+					t, err := time.Parse(time.RFC3339, ud.LastDeduct)
+					if err != nil {
+						continue
+					}
+					if t.Before(threshold) {
+						sleepIDs = append(sleepIDs, id)
+					}
+				}
+			} else {
+				m := tgbotapi.NewMessage(chatID, "userStore не поддерживает эту операцию")
+				_, _ = bot.Send(m)
+				return
+			}
+
+			if len(sleepIDs) == 0 {
+				m := tgbotapi.NewMessage(chatID, "Нет спящих пользователей (0 дней > 7 дней)")
+				_, _ = bot.Send(m)
+				return
+			}
+
+			text := "давно не пользовались VPN\n\nесли всё ещё актуально можете вернуться в любой момент"
+			kb := tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData("оплатить", "nav_topup"),
+				),
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData("+15 дней", "nav_referral"),
+				),
+			)
+
+			count := 0
+			for _, uid := range sleepIDs {
+				id, err := strconv.ParseInt(uid, 10, 64)
+				if err != nil {
+					continue
+				}
+				m := tgbotapi.NewMessage(id, text)
+				m.ReplyMarkup = kb
+				if _, err := bot.Send(m); err == nil {
+					count++
+				}
+				time.Sleep(30 * time.Millisecond)
+			}
+			result := tgbotapi.NewMessage(chatID, fmt.Sprintf("Рассылка спящим завершена. Доставлено: %d из %d", count, len(sleepIDs)))
+			_, _ = bot.Send(result)
+		}()
+		_ = updateSessionText(bot, chatID, session, stateMenu, "Рассылка спящим запущена...", "HTML", mainMenuInlineKeyboard())
+		return
+	}
+
+	// /notify_sleep_test — превью сообщения notify_sleep самому себе
+	if msg.IsCommand() && msg.Command() == "notify_sleep_test" {
+		text := "давно не пользовались VPN\n\nесли всё ещё актуально можете вернуться в любой момент"
+		kb := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("оплатить", "nav_topup"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("+15 дней", "nav_referral"),
+			),
+		)
+		m := tgbotapi.NewMessage(chatID, text)
+		m.ReplyMarkup = kb
+		_, _ = bot.Send(m)
 		return
 	}
 
