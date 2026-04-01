@@ -516,6 +516,9 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 			),
 		}
 		rows = append(rows, linkRow)
+		rows = append(rows, []rawkbd.Button{
+			rawkbd.CallbackButton("сменить регион", "change_region_ios", "", "5345823764720426390"),
+		})
 	}
 
 	rows = append(rows, []rawkbd.Button{
@@ -882,7 +885,7 @@ func InstructionChangeRegionIOS(chatID int64, bot *tgbotapi.BotAPI, step int) (i
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/ChangeRegion/0.png", "зайдите в <b>AppStore</b> и нажмите на иконку профиля"},
+		{"InstructionPhotos/ChangeRegion/0.png", "зайдите в <b>AppStore</b> и нажмите на иконку профиля\n<bold>внимание:</bold> если у вас стоит регион РФ в AppStore, то смените его, нажав кнопку ниже «сменить регион»"},
 		{"InstructionPhotos/ChangeRegion/1.png", "перейдите в настройки аккаунта, нажав на ваше имя и почту"},
 		{"InstructionPhotos/ChangeRegion/2.png", "нажмите на кнопку «страна/регион»"},
 		{"InstructionPhotos/ChangeRegion/3.png", "в списке стран выберите страну Казахстан"},

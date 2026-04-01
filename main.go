@@ -3908,9 +3908,6 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 				rawCallbackButton("macos", "macos", "", ""),
 			},
 			{
-				rawCallbackButton("смена региона ios", "change_region_ios", "", ""),
-			},
-			{
 				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
 			},
 		},
