@@ -479,7 +479,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Ios/0.MP4", "скачайте <a href=\"https://apps.apple.com/kz/app/v2raytun/id6476628951\">v2RayTun</a> из app store\n\n<b>внимание:</b> если у вас стоит регион РФ в AppStore, то смените его, нажав кнопку ниже «сменить регион»"},
+		{"InstructionPhotos/Ios/0.MP4", "скачайте <a href=\"https://apps.apple.com/kz/app/v2raytun/id6476628951\">v2RayTun</a> из app store\n\n<b>внимание:</b> для того чтобы скачать приложение, вам нужно сменить регион в AppStore вместо РФ. Вы можете это сделать, нажав кнопку «сменить регион»"},
 		{"InstructionPhotos/Ios/1.MP4", "заходим в приложение и вставляем ключ из буфера обмена. предварительно вы должны скопировать ключ-подключения который мы вам отправили"},
 		{"InstructionPhotos/Ios/2.MP4", "далее жмём на кнопку включения и vpn работает."},
 	}
