@@ -479,7 +479,7 @@ func InstructionIos(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Ios/0.MP4", `скачайте <a href="https://apps.apple.com/kz/app/v2raytun/id6476628951">v2RayTun</a> из app store`},
+		{"InstructionPhotos/Ios/0.MP4", "скачайте <a href=\"https://apps.apple.com/kz/app/v2raytun/id6476628951\">v2RayTun</a> из app store\n\n<b>внимание:</b> если у вас стоит регион РФ в AppStore, то смените его, нажав кнопку ниже «сменить регион»"},
 		{"InstructionPhotos/Ios/1.MP4", "заходим в приложение и вставляем ключ из буфера обмена. предварительно вы должны скопировать ключ-подключения который мы вам отправили"},
 		{"InstructionPhotos/Ios/2.MP4", "далее жмём на кнопку включения и vpn работает."},
 	}
@@ -885,7 +885,7 @@ func InstructionChangeRegionIOS(chatID int64, bot *tgbotapi.BotAPI, step int) (i
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/ChangeRegion/0.png", "зайдите в <b>AppStore</b> и нажмите на иконку профиля\n<bold>внимание:</bold> если у вас стоит регион РФ в AppStore, то смените его, нажав кнопку ниже «сменить регион»"},
+		{"InstructionPhotos/ChangeRegion/0.png", "зайдите в <b>AppStore</b> и нажмите на иконку профиля"},
 		{"InstructionPhotos/ChangeRegion/1.png", "перейдите в настройки аккаунта, нажав на ваше имя и почту"},
 		{"InstructionPhotos/ChangeRegion/2.png", "нажмите на кнопку «страна/регион»"},
 		{"InstructionPhotos/ChangeRegion/3.png", "в списке стран выберите страну Казахстан"},
