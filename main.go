@@ -2466,21 +2466,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		return
 	}
 
-	// /notify_sleep_test — превью сообщения notify_sleep самому себе
-	if msg.IsCommand() && msg.Command() == "notify_sleep_test" {
-		text := "мы видим вы давно не пользовались VPN\n\nесли всё ещё актуально - можете вернуться в любой момент!"
-		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
-			{rawCallbackButton("оплатить", "nav_topup", "", "5344015205531686528")},
-			{rawCallbackButton("+15 дней", "nav_referral", "", "5345823764720426390")},
-		}}
-		msgID, err := sendMessageRaw(bot, chatID, text, "HTML", kbRaw)
-		if err == nil {
-			session.MessageID = msgID
-			session.State = stateMenu
-		}
-		return
-	}
-
 	if msg.SuccessfulPayment != nil {
 		planID := session.PendingPlanID
 		if payload := strings.TrimSpace(msg.SuccessfulPayment.InvoicePayload); strings.HasPrefix(payload, starsPayloadPrefix) {
