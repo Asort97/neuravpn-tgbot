@@ -617,6 +617,27 @@ func (s *Store) GetUsersWithAutopay() ([]AutopayUser, error) {
 	return users, rows.Err()
 }
 
+func (s *Store) GetSleepingUsers(since time.Time) ([]string, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `
+		SELECT id FROM users
+		WHERE days = 0 AND updated_at < $1
+	`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 // GetAllUserIDs возвращает список всех user id из таблицы users
 func (s *Store) GetAllUserIDs() ([]string, error) {
 	ctx := context.Background()
