@@ -2438,15 +2438,11 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 				return
 			}
 
-			text := "давно не пользовались VPN\n\nесли всё ещё актуально можете вернуться в любой момент"
-			kb := tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData("оплатить", "nav_topup"),
-				),
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData("+15 дней", "nav_referral"),
-				),
-			)
+			text := "мы видим вы давно не пользовались VPN\n\nесли всё ещё актуально - можете вернуться в любой момент!"
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("оплатить", "nav_topup", "", "5344015205531686528")},
+				{rawCallbackButton("+15 дней", "nav_referral", "", "5345823764720426390")},
+			}}
 
 			count := 0
 			for _, uid := range sleepIDs {
@@ -2454,10 +2450,12 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 				if err != nil {
 					continue
 				}
-				m := tgbotapi.NewMessage(id, text)
-				m.ReplyMarkup = kb
-				if _, err := bot.Send(m); err == nil {
+				msgID, sendErr := sendMessageRaw(bot, id, text, "HTML", kbRaw)
+				if sendErr == nil {
 					count++
+					us := getSession(id)
+					us.MessageID = msgID
+					us.State = stateMenu
 				}
 				time.Sleep(30 * time.Millisecond)
 			}
@@ -2470,18 +2468,16 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 
 	// /notify_sleep_test — превью сообщения notify_sleep самому себе
 	if msg.IsCommand() && msg.Command() == "notify_sleep_test" {
-		text := "давно не пользовались VPN\n\nесли всё ещё актуально можете вернуться в любой момент"
-		kb := tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("оплатить", "nav_topup"),
-			),
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("+15 дней", "nav_referral"),
-			),
-		)
-		m := tgbotapi.NewMessage(chatID, text)
-		m.ReplyMarkup = kb
-		_, _ = bot.Send(m)
+		text := "мы видим вы давно не пользовались VPN\n\nесли всё ещё актуально - можете вернуться в любой момент!"
+		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("оплатить", "nav_topup", "", "")},
+			{rawCallbackButton("+15 дней", "nav_referral", "", "")},
+		}}
+		msgID, err := sendMessageRaw(bot, chatID, text, "HTML", kbRaw)
+		if err == nil {
+			session.MessageID = msgID
+			session.State = stateMenu
+		}
 		return
 	}
 
