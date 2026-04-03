@@ -31,8 +31,8 @@ import (
 )
 
 const (
-	startTrialDays    = 7
-	channelBonusDays  = 7
+	startTrialDays    = 5
+	channelBonusDays  = 5
 	referralBonusDays = 15
 	channelUsername   = "@neuravpn"
 	channelURL        = "https://t.me/neuravpn"
@@ -41,8 +41,8 @@ const startText = `<tg-emoji emoji-id="5346299917679757635">👋</tg-emoji> до
 
 этот бот поможет подключить neuravpn с понятными инструкциями для любой платформы.
 
-перед покупкой основного тарифа мы предлагаем пробный период - 7 дней.
-попробуйте. мы не заставляем.
+перед покупкой основного тарифа мы предлагаем пробный период - 5 дней.
+можете попробовать его, подписавшись на канал. мы не заставляем.
 
 гарантируем стабильный и бесперебойный доступ ко всем заблокированным ресурсам
 без ограничения исходной скорости вашего интернета.
@@ -1263,7 +1263,16 @@ func composeMenuText() string {
 
 func showMainMenu(bot *tgbotapi.BotAPI, chatID int64, session *UserSession) error {
 	text := composeMenuText()
-	if err := updateSessionTextRaw(bot, chatID, session, stateMenu, text, "HTML", mainMenuInlineKeyboardRaw()); err == nil {
+	kb := mainMenuInlineKeyboardRaw()
+
+	userID := strconv.FormatInt(chatID, 10)
+	if claimed, err := userStore.IsStartBonusClaimed(userID); err == nil && !claimed {
+		kb.InlineKeyboard = append(kb.InlineKeyboard, []rawInlineKeyboardButton{
+			rawCallbackButton("проверить подписку (+"+strconv.Itoa(channelBonusDays)+" дн.)", "claim_sub_bonus", "", ""),
+		})
+	}
+
+	if err := updateSessionTextRaw(bot, chatID, session, stateMenu, text, "HTML", kb); err == nil {
 		return nil
 	}
 	return updateSessionText(bot, chatID, session, stateMenu, text, "HTML", mainMenuInlineKeyboard())
@@ -2630,8 +2639,8 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	if referrerID != "" && referrerID != userID {
 		if err := userStore.RecordReferral(userID, referrerID); err == nil {
 			if ok, _ := userStore.ClaimStartBonus(userID, "referral", time.Now()); ok {
-				_ = userStore.AddDays(userID, 7)
-				_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 7, true)
+				_ = userStore.AddDays(userID, startTrialDays)
+				_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), startTrialDays, true)
 			}
 
 			subscribed, subErr := isSubscribedToChannel(bot, msg.From.ID)
