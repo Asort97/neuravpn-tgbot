@@ -3443,7 +3443,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	}
 
 	email, _ := userStore.GetEmail(strconv.FormatInt(chatID, 10))
-	newID, _, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, metadata, email, saveCard)
+	newID, confirmationURL, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, metadata, email, saveCard)
 	if err != nil {
 		return err
 	}
@@ -3453,7 +3453,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	instruct.ResetState(chatID)
 
 	// Напоминание через 5 минут, если оплата не прошла
-	go func(chatID int64, planID string) {
+	go func(chatID int64, planID string, payURL string) {
 		time.Sleep(5 * time.Minute)
 
 		// Проверяем, оплатил ли пользователь
@@ -3470,10 +3470,11 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 
 		text := "<tg-emoji emoji-id=\"5344015205531686528\">⚠️</tg-emoji><b>вы не завершили оплату.</b>\nвернитесь и активируйте доступ чтобы оставаться на связи"
 		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
-			{rawCallbackButton("перейти к оплате", "nav_topup", "", "")},
+			{rawURLButton("оплатить", payURL, "")},
+			{rawCallbackButton("✅ я оплатил", "check_payment", "", "")},
 		}}
 		_, _ = sendMessageRaw(bot, chatID, text, "HTML", kbRaw)
-	}(chatID, plan.ID)
+	}(chatID, plan.ID, confirmationURL)
 
 	return nil
 }
