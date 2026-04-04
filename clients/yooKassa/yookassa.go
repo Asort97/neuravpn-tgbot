@@ -30,6 +30,7 @@ type YooKassaPaymentRequest struct {
 	Receipt           *Receipt               `json:"receipt,omitempty"`
 	SavePaymentMethod bool                   `json:"save_payment_method,omitempty"`
 	PaymentMethodID   string                 `json:"payment_method_id,omitempty"`
+	ExpiresAt         string                 `json:"expires_at,omitempty"`
 }
 
 type Receipt struct {
@@ -100,6 +101,7 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 
 	paymentReq.Description = description
 	paymentReq.SavePaymentMethod = saveCard
+	paymentReq.ExpiresAt = time.Now().UTC().Add(20 * time.Minute).Format(time.RFC3339)
 
 	paymentReq.Metadata = map[string]interface{}{
 		"chat_id":  chatID,
