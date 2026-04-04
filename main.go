@@ -3451,6 +3451,30 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	session.State = stateTopUp
 	session.PendingPlanID = plan.ID
 	instruct.ResetState(chatID)
+
+	// Напоминание через 5 минут, если оплата не прошла
+	go func(chatID int64, planID string) {
+		time.Sleep(5 * time.Minute)
+
+		// Проверяем, оплатил ли пользователь
+		_, found, _ := yookassaClient.FindSucceededPayment(chatID)
+		if found {
+			return // оплата прошла, напоминание не нужно
+		}
+
+		// Проверяем, что пользователь всё ещё на экране оплаты этого плана
+		s := getSession(chatID)
+		if s.State != stateTopUp || s.PendingPlanID != planID {
+			return // пользователь ушёл, не спамим
+		}
+
+		text := "<tg-emoji emoji-id=\"5344015205531686528\">⚠️</tg-emoji><b>вы не завершили оплату.</b>\nвернитесь и активируйте доступ чтобы оставаться на связи"
+		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("перейти к оплате", "nav_topup", "", "")},
+		}}
+		_, _ = sendMessageRaw(bot, chatID, text, "HTML", kbRaw)
+	}(chatID, plan.ID)
+
 	return nil
 }
 
