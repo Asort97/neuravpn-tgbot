@@ -3452,20 +3452,20 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	session.PendingPlanID = plan.ID
 	instruct.ResetState(chatID)
 
-	// Напоминание через 5 минут, если оплата не прошла
+	// Напоминание через 5 минут + истечение через 20 минут
 	go func(chatID int64, planID string, payURL string) {
 		time.Sleep(5 * time.Minute)
 
 		// Проверяем, оплатил ли пользователь
 		_, found, _ := yookassaClient.FindSucceededPayment(chatID)
 		if found {
-			return // оплата прошла, напоминание не нужно
+			return
 		}
 
 		// Проверяем, что пользователь всё ещё на экране оплаты этого плана
 		s := getSession(chatID)
 		if s.State != stateTopUp || s.PendingPlanID != planID {
-			return // пользователь ушёл, не спамим
+			return
 		}
 
 		text := "<tg-emoji emoji-id=\"5344015205531686528\">⚠️</tg-emoji><b>вы не завершили оплату.</b>\nвернитесь и активируйте доступ чтобы оставаться на связи"
@@ -3473,7 +3473,43 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 			{rawURLButton("оплатить", payURL, "")},
 			{rawCallbackButton("✅ я оплатил", "check_payment", "", "")},
 		}}
-		_, _ = sendMessageRaw(bot, chatID, text, "HTML", kbRaw)
+		reminderMsgID, _ := sendMessageRaw(bot, chatID, text, "HTML", kbRaw)
+
+		// Ждём до истечения счёта (ещё 15 минут после напоминания = 20 минут от создания)
+		time.Sleep(15 * time.Minute)
+
+		_, found, _ = yookassaClient.FindSucceededPayment(chatID)
+		if found {
+			return
+		}
+
+		s = getSession(chatID)
+		if s.State != stateTopUp || s.PendingPlanID != planID {
+			return
+		}
+
+		// Счёт истёк — переводим напоминание в меню выбора тарифа
+		s.PendingPlanID = ""
+		var builder strings.Builder
+		builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nоплата ⭐ звездами - <b>скидка 10%.</b>\n\nтарифы:\n")
+		for _, plan := range ratePlans {
+			stars := starsAmountForPlan(plan)
+			builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount, stars))
+		}
+		header := strings.TrimSuffix(builder.String(), "\n")
+
+		if reminderMsgID != 0 {
+			if err := editMessageTextRaw(bot, chatID, reminderMsgID, header, "HTML", rateKeyboardRaw()); err == nil {
+				s.MessageID = reminderMsgID
+				s.State = stateTopUp
+				return
+			}
+		}
+		// Если не удалось отредактировать — отправляем новое
+		if newMsgID, err := sendMessageRaw(bot, chatID, header, "HTML", rateKeyboardRaw()); err == nil && newMsgID != 0 {
+			s.MessageID = newMsgID
+			s.State = stateTopUp
+		}
 	}(chatID, plan.ID, confirmationURL)
 
 	return nil
