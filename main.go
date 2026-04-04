@@ -3107,6 +3107,19 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	case data == "check_payment":
 		handleCheckPayment(bot, cq, session, xrCfg)
 
+	case data == "retry_payment":
+		plan, ok := ratePlanByID[session.PendingPlanID]
+		if !ok {
+			ackCallback(bot, cq, "тариф не найден")
+			return
+		}
+		if err := startPaymentForPlan(bot, chatID, session, plan, session.PendingSaveCard); err != nil {
+			log.Printf("retry_payment error user=%d: %v", chatID, err)
+			ackCallback(bot, cq, "ошибка создания платежа")
+			return
+		}
+		ackCallback(bot, cq, "")
+
 	case data == "enable_autopay":
 		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
 		if session.AutopayProposalMsgID > 0 {
@@ -3443,7 +3456,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	}
 
 	email, _ := userStore.GetEmail(strconv.FormatInt(chatID, 10))
-	newID, confirmationURL, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, metadata, email, saveCard)
+	newID, _, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, metadata, email, saveCard)
 	if err != nil {
 		return err
 	}
@@ -3452,8 +3465,8 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	session.PendingPlanID = plan.ID
 	instruct.ResetState(chatID)
 
-	// Напоминание через 5 минут + истечение через 20 минут
-	go func(chatID int64, planID string, payURL string) {
+	// Напоминание через 5 минут
+	go func(chatID int64, planID string) {
 		time.Sleep(5 * time.Minute)
 
 		// Проверяем, оплатил ли пользователь
@@ -3470,47 +3483,15 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 
 		text := "<tg-emoji emoji-id=\"5344015205531686528\">⚠️</tg-emoji><b>вы не завершили оплату.</b>\nвернитесь и активируйте доступ чтобы оставаться на связи"
 		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
-			{rawURLButton("оплатить", payURL, "")},
+			{rawCallbackButton("оплатить", "retry_payment", "", "")},
 			{rawCallbackButton("✅ я оплатил", "check_payment", "", "")},
 		}}
 		reminderMsgID, _ := sendMessageRaw(bot, chatID, text, "HTML", kbRaw)
-
-		// Ждём до истечения счёта (ещё 15 минут после напоминания = 20 минут от создания)
-		time.Sleep(15 * time.Minute)
-
-		_, found, _ = yookassaClient.FindSucceededPayment(chatID)
-		if found {
-			return
-		}
-
-		s = getSession(chatID)
-		if s.State != stateTopUp || s.PendingPlanID != planID {
-			return
-		}
-
-		// Счёт истёк — переводим напоминание в меню выбора тарифа
-		s.PendingPlanID = ""
-		var builder strings.Builder
-		builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nоплата ⭐ звездами - <b>скидка 10%.</b>\n\nтарифы:\n")
-		for _, plan := range ratePlans {
-			stars := starsAmountForPlan(plan)
-			builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount, stars))
-		}
-		header := strings.TrimSuffix(builder.String(), "\n")
-
 		if reminderMsgID != 0 {
-			if err := editMessageTextRaw(bot, chatID, reminderMsgID, header, "HTML", rateKeyboardRaw()); err == nil {
-				s.MessageID = reminderMsgID
-				s.State = stateTopUp
-				return
-			}
-		}
-		// Если не удалось отредактировать — отправляем новое
-		if newMsgID, err := sendMessageRaw(bot, chatID, header, "HTML", rateKeyboardRaw()); err == nil && newMsgID != 0 {
-			s.MessageID = newMsgID
+			s.MessageID = reminderMsgID
 			s.State = stateTopUp
 		}
-	}(chatID, plan.ID, confirmationURL)
+	}(chatID, plan.ID)
 
 	return nil
 }
@@ -4202,6 +4183,7 @@ func getActionName(data string) string {
 		"macos":            "инструкция MacOS",
 		"copy_key":         "копировать ключ",
 		"check_payment":    "проверить оплату",
+		"retry_payment":    "повторить оплату",
 		"claim_sub_bonus":  "получить бонус за подписку",
 	}
 
