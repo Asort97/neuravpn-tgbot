@@ -276,11 +276,14 @@ var ratePlans = []RatePlan{
 	{ID: "365d", Title: "365 дней", Amount: 949, Days: 365},
 }
 
+var testPlan = RatePlan{ID: "test1d", Title: "тест 1 день", Amount: 1, Days: 1}
+
 var ratePlanByID = func() map[string]RatePlan {
 	m := make(map[string]RatePlan)
 	for _, p := range ratePlans {
 		m[p.ID] = p
 	}
+	m[testPlan.ID] = testPlan
 	return m
 }()
 
@@ -352,6 +355,15 @@ var (
 	userSessions         = make(map[int64]*UserSession)
 	testMode       bool
 )
+
+func isAdmin(chatID int64) bool {
+	for _, id := range adminIDs {
+		if id == chatID {
+			return true
+		}
+	}
+	return false
+}
 
 var (
 	expiryReminderMu    sync.Mutex
@@ -1349,7 +1361,7 @@ func finalizeReferralAfterSubscription(bot *tgbotapi.BotAPI, newUserID int64, ne
 	return true, nil
 }
 
-func rateKeyboardRaw() rawInlineKeyboardMarkup {
+func rateKeyboardRaw(chatID int64) rawInlineKeyboardMarkup {
 	var rows [][]rawInlineKeyboardButton
 	var row []rawInlineKeyboardButton
 	for _, p := range ratePlans {
@@ -1362,6 +1374,11 @@ func rateKeyboardRaw() rawInlineKeyboardMarkup {
 	}
 	if len(row) > 0 {
 		rows = append(rows, row)
+	}
+	if isAdmin(chatID) {
+		rows = append(rows, []rawInlineKeyboardButton{
+			rawCallbackButton("🧪 тест 1₽", "rate_"+testPlan.ID, "", ""),
+		})
 	}
 	rows = append(rows, []rawInlineKeyboardButton{
 		rawCallbackButton("назад", "nav_status", "", "5264852846527941278"),
@@ -2604,7 +2621,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
-			_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, "Тариф не найден, выбери заново.", "HTML", rateKeyboardRaw())
+			_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, "Тариф не найден, выбери заново.", "HTML", rateKeyboardRaw(chatID))
 			return
 		}
 		if err := startPaymentForPlan(bot, chatID, session, plan, session.PendingSaveCard); err != nil {
@@ -3457,8 +3474,11 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 		stars := starsAmountForPlan(plan)
 		builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount, stars))
 	}
+	if isAdmin(chatID) {
+		builder.WriteString(fmt.Sprintf("• %s — %.0f ₽ (тест)\n", testPlan.Title, testPlan.Amount))
+	}
 	header := strings.TrimSuffix(builder.String(), "\n")
-	_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboardRaw())
+	_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboardRaw(chatID))
 }
 func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, plan RatePlan) {
 	chatID := cq.Message.Chat.ID
