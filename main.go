@@ -3458,9 +3458,34 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	}
 
 	email, _ := userStore.GetEmail(strconv.FormatInt(chatID, 10))
-	newID, _, err := yookassaClient.SendVPNPayment(bot, chatID, session.MessageID, plan.Amount, plan.Title, metadata, email, saveCard)
+	confirmationURL, err := yookassaClient.CreatePaymentAndGetURL(plan.Amount, plan.Title, chatID, metadata, email, saveCard)
 	if err != nil {
 		return err
+	}
+
+	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">💳</tg-emoji><b>%s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.0f ₽</b>\n\nспособы оплаты: SberPay, T-Pay, СБП, ЮMoney, Банковская карта\n\nнажмите «оплатить», чтобы открыть страницу оплаты.",
+		plan.Title, plan.Amount)
+	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawURLButton("оплатить", confirmationURL, "5344015205531686528")},
+		{rawCallbackButton("я оплатил", "check_payment", "", "5345823764720426390")},
+		{
+			rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
+			rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+		},
+	}}
+
+	newID := 0
+	if session.MessageID > 0 {
+		if err := editMessageTextRaw(bot, chatID, session.MessageID, text, "HTML", kbRaw); err == nil {
+			newID = session.MessageID
+		}
+	}
+	if newID == 0 {
+		if msgID, err := sendMessageRaw(bot, chatID, text, "HTML", kbRaw); err == nil {
+			newID = msgID
+		} else {
+			return err
+		}
 	}
 	session.MessageID = newID
 	session.State = stateTopUp

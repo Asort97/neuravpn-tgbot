@@ -208,52 +208,29 @@ func (y *YooKassaClient) GetYooKassaPaymentStatus(paymentID string) (*YooKassaPa
 }
 
 func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string, saveCard bool) (int, string, error) {
-	payment, err := y.CreateYooKassaPayment(
-		amount,
-		productName,
-		chatID,
-		productName,
-		metadata,
-		userEmail,
-		saveCard,
-	)
+	confirmationURL, err := y.CreatePaymentAndGetURL(amount, productName, chatID, metadata, userEmail, saveCard)
 	if err != nil {
-		return messageID, "", fmt.Errorf("не удалось создать платёж: %v", err)
+		return messageID, "", err
 	}
 
-	// записываем ID платежа в историю пользователя
-	payMu.Lock()
-	userPayments[chatID] = append(userPayments[chatID], payment.ID)
-	// ограничим историю до 5 последних записей, чтобы не разрасталась
-	if len(userPayments[chatID]) > 5 {
-		userPayments[chatID] = userPayments[chatID][len(userPayments[chatID])-5:]
-	}
-	payMu.Unlock()
+	message := fmt.Sprintf(`<tg-emoji emoji-id="5346325906526868503">💳</tg-emoji>*%s*
 
-	confirmationURL := ""
-	if confirmation, ok := payment.Confirmation["confirmation_url"].(string); ok {
-		confirmationURL = confirmation
-	} else {
-		return messageID, "", fmt.Errorf("не получена ссылка на оплату от YooKassa")
-	}
+<tg-emoji emoji-id="5344015205531686528">💰</tg-emoji> сумма к оплате: *%.2f ₽*
 
-	message := fmt.Sprintf(`💳 *%s*
+способы оплаты: SberPay, T-Pay, СБП, ЮMoney, Карта
 
-💰 Сумма к оплате: *%.2f ₽*
-📝 Описание: %s
-
-Нажмите «Оплатить», чтобы продолжить.`,
-		productName, amount, productName)
+нажмите «оплатить», чтобы открыть страницу оплаты.`,
+		productName, amount)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("💳 Оплатить", confirmationURL),
+			tgbotapi.NewInlineKeyboardButtonURL("💳 оплатить", confirmationURL),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Я оплатил", "check_payment"),
+			tgbotapi.NewInlineKeyboardButtonData("✅ я оплатил", "check_payment"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Назад в меню", "nav_menu"),
+			tgbotapi.NewInlineKeyboardButtonData("назад", "nav_topup"),
 		),
 	)
 
@@ -275,6 +252,38 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 	}
 
 	return sent.MessageID, confirmationURL, nil
+}
+
+// CreatePaymentAndGetURL creates a YooKassa payment and returns the confirmation URL.
+func (y *YooKassaClient) CreatePaymentAndGetURL(amount float64, productName string, chatID int64, metadata map[string]interface{}, userEmail string, saveCard bool) (string, error) {
+	payment, err := y.CreateYooKassaPayment(
+		amount,
+		productName,
+		chatID,
+		productName,
+		metadata,
+		userEmail,
+		saveCard,
+	)
+	if err != nil {
+		return "", fmt.Errorf("не удалось создать платёж: %v", err)
+	}
+
+	payMu.Lock()
+	userPayments[chatID] = append(userPayments[chatID], payment.ID)
+	if len(userPayments[chatID]) > 5 {
+		userPayments[chatID] = userPayments[chatID][len(userPayments[chatID])-5:]
+	}
+	payMu.Unlock()
+
+	confirmationURL := ""
+	if confirmation, ok := payment.Confirmation["confirmation_url"].(string); ok {
+		confirmationURL = confirmation
+	} else {
+		return "", fmt.Errorf("не получена ссылка на оплату от YooKassa")
+	}
+
+	return confirmationURL, nil
 }
 
 func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string, saveCard bool) (int, string, error) {
