@@ -298,6 +298,8 @@ type UserSession struct {
 	SessionStart         time.Time
 	Actions              []string
 	AutopayProposalMsgID int
+	PaymentGen           int64
+	LastReminderAt       time.Time
 }
 
 type logSession struct {
@@ -3465,9 +3467,24 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	session.PendingPlanID = plan.ID
 	instruct.ResetState(chatID)
 
+	session.PaymentGen++
+	logAction(bot, chatID, "", "🔗 счёт создан → ожидание оплаты", false)
+
 	// Напоминание через 5 минут
-	go func(chatID int64, planID string) {
+	go func(chatID int64, planID string, gen int64) {
 		time.Sleep(5 * time.Minute)
+
+		s := getSession(chatID)
+
+		// Если после этого счёта был создан новый — не напоминаем
+		if s.PaymentGen != gen {
+			return
+		}
+
+		// Не более одного напоминания в час
+		if !s.LastReminderAt.IsZero() && time.Since(s.LastReminderAt) < time.Hour {
+			return
+		}
 
 		// Проверяем, оплатил ли пользователь
 		_, found, _ := yookassaClient.FindSucceededPayment(chatID)
@@ -3476,9 +3493,16 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 		}
 
 		// Проверяем, что пользователь всё ещё на экране оплаты этого плана
-		s := getSession(chatID)
 		if s.State != stateTopUp || s.PendingPlanID != planID {
 			return
+		}
+
+		s.LastReminderAt = time.Now()
+		logAction(bot, chatID, "", "⚠️ не оплатил (5 мин)", false)
+
+		// Удаляем предыдущее сообщение со счётом
+		if oldMsgID := s.MessageID; oldMsgID > 0 {
+			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, oldMsgID))
 		}
 
 		text := "<tg-emoji emoji-id=\"5344015205531686528\">⚠️</tg-emoji><b>вы не завершили оплату.</b>\nвернитесь и активируйте доступ чтобы оставаться на связи"
@@ -3491,7 +3515,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 			s.MessageID = reminderMsgID
 			s.State = stateTopUp
 		}
-	}(chatID, plan.ID)
+	}(chatID, plan.ID, session.PaymentGen)
 
 	return nil
 }
@@ -4193,6 +4217,20 @@ func getActionName(data string) string {
 			return fmt.Sprintf("выбор суммы: %s", p.Title)
 		}
 		return "выбор суммы"
+	}
+	if strings.HasPrefix(data, "pay_card_") {
+		id := strings.TrimPrefix(data, "pay_card_")
+		if p, ok := ratePlanByID[id]; ok {
+			return fmt.Sprintf("💳 картой: %s", p.Title)
+		}
+		return "💳 картой"
+	}
+	if strings.HasPrefix(data, "pay_any_") {
+		id := strings.TrimPrefix(data, "pay_any_")
+		if p, ok := ratePlanByID[id]; ok {
+			return fmt.Sprintf("💲 любым: %s", p.Title)
+		}
+		return "💲 любым"
 	}
 	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "chregion_prev_") {
 		return "инструкция: назад"
