@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"io/fs"
 	"log"
 	"math"
 	"math/rand"
+	"net/http"
 	"net/mail"
 	"net/url"
 	"os"
@@ -1635,6 +1637,27 @@ func main() {
 			}
 		}
 	}()
+
+	// YooKassa webhook server
+	webhookSecret := strings.TrimSpace(os.Getenv("WEBHOOK_SECRET"))
+	webhookPort := strings.TrimSpace(os.Getenv("WEBHOOK_PORT"))
+	if webhookPort == "" {
+		webhookPort = "8080"
+	}
+	if webhookSecret != "" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/webhook/"+webhookSecret, func(w http.ResponseWriter, r *http.Request) {
+				handleYooKassaWebhook(bot, xrayCfg, w, r)
+			})
+			log.Printf("🌐 Webhook server listening on :%s", webhookPort)
+			if err := http.ListenAndServe(":"+webhookPort, mux); err != nil {
+				log.Printf("webhook server error: %v", err)
+			}
+		}()
+	} else {
+		log.Println("⚠️ WEBHOOK_SECRET not set — YooKassa webhook disabled")
+	}
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -4149,6 +4172,137 @@ func resolvePlanFromMetadata(meta map[string]interface{}, session *UserSession) 
 		}
 	}
 	return plan
+}
+
+// handleYooKassaWebhook processes incoming YooKassa webhook notifications.
+// YooKassa sends: {"type":"notification","event":"payment.succeeded","object":{...payment...}}
+func handleYooKassaWebhook(bot *tgbotapi.BotAPI, xrCfg *xraySettings, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	r.Body.Close()
+	if err != nil {
+		log.Printf("[webhook] read body error: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	var notification struct {
+		Type   string                           `json:"type"`
+		Event  string                           `json:"event"`
+		Object yookassa.YooKassaPaymentResponse `json:"object"`
+	}
+	if err := json.Unmarshal(body, &notification); err != nil {
+		log.Printf("[webhook] unmarshal error: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// Отвечаем 200 сразу — YooKassa не будет повторять
+	w.WriteHeader(http.StatusOK)
+
+	if notification.Event != "payment.succeeded" {
+		return
+	}
+
+	payment := &notification.Object
+	if payment.ID == "" {
+		return
+	}
+
+	// Извлекаем chat_id из metadata
+	chatIDRaw, ok := payment.Metadata["chat_id"]
+	if !ok {
+		log.Printf("[webhook] payment %s: no chat_id in metadata", payment.ID)
+		return
+	}
+	var chatID int64
+	switch v := chatIDRaw.(type) {
+	case float64:
+		chatID = int64(v)
+	case string:
+		chatID, _ = strconv.ParseInt(v, 10, 64)
+	}
+	if chatID == 0 {
+		log.Printf("[webhook] payment %s: invalid chat_id", payment.ID)
+		return
+	}
+
+	userIDStr := strconv.FormatInt(chatID, 10)
+	session := getSession(chatID)
+
+	plan := resolvePlanFromMetadata(payment.Metadata, session)
+	if plan.Title == "" {
+		log.Printf("[webhook] payment %s: cannot resolve plan", payment.ID)
+		return
+	}
+
+	paymentKey := buildAppliedPaymentKey("yookassa", payment.ID)
+	if paymentKey == "" {
+		return
+	}
+
+	alreadyApplied, err := userStore.IsPaymentApplied(userIDStr, paymentKey)
+	if err != nil {
+		log.Printf("[webhook] IsPaymentApplied error: %v", err)
+		sendPaymentAlert(bot, "webhook: payment apply check failed", chatID, "", paymentKey, plan.ID, err.Error())
+		return
+	}
+	if alreadyApplied {
+		return
+	}
+
+	fake := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: chatID},
+		From: &tgbotapi.User{ID: chatID},
+	}
+	if err := handleSuccessfulPayment(bot, fake, xrCfg, plan, session); err != nil {
+		log.Printf("[webhook] handleSuccessfulPayment error: %v", err)
+		sendPaymentAlert(bot, "webhook: payment succeeded but access failed", chatID, "", paymentKey, plan.ID, err.Error())
+		return
+	}
+
+	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, time.Now())
+	if err != nil {
+		log.Printf("[webhook] MarkPaymentApplied error: %v", err)
+		sendPaymentAlert(bot, "webhook: access issued but mark applied failed", chatID, "", paymentKey, plan.ID, err.Error())
+		return
+	}
+	if !marked {
+		return
+	}
+
+	yookassaClient.ClearPayments(chatID)
+
+	// autopay: если карта сохранена — предложить автопродление
+	if pm := payment.PaymentMethod; pm != nil && pm.Saved && pm.ID != "" {
+		if err := userStore.SetAutopay(userIDStr, pm.ID, plan.ID); err != nil {
+			log.Printf("[webhook] SetAutopay error user=%s: %v", userIDStr, err)
+		} else {
+			_ = userStore.DisableAutopay(userIDStr)
+			autopayText := fmt.Sprintf(
+				"чтобы не потерять <b>доступ</b> к VPN и оставаться на <b>связи</b> предлагаем включить автопродление\nпри окончании подписки автоматически спишется <b>%.0f ₽</b> за тариф <b>%s</b>.",
+				plan.Amount, plan.Title,
+			)
+			kb := tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData("включить", "enable_autopay"),
+					tgbotapi.NewInlineKeyboardButtonData("нет, спасибо", "skip_autopay"),
+				),
+			)
+			msg := tgbotapi.NewMessage(chatID, autopayText)
+			msg.ParseMode = "HTML"
+			msg.ReplyMarkup = kb
+			if sent, err := bot.Send(msg); err == nil {
+				session.AutopayProposalMsgID = sent.MessageID
+			}
+		}
+	}
+
+	log.Printf("[webhook] payment %s processed for user %d, plan %s", payment.ID, chatID, plan.ID)
 }
 
 func buildAppliedPaymentKey(provider, paymentID string) string {
