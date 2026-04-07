@@ -3463,7 +3463,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 		return err
 	}
 
-	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">💳</tg-emoji><b>%s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.0f ₽</b>\n\nспособы оплаты:\n• SberPay\n• T-Pay\n• СБП\n• ЮMoney\n• MirPay\n• Банковская карта\n\nнажмите «оплатить», чтобы открыть страницу оплаты.",
+	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">💳</tg-emoji> <b>%s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.0f ₽</b>\n\nспособы оплаты:\n• SberPay\n• T-Pay\n• СБП\n• ЮMoney\n• MirPay\n• Банковская карта\n\nнажмите «оплатить», чтобы открыть страницу оплаты.",
 		plan.Title, plan.Amount)
 	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawURLButton("оплатить", confirmationURL, "5344015205531686528")},
