@@ -4288,7 +4288,7 @@ func handleYooKassaWebhook(bot *tgbotapi.BotAPI, xrCfg *xraySettings, w http.Res
 	// Промежуточная панель: «оплата прошла, дни начислены»
 	successText := fmt.Sprintf(
 		"<tg-emoji emoji-id=\"5344015205531686528\">✅</tg-emoji> оплата прошла успешно.\n\nначислено: <b>%d дней</b>\n\nприятного пользования!",
-		plan.Title, plan.Days,
+		plan.Days,
 	)
 	successKb := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawCallbackButton("профиль", "nav_status", "", "5264852846527941278")},
