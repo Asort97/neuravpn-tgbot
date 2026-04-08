@@ -4285,6 +4285,16 @@ func handleYooKassaWebhook(bot *tgbotapi.BotAPI, xrCfg *xraySettings, w http.Res
 		return
 	}
 
+	// Промежуточная панель: «оплата прошла, дни начислены»
+	successText := fmt.Sprintf(
+		"<tg-emoji emoji-id=\"5344015205531686528\">✅</tg-emoji> оплата прошла успешно.\n\nначислено: <b>%d дней</b>\n\nприятного пользования!",
+		plan.Title, plan.Days,
+	)
+	successKb := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton("профиль", "nav_status", "", "5264852846527941278")},
+	}}
+	_ = updateSessionTextRaw(bot, chatID, session, stateMenu, successText, "HTML", successKb)
+
 	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, time.Now())
 	if err != nil {
 		log.Printf("[webhook] MarkPaymentApplied error: %v", err)
