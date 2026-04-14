@@ -1939,17 +1939,45 @@ func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
 	return strings.Replace(link, "fp=chrome", "fp="+url.QueryEscape(fingerprint), 1)
 }
 
-func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (*xray.Client, error) {
+func mergedInboundRemark(cfg *xraySettings, inboundID int) string {
+	if cfg == nil || cfg.client == nil || inboundID <= 0 {
+		return ""
+	}
+	inbounds, err := cfg.client.GetAllInbounds()
+	if err != nil {
+		return ""
+	}
+	for _, inbound := range inbounds {
+		if inbound.ID == inboundID {
+			return strings.TrimSpace(inbound.Remark)
+		}
+	}
+	return ""
+}
+
+func setVLESSLinkDisplayName(link, title string) string {
+	link = strings.TrimSpace(link)
+	title = strings.TrimSpace(title)
+	if link == "" || title == "" {
+		return link
+	}
+	if idx := strings.Index(link, "#"); idx >= 0 {
+		link = link[:idx]
+	}
+	return link + "#" + url.PathEscape(title)
+}
+
+func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (*xray.Client, int, error) {
 	if cfg == nil || cfg.client == nil {
-		return nil, fmt.Errorf("merged xray not configured")
+		return nil, 0, fmt.Errorf("merged xray not configured")
 	}
 	inboundIDs, err := mergedInboundIDs(cfg)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	client, foundInboundID, err := findMergedProviderClient(cfg, userID, subID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	expiryMillis := int64(0)
 	if primaryInfo != nil && !primaryInfo.expireAt.IsZero() {
@@ -1969,12 +1997,12 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 	for _, inboundID := range inboundIDs {
 		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
 		if lookupErr != nil {
-			return nil, lookupErr
+			return nil, 0, lookupErr
 		}
 		if existing == nil && stableSubID != "" {
 			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, stableSubID)
 			if lookupErr != nil {
-				return nil, lookupErr
+				return nil, 0, lookupErr
 			}
 		}
 		clientData := xray.Client{
@@ -1989,7 +2017,7 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		if existing == nil {
 			created, addErr := cfg.client.AddClientWithData(inboundID, clientData)
 			if addErr != nil {
-				return nil, addErr
+				return nil, 0, addErr
 			}
 			if inboundID == primaryInboundID {
 				client = created
@@ -2001,7 +2029,7 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		clientData.CreatedAt = existing.CreatedAt
 		clientData.UpdatedAt = existing.UpdatedAt
 		if err := cfg.client.UpdateClient(inboundID, clientData); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if inboundID == foundInboundID || (client == nil && inboundID == primaryInboundID) {
 			updated := clientData
@@ -2010,19 +2038,25 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		}
 	}
 	if client == nil {
-		return nil, fmt.Errorf("не удалось создать ноду второго сервера")
+		return nil, 0, fmt.Errorf("не удалось создать ноду второго сервера")
 	}
-	return client, nil
+	if foundInboundID == 0 {
+		foundInboundID = primaryInboundID
+	}
+	return client, foundInboundID, nil
 }
 
 func buildMergedProviderLink(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (string, error) {
-	client, err := ensureMergedProviderClient(cfg, userID, subID, primaryInfo)
+	client, inboundID, err := ensureMergedProviderClient(cfg, userID, subID, primaryInfo)
 	if err != nil {
 		return "", err
 	}
 	link := generateVLESSLinkForConfig(cfg, client)
 	if strings.TrimSpace(link) == "" {
 		return "", fmt.Errorf("link config for merged xray is incomplete")
+	}
+	if remark := mergedInboundRemark(cfg, inboundID); remark != "" {
+		link = setVLESSLinkDisplayName(link, remark)
 	}
 	return link, nil
 }
