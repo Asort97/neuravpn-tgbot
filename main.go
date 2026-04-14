@@ -30,6 +30,7 @@ import (
 	sqlite "github.com/Asort97/vpnBot/clients/sqLite"
 	yookassa "github.com/Asort97/vpnBot/clients/yooKassa"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/google/uuid"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -1849,17 +1850,17 @@ func buildMergedSubscriptionURL(userID string) string {
 	return fmt.Sprintf("%s/merged-sub/%s/%s", strings.TrimRight(mergedSubPublicBaseURL, "/"), mergedSubSecret, url.PathEscape(userID))
 }
 
-func buildSubscriptionURLForUser(cfg *xraySettings, userID string) (string, string, error) {
+func buildSubscriptionURLForUser(cfg *xraySettings, userID string) (string, string, *accessInfo, error) {
 	info, err := ensureXrayAccess(cfg, userID, fallbackEmail(userID), 0, false)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if info == nil || info.client == nil {
-		return "", "", fmt.Errorf("активная подписка не найдена")
+		return "", "", nil, fmt.Errorf("активная подписка не найдена")
 	}
 	subURL := generateSubscriptionURL(cfg, info.client)
 	if strings.TrimSpace(subURL) == "" {
-		return "", "", fmt.Errorf("не удалось собрать upstream подписку")
+		return "", "", nil, fmt.Errorf("не удалось собрать upstream подписку")
 	}
 	subID := strings.TrimSpace(info.client.SubID)
 	if subID == "" && userStore != nil {
@@ -1868,7 +1869,7 @@ func buildSubscriptionURLForUser(cfg *xraySettings, userID string) (string, stri
 			subID = strings.TrimSpace(storedSubID)
 		}
 	}
-	return subURL, subID, nil
+	return subURL, subID, info, nil
 }
 
 func mergedInboundIDs(cfg *xraySettings) ([]int, error) {
@@ -1897,30 +1898,30 @@ func mergedInboundIDs(cfg *xraySettings) ([]int, error) {
 	return ids, nil
 }
 
-func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Client, error) {
+func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Client, int, error) {
 	inboundIDs, err := mergedInboundIDs(cfg)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for _, inboundID := range inboundIDs {
 		if strings.TrimSpace(subID) != "" {
 			client, err := cfg.client.GetClientBySubID(inboundID, subID)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			if client != nil {
-				return client, nil
+				return client, inboundID, nil
 			}
 		}
 		client, err := cfg.client.GetClientByTelegram(inboundID, userID)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if client != nil {
-			return client, nil
+			return client, inboundID, nil
 		}
 	}
-	return nil, nil
+	return nil, 0, nil
 }
 
 func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
@@ -1938,13 +1939,86 @@ func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
 	return strings.Replace(link, "fp=chrome", "fp="+url.QueryEscape(fingerprint), 1)
 }
 
-func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, error) {
-	client, err := findMergedProviderClient(cfg, userID, subID)
+func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (*xray.Client, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, fmt.Errorf("merged xray not configured")
+	}
+	inboundIDs, err := mergedInboundIDs(cfg)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	client, foundInboundID, err := findMergedProviderClient(cfg, userID, subID)
+	if err != nil {
+		return nil, err
+	}
+	expiryMillis := int64(0)
+	if primaryInfo != nil && !primaryInfo.expireAt.IsZero() {
+		expiryMillis = primaryInfo.expireAt.UnixMilli()
+	}
+	stableSubID := strings.TrimSpace(subID)
+	if stableSubID == "" && primaryInfo != nil && primaryInfo.client != nil {
+		stableSubID = strings.TrimSpace(primaryInfo.client.SubID)
+	}
+	stableUUID := ""
+	if client != nil {
+		stableUUID = client.ID
+	} else {
+		stableUUID = uuid.New().String()
+	}
+	primaryInboundID := inboundIDs[0]
+	for _, inboundID := range inboundIDs {
+		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if existing == nil && stableSubID != "" {
+			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, stableSubID)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+		}
+		clientData := xray.Client{
+			ID:         stableUUID,
+			Email:      fallbackEmail(userID),
+			Enable:     true,
+			ExpiryTime: expiryMillis,
+			TgID:       userID,
+			SubID:      stableSubID,
+			Comment:    "tg:" + userID,
+		}
+		if existing == nil {
+			created, addErr := cfg.client.AddClientWithData(inboundID, clientData)
+			if addErr != nil {
+				return nil, addErr
+			}
+			if inboundID == primaryInboundID {
+				client = created
+				foundInboundID = inboundID
+			}
+			continue
+		}
+		clientData.ID = existing.ID
+		clientData.CreatedAt = existing.CreatedAt
+		clientData.UpdatedAt = existing.UpdatedAt
+		if err := cfg.client.UpdateClient(inboundID, clientData); err != nil {
+			return nil, err
+		}
+		if inboundID == foundInboundID || (client == nil && inboundID == primaryInboundID) {
+			updated := clientData
+			client = &updated
+			foundInboundID = inboundID
+		}
 	}
 	if client == nil {
-		return "", fmt.Errorf("дополнительная нода на втором сервере не найдена")
+		return nil, fmt.Errorf("не удалось создать ноду второго сервера")
+	}
+	return client, nil
+}
+
+func buildMergedProviderLink(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (string, error) {
+	client, err := ensureMergedProviderClient(cfg, userID, subID, primaryInfo)
+	if err != nil {
+		return "", err
 	}
 	link := generateVLESSLinkForConfig(cfg, client)
 	if strings.TrimSpace(link) == "" {
@@ -2068,7 +2142,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	upstreamURL, subID, err := buildSubscriptionURLForUser(xrayCfg, targetUserID)
+	upstreamURL, subID, primaryInfo, err := buildSubscriptionURLForUser(xrayCfg, targetUserID)
 	if err != nil {
 		log.Printf("[merged-sub] build upstream failed user=%s: %v", targetUserID, err)
 		http.Error(w, "subscription not found", http.StatusNotFound)
@@ -2081,7 +2155,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mergedStatus := "primary_only"
-	if extraLink, err := buildMergedProviderLink(mergedXrayCfg, targetUserID, subID); err != nil {
+	if extraLink, err := buildMergedProviderLink(mergedXrayCfg, targetUserID, subID, primaryInfo); err != nil {
 		log.Printf("[merged-sub] extra link unavailable user=%s: %v", targetUserID, err)
 	} else if mergedBody, err := mergeSubscriptionBody(body, extraLink); err != nil {
 		log.Printf("[merged-sub] merge failed user=%s: %v", targetUserID, err)
@@ -2107,14 +2181,14 @@ func handleMergedSubCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, primary
 		return
 	}
 	userID := strconv.FormatInt(msg.From.ID, 10)
-	upstreamURL, subID, err := buildSubscriptionURLForUser(primaryCfg, userID)
+	upstreamURL, subID, primaryInfo, err := buildSubscriptionURLForUser(primaryCfg, userID)
 	if err != nil {
 		m := tgbotapi.NewMessage(chatID, "❌ Не удалось собрать основную подписку: "+html.EscapeString(err.Error()))
 		m.ParseMode = "HTML"
 		_, _ = bot.Send(m)
 		return
 	}
-	if _, err := buildMergedProviderLink(mergedXrayCfg, userID, subID); err != nil {
+	if _, err := buildMergedProviderLink(mergedXrayCfg, userID, subID, primaryInfo); err != nil {
 		m := tgbotapi.NewMessage(chatID, "❌ Не удалось получить ноду второго сервера: "+html.EscapeString(err.Error()))
 		m.ParseMode = "HTML"
 		_, _ = bot.Send(m)
