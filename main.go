@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	mainAdminID       int64 = 7968465778
+	mainAdminID       int64 = 623290294
 	startTrialDays          = 5
 	channelBonusDays        = 5
 	referralBonusDays       = 15
