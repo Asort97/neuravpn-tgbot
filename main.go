@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,11 +34,12 @@ import (
 )
 
 const (
-	startTrialDays    = 5
-	channelBonusDays  = 5
-	referralBonusDays = 15
-	channelUsername   = "@neuravpn"
-	channelURL        = "https://t.me/neuravpn"
+	mainAdminID       int64 = 7968465778
+	startTrialDays          = 5
+	channelBonusDays        = 5
+	referralBonusDays       = 15
+	channelUsername         = "@neuravpn"
+	channelURL              = "https://t.me/neuravpn"
 )
 const startText = `<tg-emoji emoji-id="5346299917679757635">👋</tg-emoji> добро пожаловать!
 
@@ -334,6 +336,7 @@ type xraySettings struct {
 	publicKey     string
 	shortID       string
 	spiderX       string
+	fingerprint   string
 	subBaseURL    string
 }
 
@@ -345,15 +348,18 @@ type accessInfo struct {
 }
 
 var (
-	yookassaClient *yookassa.YooKassaClient
-	userStore      DataStore
-	xrayCfg        *xraySettings
-	oldXrayCfg     *xraySettings
-	privacyURL     string
-	adminIDs       []int64
-	logChatID      int64 = -1003334019708
-	userSessions         = make(map[int64]*UserSession)
-	testMode       bool
+	yookassaClient         *yookassa.YooKassaClient
+	userStore              DataStore
+	xrayCfg                *xraySettings
+	mergedXrayCfg          *xraySettings
+	oldXrayCfg             *xraySettings
+	privacyURL             string
+	adminIDs               []int64
+	logChatID              int64 = -1003334019708
+	userSessions                 = make(map[int64]*UserSession)
+	testMode               bool
+	mergedSubSecret        string
+	mergedSubPublicBaseURL string
 )
 
 func isAdmin(chatID int64) bool {
@@ -363,6 +369,10 @@ func isAdmin(chatID int64) bool {
 		}
 	}
 	return false
+}
+
+func isMainAdmin(chatID int64) bool {
+	return chatID == mainAdminID
 }
 
 var (
@@ -1568,7 +1578,75 @@ func main() {
 		publicKey:     os.Getenv("XRAY_PUBLIC_KEY"),
 		shortID:       os.Getenv("XRAY_SHORT_ID"),
 		spiderX:       os.Getenv("XRAY_SPIDER_X"),
+		fingerprint:   strings.TrimSpace(os.Getenv("XRAY_FINGERPRINT")),
 		subBaseURL:    strings.TrimSpace(os.Getenv("SUB_BASE_URL")),
+	}
+
+	mergedSubSecret = strings.TrimSpace(os.Getenv("MERGED_SUB_SECRET"))
+	mergedSubPublicBaseURL = strings.TrimSpace(os.Getenv("MERGED_SUB_PUBLIC_BASE_URL"))
+	mergedXrayPanelURL := strings.TrimSpace(os.Getenv("MERGED_XRAY_PANEL_URL"))
+	mergedXrayHost := strings.TrimSpace(os.Getenv("MERGED_XRAY_HOST"))
+	mergedXrayPort := strings.TrimSpace(os.Getenv("MERGED_XRAY_PORT"))
+	mergedXrayBasePath := strings.TrimSpace(os.Getenv("MERGED_XRAY_WEB_BASE_PATH"))
+	if mergedXrayPanelURL != "" {
+		parsedHost, parsedPort, parsedBasePath, err := parseXrayPanelURL(mergedXrayPanelURL)
+		if err != nil {
+			log.Printf("⚠️ merged xray panel url parse failed: %v", err)
+		} else {
+			if mergedXrayHost == "" {
+				mergedXrayHost = parsedHost
+			}
+			if mergedXrayPort == "" {
+				mergedXrayPort = parsedPort
+			}
+			if mergedXrayBasePath == "" {
+				mergedXrayBasePath = parsedBasePath
+			}
+		}
+	}
+	mergedXrayUser := strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME"))
+	mergedXrayPass := strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD"))
+	mergedInboundID, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_ID")))
+	mergedInboundIDsStr := strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_IDS"))
+	var mergedInboundIDs []int
+	if mergedInboundIDsStr != "" {
+		for _, p := range strings.Split(mergedInboundIDsStr, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if id, err := strconv.Atoi(p); err == nil {
+				mergedInboundIDs = append(mergedInboundIDs, id)
+			}
+		}
+	} else if mergedInboundID > 0 {
+		mergedInboundIDs = append(mergedInboundIDs, mergedInboundID)
+	}
+	mergedServerPort, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_PORT")))
+	if mergedXrayHost != "" && mergedXrayUser != "" && mergedXrayPass != "" {
+		mergedClient := xray.New(mergedXrayUser, mergedXrayPass, mergedXrayHost, mergedXrayPort, mergedXrayBasePath)
+		if !testMode {
+			if err := mergedClient.LoginToServer(); err != nil {
+				log.Printf("⚠️ merged xray login failed: %v", err)
+			} else {
+				mergedXrayCfg = &xraySettings{
+					client:        mergedClient,
+					inboundID:     mergedInboundID,
+					inboundIDs:    mergedInboundIDs,
+					serverAddress: strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_ADDRESS")),
+					serverPort:    mergedServerPort,
+					serverName:    strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_NAME")),
+					publicKey:     strings.TrimSpace(os.Getenv("MERGED_XRAY_PUBLIC_KEY")),
+					shortID:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SHORT_ID")),
+					spiderX:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SPIDER_X")),
+					fingerprint:   strings.TrimSpace(os.Getenv("MERGED_XRAY_FINGERPRINT")),
+				}
+				log.Println("✅ Merged Xray server connected")
+			}
+		} else {
+			mergedXrayCfg = &xraySettings{client: mergedClient, inboundID: mergedInboundID, inboundIDs: mergedInboundIDs}
+			log.Println("🧪 Skipping merged xray login in test mode")
+		}
 	}
 
 	// Setup old Xray connection for migration
@@ -1661,19 +1739,24 @@ func main() {
 	if webhookPort == "" {
 		webhookPort = "8080"
 	}
-	if webhookSecret != "" {
+	if webhookSecret != "" || mergedSubSecret != "" {
 		go func() {
 			mux := http.NewServeMux()
-			mux.HandleFunc("/webhook/"+webhookSecret, func(w http.ResponseWriter, r *http.Request) {
-				handleYooKassaWebhook(bot, xrayCfg, w, r)
-			})
+			if webhookSecret != "" {
+				mux.HandleFunc("/webhook/"+webhookSecret, func(w http.ResponseWriter, r *http.Request) {
+					handleYooKassaWebhook(bot, xrayCfg, w, r)
+				})
+			}
+			if mergedSubSecret != "" {
+				mux.HandleFunc("/merged-sub/"+mergedSubSecret+"/", handleMergedSubscription)
+			}
 			log.Printf("🌐 Webhook server listening on :%s", webhookPort)
 			if err := http.ListenAndServe(":"+webhookPort, mux); err != nil {
 				log.Printf("webhook server error: %v", err)
 			}
 		}()
 	} else {
-		log.Println("⚠️ WEBHOOK_SECRET not set — YooKassa webhook disabled")
+		log.Println("⚠️ WEBHOOK_SECRET and MERGED_SUB_SECRET not set — HTTP handlers disabled")
 	}
 
 	u := tgbotapi.NewUpdate(0)
@@ -1727,6 +1810,328 @@ func generateSubscriptionURL(cfg *xraySettings, c *xray.Client) string {
 		base = "https://" + base
 	}
 	return fmt.Sprintf("%s/s-39fj3r9f3j/%s", strings.TrimRight(base, "/"), subID)
+}
+
+func parseXrayPanelURL(raw string) (host, port, basePath string, err error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", "", "", err
+	}
+	if u.Hostname() == "" {
+		return "", "", "", fmt.Errorf("panel url hostname is empty")
+	}
+	host = u.Hostname()
+	if strings.EqualFold(u.Scheme, "https") {
+		host = "https://" + host
+	}
+	port = u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	basePath = strings.TrimSpace(u.Path)
+	if idx := strings.Index(basePath, "/panel/"); idx >= 0 {
+		basePath = basePath[:idx]
+	}
+	basePath = strings.TrimRight(basePath, "/")
+	return host, port, basePath, nil
+}
+
+func buildMergedSubscriptionURL(userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || strings.TrimSpace(mergedSubSecret) == "" || strings.TrimSpace(mergedSubPublicBaseURL) == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/merged-sub/%s/%s", strings.TrimRight(mergedSubPublicBaseURL, "/"), mergedSubSecret, url.PathEscape(userID))
+}
+
+func buildSubscriptionURLForUser(cfg *xraySettings, userID string) (string, string, error) {
+	info, err := ensureXrayAccess(cfg, userID, fallbackEmail(userID), 0, false)
+	if err != nil {
+		return "", "", err
+	}
+	if info == nil || info.client == nil {
+		return "", "", fmt.Errorf("активная подписка не найдена")
+	}
+	subURL := generateSubscriptionURL(cfg, info.client)
+	if strings.TrimSpace(subURL) == "" {
+		return "", "", fmt.Errorf("не удалось собрать upstream подписку")
+	}
+	subID := strings.TrimSpace(info.client.SubID)
+	if subID == "" && userStore != nil {
+		storedSubID, err := userStore.GetSubscriptionID(userID)
+		if err == nil {
+			subID = strings.TrimSpace(storedSubID)
+		}
+	}
+	return subURL, subID, nil
+}
+
+func mergedInboundIDs(cfg *xraySettings) ([]int, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, fmt.Errorf("merged xray not configured")
+	}
+	if len(cfg.inboundIDs) > 0 {
+		return append([]int(nil), cfg.inboundIDs...), nil
+	}
+	if cfg.inboundID > 0 {
+		return []int{cfg.inboundID}, nil
+	}
+	inbounds, err := cfg.client.GetAllInbounds()
+	if err != nil {
+		return nil, err
+	}
+	var ids []int
+	for _, inbound := range inbounds {
+		if inbound.Enable && strings.EqualFold(strings.TrimSpace(inbound.Protocol), "vless") {
+			ids = append(ids, inbound.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no inbounds available on merged xray")
+	}
+	return ids, nil
+}
+
+func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Client, error) {
+	inboundIDs, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, inboundID := range inboundIDs {
+		if strings.TrimSpace(subID) != "" {
+			client, err := cfg.client.GetClientBySubID(inboundID, subID)
+			if err != nil {
+				return nil, err
+			}
+			if client != nil {
+				return client, nil
+			}
+		}
+		client, err := cfg.client.GetClientByTelegram(inboundID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if client != nil {
+			return client, nil
+		}
+	}
+	return nil, nil
+}
+
+func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
+	if cfg == nil || cfg.client == nil || client == nil {
+		return ""
+	}
+	if strings.TrimSpace(cfg.serverAddress) == "" || strings.TrimSpace(cfg.serverName) == "" || strings.TrimSpace(cfg.publicKey) == "" || strings.TrimSpace(cfg.shortID) == "" || cfg.serverPort <= 0 {
+		return ""
+	}
+	link := cfg.client.GenerateVLESSLink(client, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
+	fingerprint := strings.TrimSpace(cfg.fingerprint)
+	if fingerprint == "" || fingerprint == "chrome" {
+		return link
+	}
+	return strings.Replace(link, "fp=chrome", "fp="+url.QueryEscape(fingerprint), 1)
+}
+
+func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, error) {
+	client, err := findMergedProviderClient(cfg, userID, subID)
+	if err != nil {
+		return "", err
+	}
+	if client == nil {
+		return "", fmt.Errorf("дополнительная нода на втором сервере не найдена")
+	}
+	link := generateVLESSLinkForConfig(cfg, client)
+	if strings.TrimSpace(link) == "" {
+		return "", fmt.Errorf("link config for merged xray is incomplete")
+	}
+	return link, nil
+}
+
+func looksLikeSubscriptionText(s string) bool {
+	return strings.Contains(s, "://") && (strings.Contains(s, "vless://") || strings.Contains(s, "vmess://") || strings.Contains(s, "trojan://") || strings.Contains(s, "ss://"))
+}
+
+func decodeSubscriptionPayload(payload string) (string, func([]byte) string, error) {
+	normalized := strings.NewReplacer("\n", "", "\r", "", "\t", "", " ", "").Replace(payload)
+	variants := []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	}
+	for _, enc := range variants {
+		decoded, err := enc.DecodeString(normalized)
+		if err != nil {
+			continue
+		}
+		if looksLikeSubscriptionText(string(decoded)) {
+			return string(decoded), enc.EncodeToString, nil
+		}
+	}
+	return "", nil, fmt.Errorf("unsupported subscription payload format")
+}
+
+func mergeSubscriptionBody(body []byte, extraLink string) ([]byte, error) {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty upstream subscription body")
+	}
+	if strings.TrimSpace(extraLink) == "" {
+		return body, nil
+	}
+	if strings.Contains(trimmed, extraLink) {
+		return body, nil
+	}
+	if looksLikeSubscriptionText(trimmed) {
+		merged := strings.TrimRight(trimmed, "\n") + "\n" + extraLink + "\n"
+		return []byte(merged), nil
+	}
+	decoded, encode, err := decodeSubscriptionPayload(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(decoded, extraLink) {
+		return body, nil
+	}
+	merged := strings.TrimRight(decoded, "\n") + "\n" + extraLink + "\n"
+	return []byte(encode([]byte(merged))), nil
+}
+
+func copySubscriptionHeaders(dst, src http.Header) {
+	for _, key := range []string{"Content-Type", "Content-Disposition", "Subscription-Userinfo", "Profile-Update-Interval", "Profile-Web-Page-Url", "Profile-Title"} {
+		if values := src.Values(key); len(values) > 0 {
+			for _, value := range values {
+				dst.Add(key, value)
+			}
+		}
+	}
+}
+
+func fetchSubscriptionBody(ctx context.Context, upstreamURL string, srcReq *http.Request) ([]byte, http.Header, int, error) {
+	if srcReq != nil && strings.TrimSpace(srcReq.URL.RawQuery) != "" {
+		sep := "?"
+		if strings.Contains(upstreamURL, "?") {
+			sep = "&"
+		}
+		upstreamURL += sep + srcReq.URL.RawQuery
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamURL, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if srcReq != nil {
+		for _, key := range []string{"User-Agent", "Accept", "Accept-Language"} {
+			if value := strings.TrimSpace(srcReq.Header.Get(key)); value != "" {
+				req.Header.Set(key, value)
+			}
+		}
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return body, resp.Header.Clone(), resp.StatusCode, nil
+}
+
+func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	prefix := "/merged-sub/" + mergedSubSecret + "/"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	targetUserID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, prefix))
+	if targetUserID == "" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	targetID, err := strconv.ParseInt(targetUserID, 10, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if !isMainAdmin(targetID) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	upstreamURL, subID, err := buildSubscriptionURLForUser(xrayCfg, targetUserID)
+	if err != nil {
+		log.Printf("[merged-sub] build upstream failed user=%s: %v", targetUserID, err)
+		http.Error(w, "subscription not found", http.StatusNotFound)
+		return
+	}
+	body, headers, statusCode, err := fetchSubscriptionBody(r.Context(), upstreamURL, r)
+	if err != nil {
+		log.Printf("[merged-sub] upstream fetch failed user=%s: %v", targetUserID, err)
+		http.Error(w, "upstream subscription unavailable", http.StatusBadGateway)
+		return
+	}
+	mergedStatus := "primary_only"
+	if extraLink, err := buildMergedProviderLink(mergedXrayCfg, targetUserID, subID); err != nil {
+		log.Printf("[merged-sub] extra link unavailable user=%s: %v", targetUserID, err)
+	} else if mergedBody, err := mergeSubscriptionBody(body, extraLink); err != nil {
+		log.Printf("[merged-sub] merge failed user=%s: %v", targetUserID, err)
+	} else {
+		body = mergedBody
+		mergedStatus = "merged"
+	}
+	copySubscriptionHeaders(w.Header(), headers)
+	w.Header().Set("X-Merged-Subscription-Status", mergedStatus)
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(body)
+}
+
+func handleMergedSubCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, primaryCfg *xraySettings) {
+	chatID := msg.Chat.ID
+	if !isMainAdmin(msg.From.ID) {
+		m := tgbotapi.NewMessage(chatID, "⛔️ Только для главного админа")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+	userID := strconv.FormatInt(msg.From.ID, 10)
+	upstreamURL, subID, err := buildSubscriptionURLForUser(primaryCfg, userID)
+	if err != nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Не удалось собрать основную подписку: "+html.EscapeString(err.Error()))
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+	if _, err := buildMergedProviderLink(mergedXrayCfg, userID, subID); err != nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Не удалось получить ноду второго сервера: "+html.EscapeString(err.Error()))
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+	mergedURL := buildMergedSubscriptionURL(userID)
+	if strings.TrimSpace(mergedURL) == "" {
+		m := tgbotapi.NewMessage(chatID, "❌ Не настроен публичный merged URL. Нужны MERGED_SUB_SECRET и MERGED_SUB_PUBLIC_BASE_URL.")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+	text := fmt.Sprintf("<b>merged-подписка для теста готова</b>\n\n<b>merged:</b>\n<code>%s</code>\n\n<b>upstream:</b>\n<code>%s</code>", html.EscapeString(mergedURL), html.EscapeString(upstreamURL))
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = "HTML"
+	_, _ = bot.Send(m)
+	logAction(bot, msg.From.ID, msg.From.UserName, "/mergedsub", false)
 }
 
 // Admin-only: sync clients across all inbounds, creating missing ones.
@@ -2591,6 +2996,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleMigrateUsers(bot, msg, xrCfg)
 		case "migrate_expiry_from_old":
 			handleMigrateExpiryFromOld(bot, msg)
+		case "mergedsub":
+			handleMergedSubCommand(bot, msg, xrCfg)
 		case "topup", "пополнить", "пополнить_баланс":
 			handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
 		case "getvpn", "vpn", "подключить", "получитьvpn":
