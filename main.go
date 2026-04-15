@@ -2218,12 +2218,22 @@ func mergeSubscriptionBody(body []byte, extraLink string) ([]byte, error) {
 	return []byte(encode([]byte(merged))), nil
 }
 
+func shouldProxySubscriptionHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "connection", "proxy-connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade", "content-length":
+		return false
+	default:
+		return true
+	}
+}
+
 func copySubscriptionHeaders(dst, src http.Header) {
-	for _, key := range []string{"Content-Type", "Content-Disposition", "Subscription-Userinfo", "Profile-Update-Interval", "Profile-Web-Page-Url", "Profile-Title"} {
-		if values := src.Values(key); len(values) > 0 {
-			for _, value := range values {
-				dst.Add(key, value)
-			}
+	for key, values := range src {
+		if !shouldProxySubscriptionHeader(key) {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(key, value)
 		}
 	}
 }
