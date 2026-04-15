@@ -2164,12 +2164,31 @@ func syncMergedAccessForUser(userID string) error {
 }
 
 func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, error) {
+	userID = strings.TrimSpace(userID)
+	subID = strings.TrimSpace(subID)
 	client, inboundID, err := findMergedProviderClient(cfg, userID, subID)
 	if err != nil {
 		return "", err
 	}
 	if client == nil {
-		return "", fmt.Errorf("дополнительная нода на втором сервере не найдена")
+		if xrayCfg == nil {
+			return "", fmt.Errorf("основной xray не настроен")
+		}
+		primaryInfo, err := ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 0, false)
+		if err != nil {
+			return "", err
+		}
+		if primaryInfo == nil || primaryInfo.client == nil || primaryInfo.expireAt.IsZero() || primaryInfo.daysLeft <= 0 {
+			return "", fmt.Errorf("активная нода основного сервера не найдена")
+		}
+		if subID == "" {
+			subID = strings.TrimSpace(primaryInfo.client.SubID)
+		}
+		client, inboundID, err = ensureMergedProviderClient(cfg, userID, subID, primaryInfo)
+		if err != nil {
+			return "", err
+		}
+		log.Printf("[merged-sync] auto-created merged client user=%s inbound=%d", userID, inboundID)
 	}
 	link := generateVLESSLinkForConfig(cfg, client)
 	if strings.TrimSpace(link) == "" {
