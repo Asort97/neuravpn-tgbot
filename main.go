@@ -1129,6 +1129,113 @@ func rawURLButton(text, url, iconCustomEmojiID string) rawInlineKeyboardButton {
 	return rawkbd.URLButton(text, url, iconCustomEmojiID)
 }
 
+func parseLeadingSlashCommand(text string) (string, string) {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return "", ""
+	}
+	token := text
+	args := ""
+	if idx := strings.IndexAny(text, " \n\t"); idx >= 0 {
+		token = text[:idx]
+		args = strings.TrimSpace(text[idx+1:])
+	}
+	cmd := strings.TrimPrefix(token, "/")
+	if at := strings.Index(cmd, "@"); at >= 0 {
+		cmd = cmd[:at]
+	}
+	return strings.ToLower(strings.TrimSpace(cmd)), args
+}
+
+func isNotifyCommandName(cmd string) bool {
+	switch strings.TrimSpace(strings.ToLower(cmd)) {
+	case "notify", "notify_test", "notify-test", "notifytest":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNotifyTestCommandName(cmd string) bool {
+	switch strings.TrimSpace(strings.ToLower(cmd)) {
+	case "notify_test", "notify-test", "notifytest":
+		return true
+	default:
+		return false
+	}
+}
+
+func sendBroadcastPayload(bot *tgbotapi.BotAPI, targetID int64, sourceMsg *tgbotapi.Message, broadcastText string, preserveSource bool) error {
+	if bot == nil || sourceMsg == nil {
+		return fmt.Errorf("broadcast source is empty")
+	}
+
+	broadcastText = strings.TrimSpace(broadcastText)
+	hasPhoto := len(sourceMsg.Photo) > 0
+	hasAnim := sourceMsg.Animation != nil
+	hasDoc := sourceMsg.Document != nil
+	hasVideo := sourceMsg.Video != nil
+	hasMedia := hasPhoto || hasAnim || hasDoc || hasVideo
+
+	if preserveSource {
+		cm := tgbotapi.NewCopyMessage(targetID, sourceMsg.Chat.ID, sourceMsg.MessageID)
+		if _, err := bot.Send(cm); err == nil {
+			return nil
+		} else {
+			log.Printf("notify copyMessage fallback target=%d source=%d err=%v", targetID, sourceMsg.MessageID, err)
+		}
+	}
+
+	if hasMedia {
+		caption := broadcastText
+		if caption == "" {
+			caption = sourceMsg.Caption
+			if cmd, _ := parseLeadingSlashCommand(caption); isNotifyCommandName(cmd) {
+				caption = ""
+			}
+		}
+		switch {
+		case hasAnim:
+			cfg := tgbotapi.NewAnimation(targetID, tgbotapi.FileID(sourceMsg.Animation.FileID))
+			cfg.Caption = caption
+			cfg.ParseMode = "HTML"
+			_, err := bot.Send(cfg)
+			return err
+		case hasPhoto:
+			photo := sourceMsg.Photo[len(sourceMsg.Photo)-1]
+			cfg := tgbotapi.NewPhoto(targetID, tgbotapi.FileID(photo.FileID))
+			cfg.Caption = caption
+			cfg.ParseMode = "HTML"
+			_, err := bot.Send(cfg)
+			return err
+		case hasVideo:
+			cfg := tgbotapi.NewVideo(targetID, tgbotapi.FileID(sourceMsg.Video.FileID))
+			cfg.Caption = caption
+			cfg.ParseMode = "HTML"
+			_, err := bot.Send(cfg)
+			return err
+		case hasDoc:
+			cfg := tgbotapi.NewDocument(targetID, tgbotapi.FileID(sourceMsg.Document.FileID))
+			cfg.Caption = caption
+			cfg.ParseMode = "HTML"
+			_, err := bot.Send(cfg)
+			return err
+		}
+	}
+
+	text := broadcastText
+	if text == "" && preserveSource {
+		text = sourceMsg.Text
+	}
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("broadcast text is empty")
+	}
+	m := tgbotapi.NewMessage(targetID, text)
+	m.ParseMode = "HTML"
+	_, err := bot.Send(m)
+	return err
+}
+
 func sendMessageRaw(bot *tgbotapi.BotAPI, chatID int64, text string, parseMode string, replyMarkup interface{}) (int, error) {
 	params := tgbotapi.Params{}
 	params.AddNonZero64("chat_id", chatID)
@@ -2960,16 +3067,10 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		}
 	}
 
-	// Команда рассылки для админа
-	if msg.IsCommand() && msg.Command() == "notify" {
-		isAdmin := false
-		for _, id := range adminIDs {
-			if id == msg.From.ID {
-				isAdmin = true
-				break
-			}
-		}
-		if !isAdmin {
+	// Команда рассылки для админа и тестовый прогон для предпросмотра.
+	if cmdName, cmdArgs := parseLeadingSlashCommand(msg.Text); isNotifyCommandName(cmdName) {
+		previewOnly := isNotifyTestCommandName(cmdName)
+		if !isAdmin(msg.From.ID) {
 			_ = updateSessionText(bot, chatID, session, stateMenu, "⛔️ Только для админа", "HTML", mainMenuInlineKeyboard())
 			return
 		}
@@ -2980,39 +3081,39 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		}
 
 		// Текст рассылки (из аргументов команды или подписи)
-		broadcastText := strings.TrimSpace(msg.CommandArguments())
+		broadcastText := strings.TrimSpace(cmdArgs)
 		if broadcastText == "" {
 			// Попробуем извлечь текст из подписи, если там была команда
 			cap := strings.TrimSpace(sourceMsg.Caption)
-			if strings.HasPrefix(cap, "/notify") {
-				after := strings.TrimSpace(cap)
-				// Уберём токен команды (/notify или /notify@bot)
-				if sp := strings.Index(after, " "); sp >= 0 {
-					broadcastText = strings.TrimSpace(after[sp+1:])
-				} else {
-					broadcastText = ""
-				}
+			if capCmd, capArgs := parseLeadingSlashCommand(cap); isNotifyCommandName(capCmd) {
+				broadcastText = strings.TrimSpace(capArgs)
 			}
 		}
 
 		// Есть ли медиа в исходном сообщении
-		hasPhoto := sourceMsg.Photo != nil && len(sourceMsg.Photo) > 0
+		hasPhoto := len(sourceMsg.Photo) > 0
 		hasAnim := sourceMsg.Animation != nil
 		hasDoc := sourceMsg.Document != nil
 		hasVideo := sourceMsg.Video != nil
 		hasMedia := hasPhoto || hasAnim || hasDoc || hasVideo
+		preserveSource := msg.ReplyToMessage != nil && strings.TrimSpace(broadcastText) == ""
 
 		// Если нет медиа и нет текста — просим текст
-		if !hasMedia && strings.TrimSpace(broadcastText) == "" {
-			_ = updateSessionText(bot, chatID, session, stateMenu, "Укажите текст для рассылки: /notify <текст>", "HTML", mainMenuInlineKeyboard())
+		if !hasMedia && strings.TrimSpace(broadcastText) == "" && !preserveSource {
+			hint := "Укажите текст для рассылки: /notify <текст>"
+			if previewOnly {
+				hint = "Укажите текст для теста: /notify_test <текст> или ответьте этой командой на готовое сообщение"
+			}
+			_ = updateSessionText(bot, chatID, session, stateMenu, hint, "HTML", mainMenuInlineKeyboard())
 			return
 		}
 
 		go func() {
 			var userIDs []string
 			var err error
-			// Для Postgres
-			if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
+			if previewOnly {
+				userIDs = []string{strconv.FormatInt(msg.From.ID, 10)}
+			} else if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
 				userIDs, err = pg.GetAllUserIDs()
 			} else if sq, ok := userStore.(interface{ GetAllUsers() map[string]interface{} }); ok {
 				for id := range sq.GetAllUsers() {
@@ -3039,63 +3140,28 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 				if err != nil {
 					continue
 				}
-				if hasMedia {
-					// Сначала пробуем copyMessage (с переопределением подписи при необходимости)
-					cm := tgbotapi.NewCopyMessage(id, sourceMsg.Chat.ID, sourceMsg.MessageID)
-					if strings.TrimSpace(broadcastText) != "" {
-						cm.Caption = broadcastText
-						cm.ParseMode = "HTML"
-					} else if strings.HasPrefix(strings.TrimSpace(sourceMsg.Caption), "/notify") {
-						// Если исходная подпись содержала команду, очищаем её у получателей
-						cm.Caption = ""
-					}
-					if _, err = bot.Send(cm); err != nil {
-						// Fallback на отправку по FileID в зависимости от типа
-						switch {
-						case hasAnim:
-							cfg := tgbotapi.NewAnimation(id, tgbotapi.FileID(sourceMsg.Animation.FileID))
-							cfg.Caption = broadcastText
-							cfg.ParseMode = "HTML"
-							_, err = bot.Send(cfg)
-						case hasPhoto:
-							p := sourceMsg.Photo[len(sourceMsg.Photo)-1]
-							cfg := tgbotapi.NewPhoto(id, tgbotapi.FileID(p.FileID))
-							cfg.Caption = broadcastText
-							cfg.ParseMode = "HTML"
-							_, err = bot.Send(cfg)
-						case hasVideo:
-							cfg := tgbotapi.NewVideo(id, tgbotapi.FileID(sourceMsg.Video.FileID))
-							cfg.Caption = broadcastText
-							cfg.ParseMode = "HTML"
-							_, err = bot.Send(cfg)
-						case hasDoc:
-							cfg := tgbotapi.NewDocument(id, tgbotapi.FileID(sourceMsg.Document.FileID))
-							cfg.Caption = broadcastText
-							cfg.ParseMode = "HTML"
-							_, err = bot.Send(cfg)
-						default:
-							// На всякий случай — текстом
-							m := tgbotapi.NewMessage(id, broadcastText)
-							m.ParseMode = "HTML"
-							_, err = bot.Send(m)
-						}
-					}
-				} else {
-					m := tgbotapi.NewMessage(id, broadcastText)
-					m.ParseMode = "HTML"
-					_, err = bot.Send(m)
-				}
+				err = sendBroadcastPayload(bot, id, sourceMsg, broadcastText, preserveSource)
 				if err == nil {
 					count++
 				}
-				// Не спамим слишком быстро
-				time.Sleep(30 * time.Millisecond)
+				if !previewOnly {
+					// Не спамим слишком быстро
+					time.Sleep(30 * time.Millisecond)
+				}
 			}
-			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Рассылка завершена. Доставлено: %d", count))
+			statusText := fmt.Sprintf("Рассылка завершена. Доставлено: %d", count)
+			if previewOnly {
+				statusText = fmt.Sprintf("Тестовая отправка завершена. Доставлено: %d", count)
+			}
+			msg := tgbotapi.NewMessage(chatID, statusText)
 			msg.ParseMode = "HTML"
 			_, _ = bot.Send(msg)
 		}()
-		_ = updateSessionText(bot, chatID, session, stateMenu, "Рассылка запущена", "HTML", mainMenuInlineKeyboard())
+		statusText := "Рассылка запущена"
+		if previewOnly {
+			statusText = "Тестовая отправка запущена"
+		}
+		_ = updateSessionText(bot, chatID, session, stateMenu, statusText, "HTML", mainMenuInlineKeyboard())
 		return
 	}
 
