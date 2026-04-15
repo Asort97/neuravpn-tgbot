@@ -1742,6 +1742,19 @@ func main() {
 		}
 	}()
 
+	if mergedXrayCfg != nil && mergedXrayCfg.client != nil {
+		go func() {
+			for {
+				time.Sleep(1 * time.Hour)
+				if err := mergedXrayCfg.client.LoginToServer(); err != nil {
+					log.Printf("[MERGED XRAY] re-login failed: %v", err)
+				} else {
+					log.Printf("[MERGED XRAY] re-login success")
+				}
+			}
+		}()
+	}
+
 	// YooKassa webhook server
 	webhookSecret := strings.TrimSpace(os.Getenv("WEBHOOK_SECRET"))
 	webhookPort := strings.TrimSpace(os.Getenv("WEBHOOK_PORT"))
