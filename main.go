@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"io/fs"
 	"log"
 	"math/rand"
+	"net/http"
 	"net/mail"
 	"net/url"
 	"os"
@@ -37,8 +43,8 @@ import (
 // ────────────────────────────────────────────────────────────────
 
 const (
-	startTrialDays    = 7
-	channelBonusDays  = 7
+	startTrialDays    = 5
+	channelBonusDays  = 5
 	referralBonusDays = 15
 )
 
@@ -46,7 +52,7 @@ const startText = `👋 добро пожаловать!
 
 этот бот поможет подключить neuravpn с понятными инструкциями для любой платформы.
 
-перед покупкой основного тарифа мы предлагаем пробный период - 7 дней.
+перед покупкой основного тарифа мы предлагаем пробный период - 5 дней.
 попробуйте. мы не заставляем.
 
 гарантируем стабильный и бесперебойный доступ ко всем заблокированным ресурсам
@@ -143,6 +149,8 @@ type RatePlan struct {
 	Amount float64
 	Days   int
 }
+
+var adminTestRatePlan = RatePlan{ID: "test_1d", Title: "Тест 1 день", Amount: 1, Days: 1}
 
 // ────────────────────────────────────────────────────────────────
 // Ad stats
@@ -300,6 +308,7 @@ type xraySettings struct {
 	publicKey     string
 	shortID       string
 	spiderX       string
+	fingerprint   string
 	subBaseURL    string
 }
 
@@ -315,17 +324,24 @@ type accessInfo struct {
 // ────────────────────────────────────────────────────────────────
 
 var (
-	yookassaClient *yookassa.YooKassaClient
-	userStore      DataStore
-	xrayCfg        *xraySettings
-	oldXrayCfg     *xraySettings
-	privacyURL     string
-	adminIDs       []int64
-	logPeerID      int // VK peer_id for admin log messages (could be a chat or user)
-	userSessions   = make(map[int64]*UserSession)
-	testMode       bool
-	tgBotName      string // e.g. "neuravpn_bot"
+	yookassaClient         *yookassa.YooKassaClient
+	userStore              DataStore
+	xrayCfg                *xraySettings
+	mergedXrayCfg          *xraySettings
+	oldXrayCfg             *xraySettings
+	privacyURL             string
+	adminIDs               []int64
+	logPeerID              int // VK peer_id for admin log messages (could be a chat or user)
+	userSessions           = make(map[int64]*UserSession)
+	testMode               bool
+	tgBotName              string // e.g. "neuravpn_bot"
+	webhookPathPrefix      = "/webhook/"
+	mergedSubPathPrefix    = "/merged-sub/"
+	mergedSubSecret        string
+	mergedSubPublicBaseURL string
 )
+
+var userSessionsMu sync.Mutex
 
 // in-memory cache for accessInfo (key: userIDStr)
 var accessCache sync.Map // map[string]*accessInfo
@@ -396,6 +412,9 @@ func resolvedUserID(peerID int) string {
 // ────────────────────────────────────────────────────────────────
 
 func getSession(peerID int) *UserSession {
+	userSessionsMu.Lock()
+	defer userSessionsMu.Unlock()
+
 	key := int64(peerID)
 	if s, ok := userSessions[key]; ok {
 		return s
@@ -511,10 +530,28 @@ func mainMenuKeyboard() rawkbd.Markup {
 	}
 }
 
-func rateKeyboard() rawkbd.Markup {
+func availableRatePlans(peerID int) []RatePlan {
+	plans := append([]RatePlan(nil), ratePlans...)
+	if isAdmin(peerID) {
+		plans = append(plans, adminTestRatePlan)
+	}
+	return plans
+}
+
+func ratePlanForPeer(peerID int, planID string) (RatePlan, bool) {
+	if plan, ok := ratePlanByID[planID]; ok {
+		return plan, true
+	}
+	if isAdmin(peerID) && planID == adminTestRatePlan.ID {
+		return adminTestRatePlan, true
+	}
+	return RatePlan{}, false
+}
+
+func rateKeyboard(peerID int) rawkbd.Markup {
 	var rows [][]rawkbd.Button
 	var row []rawkbd.Button
-	for _, p := range ratePlans {
+	for _, p := range availableRatePlans(peerID) {
 		label := fmt.Sprintf("%d дней — %.0f ₽", p.Days, p.Amount)
 		row = append(row, rawkbd.CallbackButton(label, "rate_"+p.ID, "", ""))
 		if len(row) == 2 {
@@ -646,6 +683,11 @@ func ensureXrayAccess(cfg *xraySettings, userIDStr string, email string, addDays
 		link:     link,
 	}
 	accessCache.Store(userIDStr, result)
+	if cfg == xrayCfg && (addDays != 0 || createIfMissing) {
+		if err := syncMergedAccessForUser(userIDStr); err != nil {
+			log.Printf("[merged] sync failed user=%s: %v", userIDStr, err)
+		}
+	}
 	return result, nil
 }
 
@@ -665,6 +707,517 @@ func generateSubscriptionURL(cfg *xraySettings, c *xray.Client) string {
 		base = "https://" + base
 	}
 	return fmt.Sprintf("%s/s-39fj3r9f3j/%s", strings.TrimRight(base, "/"), subID)
+}
+
+func parseXrayPanelURL(raw string) (host, port, basePath string, err error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", "", "", err
+	}
+	if u.Hostname() == "" {
+		return "", "", "", fmt.Errorf("panel url hostname is empty")
+	}
+	host = u.Hostname()
+	if strings.EqualFold(u.Scheme, "https") {
+		host = "https://" + host
+	}
+	port = u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	basePath = strings.TrimSpace(u.Path)
+	if idx := strings.Index(basePath, "/panel/"); idx >= 0 {
+		basePath = basePath[:idx]
+	}
+	basePath = strings.TrimRight(basePath, "/")
+	return host, port, basePath, nil
+}
+
+func normalizeRoutePrefix(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = fallback
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	value = strings.TrimRight(value, "/") + "/"
+	return value
+}
+
+func mergedSubscriptionToken(userID string) string {
+	userID = strings.TrimSpace(userID)
+	secret := strings.TrimSpace(mergedSubSecret)
+	if userID == "" || secret == "" {
+		return ""
+	}
+	h := hmac.New(sha256.New, []byte(secret))
+	_, _ = h.Write([]byte(userID))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func isValidMergedSubscriptionToken(userID, token string) bool {
+	expected := mergedSubscriptionToken(userID)
+	token = strings.TrimSpace(token)
+	if expected == "" || len(token) != len(expected) {
+		return false
+	}
+	return hmac.Equal([]byte(expected), []byte(strings.ToLower(token)))
+}
+
+func buildMergedSubscriptionURL(userID string) string {
+	userID = strings.TrimSpace(userID)
+	token := mergedSubscriptionToken(userID)
+	if userID == "" || token == "" || strings.TrimSpace(mergedSubPublicBaseURL) == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s%s%s/%s", strings.TrimRight(mergedSubPublicBaseURL, "/"), mergedSubPathPrefix, url.PathEscape(userID), token)
+}
+
+func publicSubscriptionURLForUser(cfg *xraySettings, userID string, info *accessInfo) string {
+	if mergedURL := buildMergedSubscriptionURL(userID); strings.TrimSpace(mergedURL) != "" {
+		return mergedURL
+	}
+	if info != nil && info.client != nil {
+		if subURL := generateSubscriptionURL(cfg, info.client); strings.TrimSpace(subURL) != "" {
+			return subURL
+		}
+	}
+	if info != nil {
+		return strings.TrimSpace(info.link)
+	}
+	return ""
+}
+
+func buildSubscriptionURLForUser(cfg *xraySettings, userID string) (string, string, *accessInfo, error) {
+	info, err := ensureXrayAccess(cfg, userID, fallbackEmail(userID), 0, false)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if info == nil || info.client == nil {
+		return "", "", nil, fmt.Errorf("активная подписка не найдена")
+	}
+	subURL := generateSubscriptionURL(cfg, info.client)
+	if strings.TrimSpace(subURL) == "" {
+		return "", "", nil, fmt.Errorf("не удалось собрать upstream подписку")
+	}
+	subID := strings.TrimSpace(info.client.SubID)
+	if subID == "" && userStore != nil {
+		storedSubID, err := userStore.GetSubscriptionID(userID)
+		if err == nil {
+			subID = strings.TrimSpace(storedSubID)
+		}
+	}
+	return subURL, subID, info, nil
+}
+
+func mergedInboundIDs(cfg *xraySettings) ([]int, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, fmt.Errorf("merged xray not configured")
+	}
+	if len(cfg.inboundIDs) > 0 {
+		return append([]int(nil), cfg.inboundIDs...), nil
+	}
+	if cfg.inboundID > 0 {
+		return []int{cfg.inboundID}, nil
+	}
+	inbounds, err := cfg.client.GetAllInbounds()
+	if err != nil {
+		return nil, err
+	}
+	var ids []int
+	for _, inbound := range inbounds {
+		if inbound.Enable && strings.EqualFold(strings.TrimSpace(inbound.Protocol), "vless") {
+			ids = append(ids, inbound.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no inbounds available on merged xray")
+	}
+	return ids, nil
+}
+
+func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Client, int, error) {
+	inboundIDs, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, inboundID := range inboundIDs {
+		if strings.TrimSpace(subID) != "" {
+			client, err := cfg.client.GetClientBySubID(inboundID, subID)
+			if err != nil {
+				return nil, 0, err
+			}
+			if client != nil {
+				return client, inboundID, nil
+			}
+		}
+		client, err := cfg.client.GetClientByTelegram(inboundID, userID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if client != nil {
+			return client, inboundID, nil
+		}
+	}
+	return nil, 0, nil
+}
+
+func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
+	if cfg == nil || cfg.client == nil || client == nil {
+		return ""
+	}
+	if strings.TrimSpace(cfg.serverAddress) == "" || strings.TrimSpace(cfg.serverName) == "" || strings.TrimSpace(cfg.publicKey) == "" || strings.TrimSpace(cfg.shortID) == "" || cfg.serverPort <= 0 {
+		return ""
+	}
+	link := cfg.client.GenerateVLESSLink(client, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
+	fingerprint := strings.TrimSpace(cfg.fingerprint)
+	if fingerprint == "" || fingerprint == "chrome" {
+		return link
+	}
+	return strings.Replace(link, "fp=chrome", "fp="+url.QueryEscape(fingerprint), 1)
+}
+
+func mergedInboundRemark(cfg *xraySettings, inboundID int) string {
+	if cfg == nil || cfg.client == nil || inboundID <= 0 {
+		return ""
+	}
+	inbounds, err := cfg.client.GetAllInbounds()
+	if err != nil {
+		return ""
+	}
+	for _, inbound := range inbounds {
+		if inbound.ID == inboundID {
+			return strings.TrimSpace(inbound.Remark)
+		}
+	}
+	return ""
+}
+
+func setVLESSLinkDisplayName(link, title string) string {
+	link = strings.TrimSpace(link)
+	title = strings.TrimSpace(title)
+	if link == "" || title == "" {
+		return link
+	}
+	if idx := strings.Index(link, "#"); idx >= 0 {
+		link = link[:idx]
+	}
+	return link + "#" + url.PathEscape(title)
+}
+
+func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (*xray.Client, int, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, 0, fmt.Errorf("merged xray not configured")
+	}
+	inboundIDs, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	client, foundInboundID, err := findMergedProviderClient(cfg, userID, subID)
+	if err != nil {
+		return nil, 0, err
+	}
+	expiryMillis := int64(0)
+	if primaryInfo != nil && !primaryInfo.expireAt.IsZero() {
+		expiryMillis = primaryInfo.expireAt.UnixMilli()
+	}
+	stableSubID := strings.TrimSpace(subID)
+	if stableSubID == "" && primaryInfo != nil && primaryInfo.client != nil {
+		stableSubID = strings.TrimSpace(primaryInfo.client.SubID)
+	}
+	stableUUID := ""
+	if client != nil {
+		stableUUID = client.ID
+	} else if primaryInfo != nil && primaryInfo.client != nil {
+		stableUUID = strings.TrimSpace(primaryInfo.client.ID)
+	}
+	if stableUUID == "" {
+		return nil, 0, fmt.Errorf("uuid primary client is empty")
+	}
+	primaryInboundID := inboundIDs[0]
+	for _, inboundID := range inboundIDs {
+		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
+		if lookupErr != nil {
+			return nil, 0, lookupErr
+		}
+		if existing == nil && stableSubID != "" {
+			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, stableSubID)
+			if lookupErr != nil {
+				return nil, 0, lookupErr
+			}
+		}
+		clientData := xray.Client{
+			ID:         stableUUID,
+			Email:      fallbackEmail(userID),
+			Enable:     true,
+			ExpiryTime: expiryMillis,
+			TgID:       userID,
+			SubID:      stableSubID,
+			Comment:    "tg:" + userID,
+		}
+		if existing == nil {
+			created, addErr := cfg.client.AddClientWithData(inboundID, clientData)
+			if addErr != nil {
+				return nil, 0, addErr
+			}
+			if inboundID == primaryInboundID {
+				client = created
+				foundInboundID = inboundID
+			}
+			continue
+		}
+		clientData.ID = existing.ID
+		clientData.CreatedAt = existing.CreatedAt
+		clientData.UpdatedAt = existing.UpdatedAt
+		if err := cfg.client.UpdateClient(inboundID, clientData); err != nil {
+			return nil, 0, err
+		}
+		if inboundID == foundInboundID || (client == nil && inboundID == primaryInboundID) {
+			updated := clientData
+			client = &updated
+			foundInboundID = inboundID
+		}
+	}
+	if client == nil {
+		return nil, 0, fmt.Errorf("не удалось создать ноду второго сервера")
+	}
+	if foundInboundID == 0 {
+		foundInboundID = primaryInboundID
+	}
+	return client, foundInboundID, nil
+}
+
+func disableMergedProviderClient(cfg *xraySettings, userID, subID string) error {
+	if cfg == nil || cfg.client == nil {
+		return nil
+	}
+	inboundIDs, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return err
+	}
+	for _, inboundID := range inboundIDs {
+		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if existing == nil && strings.TrimSpace(subID) != "" {
+			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, subID)
+			if lookupErr != nil {
+				return lookupErr
+			}
+		}
+		if existing == nil {
+			continue
+		}
+		existing.Enable = false
+		if err := cfg.client.UpdateClient(inboundID, *existing); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncMergedAccessForUser(userID string) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || mergedXrayCfg == nil || mergedXrayCfg.client == nil || xrayCfg == nil {
+		return nil
+	}
+	info, err := ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 0, false)
+	if err != nil {
+		return err
+	}
+	subID := ""
+	if info != nil && info.client != nil {
+		subID = strings.TrimSpace(info.client.SubID)
+	}
+	if subID == "" && userStore != nil {
+		storedSubID, getErr := userStore.GetSubscriptionID(userID)
+		if getErr == nil {
+			subID = strings.TrimSpace(storedSubID)
+		}
+	}
+	days, _ := userStore.GetDays(userID)
+	if info != nil && info.daysLeft > days {
+		days = info.daysLeft
+	}
+	if info == nil || info.client == nil || days <= 0 || info.expireAt.IsZero() {
+		return disableMergedProviderClient(mergedXrayCfg, userID, subID)
+	}
+	_, _, err = ensureMergedProviderClient(mergedXrayCfg, userID, subID, info)
+	return err
+}
+
+func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, error) {
+	client, inboundID, err := findMergedProviderClient(cfg, userID, subID)
+	if err != nil {
+		return "", err
+	}
+	if client == nil {
+		return "", fmt.Errorf("дополнительная нода на втором сервере не найдена")
+	}
+	link := generateVLESSLinkForConfig(cfg, client)
+	if strings.TrimSpace(link) == "" {
+		return "", fmt.Errorf("link config for merged xray is incomplete")
+	}
+	if remark := mergedInboundRemark(cfg, inboundID); remark != "" {
+		link = setVLESSLinkDisplayName(link, remark)
+	}
+	return link, nil
+}
+
+func looksLikeSubscriptionText(s string) bool {
+	return strings.Contains(s, "://") && (strings.Contains(s, "vless://") || strings.Contains(s, "vmess://") || strings.Contains(s, "trojan://") || strings.Contains(s, "ss://"))
+}
+
+func decodeSubscriptionPayload(payload string) (string, func([]byte) string, error) {
+	normalized := strings.NewReplacer("\n", "", "\r", "", "\t", "", " ", "").Replace(payload)
+	variants := []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding}
+	for _, enc := range variants {
+		decoded, err := enc.DecodeString(normalized)
+		if err != nil {
+			continue
+		}
+		if looksLikeSubscriptionText(string(decoded)) {
+			return string(decoded), enc.EncodeToString, nil
+		}
+	}
+	return "", nil, fmt.Errorf("unsupported subscription payload format")
+}
+
+func mergeSubscriptionBody(body []byte, extraLink string) ([]byte, error) {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty upstream subscription body")
+	}
+	if strings.TrimSpace(extraLink) == "" || strings.Contains(trimmed, extraLink) {
+		return body, nil
+	}
+	if looksLikeSubscriptionText(trimmed) {
+		merged := strings.TrimRight(trimmed, "\n") + "\n" + extraLink + "\n"
+		return []byte(merged), nil
+	}
+	decoded, encode, err := decodeSubscriptionPayload(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(decoded, extraLink) {
+		return body, nil
+	}
+	merged := strings.TrimRight(decoded, "\n") + "\n" + extraLink + "\n"
+	return []byte(encode([]byte(merged))), nil
+}
+
+func shouldProxySubscriptionHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "connection", "proxy-connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade", "content-length":
+		return false
+	default:
+		return true
+	}
+}
+
+func copySubscriptionHeaders(dst, src http.Header) {
+	for key, values := range src {
+		if !shouldProxySubscriptionHeader(key) {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func fetchSubscriptionBody(ctx context.Context, upstreamURL string, srcReq *http.Request) ([]byte, http.Header, int, error) {
+	if srcReq != nil && strings.TrimSpace(srcReq.URL.RawQuery) != "" {
+		sep := "?"
+		if strings.Contains(upstreamURL, "?") {
+			sep = "&"
+		}
+		upstreamURL += sep + srcReq.URL.RawQuery
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamURL, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if srcReq != nil {
+		for _, key := range []string{"User-Agent", "Accept", "Accept-Language"} {
+			if value := strings.TrimSpace(srcReq.Header.Get(key)); value != "" {
+				req.Header.Set(key, value)
+			}
+		}
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return body, resp.Header.Clone(), resp.StatusCode, nil
+}
+
+func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	prefix := mergedSubPathPrefix
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	targetUserID, err := url.PathUnescape(strings.TrimSpace(parts[0]))
+	if err != nil || targetUserID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	token := strings.TrimSpace(parts[1])
+	if !isValidMergedSubscriptionToken(targetUserID, token) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	upstreamURL, subID, _, err := buildSubscriptionURLForUser(xrayCfg, targetUserID)
+	if err != nil {
+		log.Printf("[merged-sub] build upstream failed user=%s: %v", targetUserID, err)
+		http.Error(w, "subscription not found", http.StatusNotFound)
+		return
+	}
+	body, headers, statusCode, err := fetchSubscriptionBody(r.Context(), upstreamURL, r)
+	if err != nil {
+		log.Printf("[merged-sub] upstream fetch failed user=%s: %v", targetUserID, err)
+		http.Error(w, "upstream subscription unavailable", http.StatusBadGateway)
+		return
+	}
+	mergedStatus := "primary_only"
+	if extraLink, err := buildMergedProviderLink(mergedXrayCfg, targetUserID, subID); err != nil {
+		log.Printf("[merged-sub] extra link unavailable user=%s: %v", targetUserID, err)
+	} else if mergedBody, err := mergeSubscriptionBody(body, extraLink); err != nil {
+		log.Printf("[merged-sub] merge failed user=%s: %v", targetUserID, err)
+	} else {
+		body = mergedBody
+		mergedStatus = "merged"
+	}
+	copySubscriptionHeaders(w.Header(), headers)
+	w.Header().Set("X-Merged-Subscription-Status", mergedStatus)
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(body)
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -871,12 +1424,9 @@ func sendAccess(info *accessInfo, userIDStr string, peerID int, addedDays int, c
 	}
 	combined := fmt.Sprintf("%s · %s", left, exp)
 
-	keyLine := "ключ будет сгенерирован позже"
-	subURL := generateSubscriptionURL(cfg, info.client)
-	if strings.TrimSpace(subURL) != "" {
-		keyLine = subURL
-	} else if strings.TrimSpace(info.link) != "" {
-		keyLine = info.link
+	keyLine := publicSubscriptionURLForUser(cfg, userIDStr, info)
+	if strings.TrimSpace(keyLine) == "" {
+		keyLine = "ключ будет сгенерирован позже"
 	}
 
 	text := fmt.Sprintf(`🔌 подключить neuravpn
@@ -894,7 +1444,7 @@ func sendAccess(info *accessInfo, userIDStr string, peerID int, addedDays int, c
 	}
 
 	session.LastAccess = text
-	session.LastLink = info.link
+	session.LastLink = keyLine
 
 	kb := rawkbd.Markup{
 		Buttons: [][]rawkbd.Button{
@@ -1007,6 +1557,7 @@ func handleCheckPayment(bot *vkbot.Bot, peerID int, userID int, eventID string, 
 	}
 
 	yookassaClient.ClearPayments(int64(peerID))
+	showPaymentSuccessPanel(bot, peerID, session, plan)
 	_ = bot.SendEventAnswer(eventID, peerID, userID, fmt.Sprintf("Платёж за %s подтверждён", plan.Title))
 }
 
@@ -1028,6 +1579,17 @@ func handleSuccessfulPayment(bot *vkbot.Bot, peerID, userID int, xrCfg *xraySett
 		_, _ = bot.SendMessage(logPeerID, payText, nil)
 	}
 	return nil
+}
+
+func showPaymentSuccessPanel(bot *vkbot.Bot, peerID int, session *UserSession, plan RatePlan) {
+	text := fmt.Sprintf("✅ оплата прошла успешно.\n\nначислено: %d дней\n\nприятного пользования!", plan.Days)
+	kb := rawkbd.Markup{
+		Buttons: [][]rawkbd.Button{
+			{rawkbd.CallbackButton("🔌 подключить VPN", "nav_get_vpn", "", "")},
+			{rawkbd.CallbackButton("👤 профиль", "nav_status", "", "")},
+		},
+	}
+	_ = updateSessionText(bot, peerID, session, stateMenu, text, kb)
 }
 
 func resolvePlanFromMetadata(meta map[string]interface{}, session *UserSession) RatePlan {
@@ -1106,6 +1668,105 @@ func sendPaymentAlert(bot *vkbot.Bot, event string, peerID int, paymentKey, plan
 		b.WriteString(fmt.Sprintf("details: %s", details))
 	}
 	_, _ = bot.SendMessage(logPeerID, b.String(), nil)
+}
+
+func handleYooKassaWebhook(bot *vkbot.Bot, xrCfg *xraySettings, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	_ = r.Body.Close()
+	if err != nil {
+		log.Printf("[webhook] read body error: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	var notification struct {
+		Type   string                           `json:"type"`
+		Event  string                           `json:"event"`
+		Object yookassa.YooKassaPaymentResponse `json:"object"`
+	}
+	if err := json.Unmarshal(body, &notification); err != nil {
+		log.Printf("[webhook] unmarshal error: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if notification.Event != "payment.succeeded" {
+		return
+	}
+
+	payment := &notification.Object
+	if payment.ID == "" {
+		return
+	}
+
+	chatIDRaw, ok := payment.Metadata["chat_id"]
+	if !ok {
+		log.Printf("[webhook] payment %s: no chat_id in metadata", payment.ID)
+		return
+	}
+
+	peerID := 0
+	switch v := chatIDRaw.(type) {
+	case float64:
+		peerID = int(v)
+	case string:
+		if n, err := strconv.Atoi(v); err == nil {
+			peerID = n
+		}
+	}
+	if peerID == 0 {
+		log.Printf("[webhook] payment %s: invalid chat_id", payment.ID)
+		return
+	}
+
+	session := getSession(peerID)
+	plan := resolvePlanFromMetadata(payment.Metadata, session)
+	if plan.Title == "" {
+		log.Printf("[webhook] payment %s: cannot resolve plan", payment.ID)
+		return
+	}
+
+	userIDStr := resolvedUserID(peerID)
+	paymentKey := buildAppliedPaymentKey("yookassa", payment.ID)
+	if paymentKey == "" {
+		return
+	}
+
+	alreadyApplied, err := userStore.IsPaymentApplied(userIDStr, paymentKey)
+	if err != nil {
+		log.Printf("[webhook] IsPaymentApplied error: %v", err)
+		sendPaymentAlert(bot, "webhook: payment apply check failed", peerID, paymentKey, plan.ID, err.Error())
+		return
+	}
+	if alreadyApplied {
+		return
+	}
+
+	if err := handleSuccessfulPayment(bot, peerID, peerID, xrCfg, plan, session); err != nil {
+		log.Printf("[webhook] handleSuccessfulPayment error: %v", err)
+		sendPaymentAlert(bot, "webhook: payment succeeded but access failed", peerID, paymentKey, plan.ID, err.Error())
+		return
+	}
+
+	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, time.Now())
+	if err != nil {
+		log.Printf("[webhook] MarkPaymentApplied error: %v", err)
+		sendPaymentAlert(bot, "webhook: access issued but mark applied failed", peerID, paymentKey, plan.ID, err.Error())
+		return
+	}
+	if !marked {
+		return
+	}
+
+	yookassaClient.ClearPayments(int64(peerID))
+	showPaymentSuccessPanel(bot, peerID, session, plan)
+	log.Printf("[webhook] payment %s processed for user %d, plan %s", payment.ID, peerID, plan.ID)
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1242,8 +1903,8 @@ func handleStart(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xraySe
 	if referrerID != "" && referrerID != userIDStr {
 		if err := userStore.RecordReferral(userIDStr, referrerID); err == nil {
 			if ok, _ := userStore.ClaimStartBonus(userIDStr, "referral", time.Now()); ok {
-				_ = userStore.AddDays(userIDStr, 7)
-				_, _ = ensureXrayAccess(xrayCfg, userIDStr, fallbackEmail(userIDStr), 7, true)
+				_ = userStore.AddDays(userIDStr, int64(startTrialDays))
+				_, _ = ensureXrayAccess(xrayCfg, userIDStr, fallbackEmail(userIDStr), int64(startTrialDays), true)
 			}
 
 			subscribed, subErr := isGroupMember(bot, peerID)
@@ -1295,10 +1956,7 @@ func handleQRCode(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xrayS
 		return
 	}
 
-	link := generateSubscriptionURL(xrCfg, info.client)
-	if strings.TrimSpace(link) == "" {
-		link = info.link
-	}
+	link := publicSubscriptionURLForUser(xrCfg, userIDStr, info)
 	if strings.TrimSpace(link) == "" {
 		_, _ = bot.SendMessage(peerID, "ключ недоступен", nil)
 		return
@@ -1390,11 +2048,11 @@ func handleTopUp(bot *vkbot.Bot, peerID int, session *UserSession) {
 	session.PendingPlanID = ""
 	var builder strings.Builder
 	builder.WriteString("💰 покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\n\nтарифы:\n")
-	for _, plan := range ratePlans {
+	for _, plan := range availableRatePlans(peerID) {
 		builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽\n", plan.Days, plan.Amount))
 	}
 	header := strings.TrimSuffix(builder.String(), "\n")
-	_ = updateSessionText(bot, peerID, session, stateTopUp, header, rateKeyboard())
+	_ = updateSessionText(bot, peerID, session, stateTopUp, header, rateKeyboard(peerID))
 }
 
 func handleRateSelection(bot *vkbot.Bot, peerID int, eventID string, session *UserSession, plan RatePlan) {
@@ -1444,7 +2102,7 @@ func handleReferral(bot *vkbot.Bot, peerID int, session *UserSession) {
 	if groupURL == "" {
 		groupURL = fmt.Sprintf("https://vk.com/club%d", vkGroupID)
 	}
-	shareText := url.QueryEscape("подключай vpn, опробовав его бесплатно 7 дней! Напиши боту код " + refCode)
+	shareText := url.QueryEscape(fmt.Sprintf("подключай vpn, опробовав его бесплатно %d дней! Напиши боту код %s", startTrialDays, refCode))
 	shareURL := fmt.Sprintf("https://vk.com/share.php?url=%s&title=%s", url.QueryEscape(groupURL), shareText)
 
 	kb := rawkbd.Markup{
@@ -1571,11 +2229,7 @@ func startInstructionFlow(bot *vkbot.Bot, peerID int, session *UserSession, xrCf
 	key := ""
 	if xrCfg != nil {
 		if info, _ := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, true); info != nil {
-			link := generateSubscriptionURL(xrCfg, info.client)
-			if strings.TrimSpace(link) == "" {
-				link = info.link
-			}
-			key = link
+			key = publicSubscriptionURLForUser(xrCfg, userIDStr, info)
 		}
 	}
 	instruct.SetInstructionKey(int64(peerID), key)
@@ -2322,7 +2976,7 @@ func handleEvent(bot *vkbot.Bot, obj events.MessageEventObject, xrCfg *xraySetti
 		}
 	case strings.HasPrefix(data, "rate_"):
 		id := strings.TrimPrefix(data, "rate_")
-		if p, ok := ratePlanByID[id]; ok {
+		if p, ok := ratePlanForPeer(peerID, id); ok {
 			handleRateSelection(bot, peerID, eventID, session, p)
 			return
 		}
@@ -2393,7 +3047,7 @@ func handleMessage(bot *vkbot.Bot, msg events.MessageNewObject, xrCfg *xraySetti
 
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
-			_ = updateSessionText(bot, peerID, session, stateTopUp, "Тариф не найден, выбери заново.", rateKeyboard())
+			_ = updateSessionText(bot, peerID, session, stateTopUp, "Тариф не найден, выбери заново.", rateKeyboard(peerID))
 			return
 		}
 		if err := startPaymentForPlan(bot, peerID, session, plan); err != nil {
@@ -2538,7 +3192,74 @@ func main() {
 		publicKey:     os.Getenv("XRAY_PUBLIC_KEY"),
 		shortID:       os.Getenv("XRAY_SHORT_ID"),
 		spiderX:       os.Getenv("XRAY_SPIDER_X"),
+		fingerprint:   strings.TrimSpace(os.Getenv("XRAY_FINGERPRINT")),
 		subBaseURL:    strings.TrimSpace(os.Getenv("SUB_BASE_URL")),
+	}
+
+	mergedSubSecret = strings.TrimSpace(os.Getenv("MERGED_SUB_SECRET"))
+	mergedSubPublicBaseURL = strings.TrimSpace(os.Getenv("MERGED_SUB_PUBLIC_BASE_URL"))
+	webhookPathPrefix = normalizeRoutePrefix(os.Getenv("WEBHOOK_PATH_PREFIX"), "/webhook/")
+	mergedSubPathPrefix = normalizeRoutePrefix(os.Getenv("MERGED_SUB_PATH_PREFIX"), "/merged-sub/")
+	mergedXrayHost := strings.TrimSpace(os.Getenv("MERGED_XRAY_HOST"))
+	mergedXrayPort := strings.TrimSpace(os.Getenv("MERGED_XRAY_PORT"))
+	mergedXrayBasePath := strings.TrimSpace(os.Getenv("MERGED_XRAY_WEB_BASE_PATH"))
+	if panelURL := strings.TrimSpace(os.Getenv("MERGED_XRAY_PANEL_URL")); panelURL != "" && mergedXrayHost == "" {
+		host, port, basePath, err := parseXrayPanelURL(panelURL)
+		if err != nil {
+			log.Printf("⚠️ invalid MERGED_XRAY_PANEL_URL: %v", err)
+		} else {
+			mergedXrayHost = host
+			mergedXrayPort = port
+			mergedXrayBasePath = basePath
+		}
+	}
+	if mergedXrayHost != "" {
+		mergedInboundID, _ := strconv.Atoi(os.Getenv("MERGED_XRAY_INBOUND_ID"))
+		mergedInboundIDsStr := strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_IDS"))
+		var mergedInboundIDs []int
+		if mergedInboundIDsStr != "" {
+			for _, p := range strings.Split(mergedInboundIDsStr, ",") {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				if id, err := strconv.Atoi(p); err == nil {
+					mergedInboundIDs = append(mergedInboundIDs, id)
+				}
+			}
+		} else if mergedInboundID > 0 {
+			mergedInboundIDs = append(mergedInboundIDs, mergedInboundID)
+		}
+		mergedServerPort, _ := strconv.Atoi(os.Getenv("MERGED_XRAY_SERVER_PORT"))
+		mergedClient := xray.New(
+			strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME")),
+			strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD")),
+			mergedXrayHost,
+			mergedXrayPort,
+			mergedXrayBasePath,
+		)
+		if !testMode {
+			if err := mergedClient.LoginToServer(); err != nil {
+				log.Printf("⚠️ merged xray connection failed: %v", err)
+			} else {
+				mergedXrayCfg = &xraySettings{
+					client:        mergedClient,
+					inboundID:     mergedInboundID,
+					inboundIDs:    mergedInboundIDs,
+					serverAddress: strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_ADDRESS")),
+					serverPort:    mergedServerPort,
+					serverName:    strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_NAME")),
+					publicKey:     strings.TrimSpace(os.Getenv("MERGED_XRAY_PUBLIC_KEY")),
+					shortID:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SHORT_ID")),
+					spiderX:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SPIDER_X")),
+					fingerprint:   strings.TrimSpace(os.Getenv("MERGED_XRAY_FINGERPRINT")),
+				}
+				log.Println("✅ Merged Xray server connected")
+			}
+		} else {
+			mergedXrayCfg = &xraySettings{client: mergedClient, inboundID: mergedInboundID, inboundIDs: mergedInboundIDs}
+			log.Println("🧪 Skipping merged xray login in test mode")
+		}
 	}
 
 	// Old Xray for migration
@@ -2615,6 +3336,31 @@ func main() {
 
 	loadExpiryReminderState()
 	startExpiryReminder(bot, xrayCfg)
+
+	webhookSecret := strings.TrimSpace(os.Getenv("WEBHOOK_SECRET"))
+	webhookPort := strings.TrimSpace(os.Getenv("WEBHOOK_PORT"))
+	if webhookPort == "" {
+		webhookPort = "8080"
+	}
+	if webhookSecret != "" || mergedSubSecret != "" {
+		go func() {
+			mux := http.NewServeMux()
+			if webhookSecret != "" {
+				mux.HandleFunc(webhookPathPrefix+webhookSecret, func(w http.ResponseWriter, r *http.Request) {
+					handleYooKassaWebhook(bot, xrayCfg, w, r)
+				})
+			}
+			if mergedSubSecret != "" {
+				mux.HandleFunc(mergedSubPathPrefix, handleMergedSubscription)
+			}
+			log.Printf("🌐 HTTP server listening on :%s", webhookPort)
+			if err := http.ListenAndServe(":"+webhookPort, mux); err != nil {
+				log.Printf("http server error: %v", err)
+			}
+		}()
+	} else {
+		log.Println("WEBHOOK_SECRET и MERGED_SUB_SECRET не заданы, HTTP handlers отключены")
+	}
 
 	// Periodic Xray re-login
 	go func() {

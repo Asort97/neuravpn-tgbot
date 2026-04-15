@@ -329,6 +329,22 @@ func (x *XRayClient) GetClientByTelegram(inboundID int, tgID string) (*Client, e
 	return nil, nil
 }
 
+// GetClientBySubID searches client by subscription ID saved in subId field.
+func (x *XRayClient) GetClientBySubID(inboundID int, subID string) (*Client, error) {
+	clients, err := x.GetInboundById(inboundID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, client := range clients {
+		if strings.TrimSpace(client.SubID) == strings.TrimSpace(subID) {
+			return &client, nil
+		}
+	}
+
+	return nil, nil
+}
+
 func (x *XRayClient) GenerateVLESSLink(client *Client, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string) string {
 	spx := spiderX
 	if strings.TrimSpace(spx) == "" {
