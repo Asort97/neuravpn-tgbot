@@ -81,9 +81,21 @@ CREATE TABLE IF NOT EXISTS users (
 			user_id TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			plan_id TEXT,
+			amount_value NUMERIC(12,2) NOT NULL DEFAULT 0,
+			currency TEXT NOT NULL DEFAULT 'RUB',
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE INDEX IF NOT EXISTS idx_applied_payments_user_id ON applied_payments(user_id);
+		CREATE INDEX IF NOT EXISTS idx_applied_payments_applied_at ON applied_payments(applied_at);
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		ALTER TABLE applied_payments
+			ADD COLUMN IF NOT EXISTS amount_value NUMERIC(12,2) NOT NULL DEFAULT 0,
+			ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'RUB';
 	`)
 	return err
 }
@@ -450,12 +462,13 @@ func (s *Store) IsPaymentApplied(userID, paymentID string) (bool, error) {
 	return exists, nil
 }
 
-func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error) {
+func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, amount float64, currency string, at time.Time) (bool, error) {
 	ctx := context.Background()
 	userID = strings.TrimSpace(userID)
 	paymentID = strings.TrimSpace(paymentID)
 	provider = strings.TrimSpace(provider)
 	planID = strings.TrimSpace(planID)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
 
 	if userID == "" {
 		return false, fmt.Errorf("userID is empty")
@@ -466,20 +479,46 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	if provider == "" {
 		return false, fmt.Errorf("provider is empty")
 	}
+	if currency == "" {
+		currency = "RUB"
+	}
 	if at.IsZero() {
 		at = time.Now()
 	}
 
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO applied_payments (payment_id, user_id, provider, plan_id, applied_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO applied_payments (payment_id, user_id, provider, plan_id, amount_value, currency, applied_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (payment_id) DO NOTHING
-	`, paymentID, userID, provider, planID, at.UTC())
+	`, paymentID, userID, provider, planID, amount, currency, at.UTC())
 	if err != nil {
 		return false, err
 	}
 
 	return tag.RowsAffected() > 0, nil
+}
+
+func (s *Store) GetDailyStats(start, end time.Time) (int, int, float64, float64, error) {
+	ctx := context.Background()
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, 0, 0, 0, fmt.Errorf("invalid stats range")
+	}
+
+	var newUsers int
+	var payingUsers int
+	var rubTotal float64
+	var starsTotal float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM users WHERE created_at >= $1 AND created_at < $2),
+			(SELECT COUNT(DISTINCT user_id) FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2),
+			COALESCE((SELECT SUM(amount_value)::float8 FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'RUB'), 0),
+			COALESCE((SELECT SUM(amount_value)::float8 FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'XTR'), 0)
+	`, start.UTC(), end.UTC()).Scan(&newUsers, &payingUsers, &rubTotal, &starsTotal)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return newUsers, payingUsers, rubTotal, starsTotal, nil
 }
 
 func (s *Store) SetLinkToken(userID, token string) error {

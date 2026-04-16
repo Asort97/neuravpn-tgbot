@@ -17,6 +17,7 @@ type Store struct {
 }
 
 type UserData struct {
+	CreatedAt           string                        `json:"created_at,omitempty"`
 	Days                int64                         `json:"days"`
 	CertRef             string                        `json:"certref"`
 	LastDeduct          string                        `json:"last_deduct"`     // ISO8601 timestamp
@@ -41,9 +42,17 @@ type UserData struct {
 }
 
 type AppliedPaymentMeta struct {
-	Provider  string `json:"provider"`
-	PlanID    string `json:"plan_id"`
-	AppliedAt string `json:"applied_at"`
+	Provider  string  `json:"provider"`
+	PlanID    string  `json:"plan_id"`
+	Amount    float64 `json:"amount,omitempty"`
+	Currency  string  `json:"currency,omitempty"`
+	AppliedAt string  `json:"applied_at"`
+}
+
+func ensureCreatedAt(ud *UserData) {
+	if ud.CreatedAt == "" {
+		ud.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 }
 
 var (
@@ -107,10 +116,12 @@ func (s *Store) AddDays(userID string, days int64) error {
 
 	if !exist {
 		userData = UserData{
+			CreatedAt:  now.Format(time.RFC3339),
 			Days:       days,
 			LastDeduct: now.Format(time.RFC3339),
 		}
 	} else {
+		ensureCreatedAt(&userData)
 		prev := userData.Days
 		userData.Days += days
 		// если пополнение было с нуля -> начать новый 24ч цикл от момента пополнения
@@ -147,6 +158,7 @@ func (s *Store) SetDays(userID string, days int64) error {
 	s.loadUsersLocked()
 
 	userData := db[userID]
+	ensureCreatedAt(&userData)
 	userData.Days = days
 	if userData.LastDeduct == "" {
 		userData.LastDeduct = time.Now().UTC().Format(time.RFC3339)
@@ -250,6 +262,7 @@ func (s *Store) SetEmail(userID, email string) error {
 	s.loadUsersLocked()
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if ud.LastDeduct == "" {
 		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -280,6 +293,7 @@ func (s *Store) EnsureSubscriptionID(userID string) (string, error) {
 	s.loadUsersLocked()
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if strings.TrimSpace(ud.SubscriptionID) != "" {
 		return ud.SubscriptionID, nil
 	}
@@ -316,6 +330,7 @@ func (s *Store) AcceptPrivacy(userID string, at time.Time) error {
 	s.loadUsersLocked()
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if ud.LastDeduct == "" {
 		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -356,6 +371,7 @@ func (s *Store) ClaimStartBonus(userID string, source string, at time.Time) (boo
 	s.loadUsersLocked()
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if ud.StartBonusClaimed {
 		return false, nil
 	}
@@ -493,7 +509,7 @@ func (s *Store) IsPaymentApplied(userID, paymentID string) (bool, error) {
 	return false, nil
 }
 
-func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error) {
+func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, amount float64, currency string, at time.Time) (bool, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
@@ -503,6 +519,7 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	paymentID = strings.TrimSpace(paymentID)
 	provider = strings.TrimSpace(provider)
 	planID = strings.TrimSpace(planID)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
 
 	if userID == "" {
 		return false, fmt.Errorf("userID is empty")
@@ -513,11 +530,15 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	if provider == "" {
 		return false, fmt.Errorf("provider is empty")
 	}
+	if currency == "" {
+		currency = "RUB"
+	}
 	if at.IsZero() {
 		at = time.Now()
 	}
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if ud.AppliedPayments == nil {
 		ud.AppliedPayments = make(map[string]AppliedPaymentMeta)
 	}
@@ -528,6 +549,8 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	ud.AppliedPayments[paymentID] = AppliedPaymentMeta{
 		Provider:  provider,
 		PlanID:    planID,
+		Amount:    amount,
+		Currency:  currency,
 		AppliedAt: at.UTC().Format(time.RFC3339),
 	}
 	if ud.LastDeduct == "" {
@@ -539,6 +562,46 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *Store) GetDailyStats(start, end time.Time) (int, int, float64, float64, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, 0, 0, 0, fmt.Errorf("invalid stats range")
+	}
+
+	newUsers := 0
+	payingUsersSet := make(map[string]bool)
+	rubTotal := 0.0
+	starsTotal := 0.0
+
+	for userID, ud := range db {
+		if ts := strings.TrimSpace(ud.CreatedAt); ts != "" {
+			if createdAt, err := time.Parse(time.RFC3339, ts); err == nil {
+				if !createdAt.Before(start) && createdAt.Before(end) {
+					newUsers++
+				}
+			}
+		}
+		for _, payment := range ud.AppliedPayments {
+			appliedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payment.AppliedAt))
+			if err != nil || appliedAt.Before(start) || !appliedAt.Before(end) {
+				continue
+			}
+			payingUsersSet[userID] = true
+			switch strings.ToUpper(strings.TrimSpace(payment.Currency)) {
+			case "XTR":
+				starsTotal += payment.Amount
+			default:
+				rubTotal += payment.Amount
+			}
+		}
+	}
+
+	return newUsers, len(payingUsersSet), rubTotal, starsTotal, nil
 }
 
 func (s *Store) SetLinkToken(userID, token string) error {

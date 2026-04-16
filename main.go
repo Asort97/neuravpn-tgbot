@@ -255,13 +255,14 @@ type DataStore interface {
 	ConfirmReferralAndRewardReferrer(newUserID string, rewardDays int64, at time.Time) (string, bool, error)
 	GetReferralsCount(userID string) int
 	IsPaymentApplied(userID, paymentID string) (bool, error)
-	MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error)
+	MarkPaymentApplied(userID, paymentID, provider, planID string, amount float64, currency string, at time.Time) (bool, error)
 	SetLinkToken(userID, token string) error
 	GetUserByLinkToken(token string) (string, error)
 	ClearLinkToken(userID string) error
 	SetLinkedTo(userID, linkedTo string) error
 	GetLinkedTo(userID string) (string, error)
 	GetLinkedVKUsers(tgUserID string) ([]string, error)
+	GetDailyStats(start, end time.Time) (int, int, float64, float64, error)
 	SetAutopay(userID, methodID, planID string) error
 	DisableAutopay(userID string) error
 	ClearAutopay(userID string) error
@@ -912,7 +913,7 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 		}
 
 		paymentKey := buildAppliedPaymentKey("yookassa_auto", payment.ID)
-		_, _ = userStore.MarkPaymentApplied(u.UserID, paymentKey, "yookassa_auto", plan.ID, time.Now())
+		_, _ = userStore.MarkPaymentApplied(u.UserID, paymentKey, "yookassa_auto", plan.ID, plan.Amount, "RUB", time.Now())
 
 		// Начислить дни
 		session := getSession(chatID)
@@ -1165,6 +1166,35 @@ func isNotifyTestCommandName(cmd string) bool {
 	}
 }
 
+func isNotifyUserCommandName(cmd string) bool {
+	switch strings.TrimSpace(strings.ToLower(cmd)) {
+	case "notify_user", "notify-user", "notifyuser":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseNotifyUserArgs(args string) (int64, string, error) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return 0, "", fmt.Errorf("использование: /notify_user <user_id> <текст>")
+	}
+	parts := strings.Fields(args)
+	if len(parts) == 0 {
+		return 0, "", fmt.Errorf("использование: /notify_user <user_id> <текст>")
+	}
+	targetID, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	if err != nil || targetID <= 0 {
+		return 0, "", fmt.Errorf("некорректный user_id")
+	}
+	text := ""
+	if len(parts) > 1 {
+		text = strings.TrimSpace(strings.Join(parts[1:], " "))
+	}
+	return targetID, text, nil
+}
+
 func sendBroadcastPayload(bot *tgbotapi.BotAPI, targetID int64, sourceMsg *tgbotapi.Message, broadcastText string, preserveSource bool) error {
 	if bot == nil || sourceMsg == nil {
 		return fmt.Errorf("broadcast source is empty")
@@ -1234,6 +1264,77 @@ func sendBroadcastPayload(bot *tgbotapi.BotAPI, targetID int64, sourceMsg *tgbot
 	m.ParseMode = "HTML"
 	_, err := bot.Send(m)
 	return err
+}
+
+func resolveYooKassaPaymentAmount(payment *yookassa.YooKassaPaymentResponse, fallback float64) (float64, string) {
+	amount := fallback
+	currency := "RUB"
+	if payment == nil {
+		return amount, currency
+	}
+	if rawCurrency, ok := payment.Amount["currency"]; ok {
+		if value := strings.ToUpper(strings.TrimSpace(fmt.Sprint(rawCurrency))); value != "" {
+			currency = value
+		}
+	}
+	if rawValue, ok := payment.Amount["value"]; ok {
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(rawValue)), 64); err == nil {
+			amount = parsed
+		}
+	}
+	return amount, currency
+}
+
+func buildDailyStatsText(start time.Time, newUsers, payingUsers int, rubTotal, starsTotal float64) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("📊 <b>Сводка за %s</b>\n\n", start.Format("02.01.2006")))
+	b.WriteString(fmt.Sprintf("новых пользователей: <b>%d</b>\n", newUsers))
+	b.WriteString(fmt.Sprintf("оплативших: <b>%d</b>\n", payingUsers))
+	b.WriteString(fmt.Sprintf("сумма: <b>%.2f ₽</b>", rubTotal))
+	if starsTotal > 0 {
+		b.WriteString(fmt.Sprintf("\nзвёздами: <b>%.0f ⭐</b>", starsTotal))
+	}
+	return b.String()
+}
+
+func startDailyLogSummary(bot *tgbotapi.BotAPI) {
+	if bot == nil || userStore == nil {
+		return
+	}
+
+	go func() {
+		for {
+			now := time.Now()
+			nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+			timer := time.NewTimer(time.Until(nextMidnight))
+			<-timer.C
+
+			start := nextMidnight.Add(-24 * time.Hour)
+			newUsers, payingUsers, rubTotal, starsTotal, err := userStore.GetDailyStats(start, nextMidnight)
+			if err != nil {
+				log.Printf("daily stats error: %v", err)
+				if !testMode {
+					msg := tgbotapi.NewMessage(logChatID, fmt.Sprintf("⚠️ Ошибка суточной сводки: <code>%s</code>", html.EscapeString(err.Error())))
+					msg.ParseMode = "HTML"
+					msg.DisableWebPagePreview = true
+					_, _ = bot.Send(msg)
+				}
+				continue
+			}
+
+			text := buildDailyStatsText(start, newUsers, payingUsers, rubTotal, starsTotal)
+			if testMode {
+				log.Printf("[TEST MODE] daily stats: %s", text)
+				continue
+			}
+			msg := tgbotapi.NewMessage(logChatID, text)
+			msg.ParseMode = "HTML"
+			msg.DisableWebPagePreview = true
+			if _, err := bot.Send(msg); err != nil {
+				log.Printf("daily stats send failed: %v", err)
+			}
+		}
+	}()
 }
 
 func sendMessageRaw(bot *tgbotapi.BotAPI, chatID int64, text string, parseMode string, replyMarkup interface{}) (int, error) {
@@ -1832,6 +1933,7 @@ func main() {
 	loadExpiryReminderState()
 	startExpiryReminder(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
+	startDailyLogSummary(bot)
 
 	// Профилактический re-login к XRAY раз в час
 	go func() {
@@ -3068,6 +3170,38 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 	}
 
 	// Команда рассылки для админа и тестовый прогон для предпросмотра.
+	if cmdName, cmdArgs := parseLeadingSlashCommand(msg.Text); isNotifyUserCommandName(cmdName) {
+		if !isAdmin(msg.From.ID) {
+			_ = updateSessionText(bot, chatID, session, stateMenu, "⛔️ Только для админа", "HTML", mainMenuInlineKeyboard())
+			return
+		}
+
+		targetID, broadcastText, err := parseNotifyUserArgs(cmdArgs)
+		if err != nil {
+			_ = updateSessionText(bot, chatID, session, stateMenu, html.EscapeString(err.Error()), "HTML", mainMenuInlineKeyboard())
+			return
+		}
+
+		sourceMsg := msg
+		if msg.ReplyToMessage != nil {
+			sourceMsg = msg.ReplyToMessage
+		}
+		preserveSource := msg.ReplyToMessage != nil && strings.TrimSpace(broadcastText) == ""
+
+		if err := sendBroadcastPayload(bot, targetID, sourceMsg, broadcastText, preserveSource); err != nil {
+			log.Printf("notify_user failed target=%d err=%v", targetID, err)
+			statusText := fmt.Sprintf("❌ Отправка user_id <code>%d</code> не удалась: <code>%s</code>", targetID, html.EscapeString(err.Error()))
+			_ = updateSessionText(bot, chatID, session, stateMenu, statusText, "HTML", mainMenuInlineKeyboard())
+			return
+		}
+
+		log.Printf("notify_user success target=%d", targetID)
+		statusText := fmt.Sprintf("✅ Сообщение для user_id <code>%d</code> принято Telegram API", targetID)
+		_ = updateSessionText(bot, chatID, session, stateMenu, statusText, "HTML", mainMenuInlineKeyboard())
+		return
+	}
+
+	// Команда рассылки для админа и тестовый прогон для предпросмотра.
 	if cmdName, cmdArgs := parseLeadingSlashCommand(msg.Text); isNotifyCommandName(cmdName) {
 		previewOnly := isNotifyTestCommandName(cmdName)
 		if !isAdmin(msg.From.ID) {
@@ -3290,7 +3424,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			return
 		}
 
-		marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "stars", plan.ID, time.Now())
+		marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "stars", plan.ID, float64(starsAmountForPlan(plan)), starsCurrency, time.Now())
 		if err != nil {
 			log.Printf("stars MarkPaymentApplied error: %v", err)
 			sendPaymentAlert(bot, "access issued but mark applied failed", msg.From.ID, msg.From.UserName, paymentKey, plan.ID, err.Error())
@@ -4372,7 +4506,8 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 		return
 	}
 
-	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, time.Now())
+	amountValue, amountCurrency := resolveYooKassaPaymentAmount(payment, plan.Amount)
+	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, amountValue, amountCurrency, time.Now())
 	if err != nil {
 		log.Printf("yookassa MarkPaymentApplied error: %v", err)
 		sendPaymentAlert(bot, "access issued but mark applied failed", userID, cq.From.UserName, paymentKey, plan.ID, err.Error())
@@ -5015,7 +5150,8 @@ func handleYooKassaWebhook(bot *tgbotapi.BotAPI, xrCfg *xraySettings, w http.Res
 	}}
 	_ = updateSessionTextRaw(bot, chatID, session, stateMenu, successText, "HTML", successKb)
 
-	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, time.Now())
+	amountValue, amountCurrency := resolveYooKassaPaymentAmount(payment, plan.Amount)
+	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, amountValue, amountCurrency, time.Now())
 	if err != nil {
 		log.Printf("[webhook] MarkPaymentApplied error: %v", err)
 		sendPaymentAlert(bot, "webhook: access issued but mark applied failed", chatID, "", paymentKey, plan.ID, err.Error())
