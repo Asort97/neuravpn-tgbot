@@ -2394,7 +2394,7 @@ func syncMergedAccessForUser(userID string) error {
 			subID = strings.TrimSpace(storedSubID)
 		}
 	}
-	if !isAccessCurrentlyActive(info) {
+	if info == nil || info.client == nil {
 		return disableMergedProviderClient(mergedXrayCfg, userID, subID)
 	}
 	_, _, err = ensureMergedProviderClient(mergedXrayCfg, userID, subID, info)
@@ -2415,8 +2415,8 @@ func buildMergedProviderLinkWithPrimaryInfo(cfg *xraySettings, userID, subID str
 				return "", err
 			}
 		}
-		if !isAccessCurrentlyActive(primaryInfo) {
-			return "", fmt.Errorf("активная нода основного сервера не найдена")
+		if primaryInfo == nil || primaryInfo.client == nil {
+			return "", fmt.Errorf("основная нода пользователя не найдена")
 		}
 		if subID == "" {
 			subID = strings.TrimSpace(primaryInfo.client.SubID)
