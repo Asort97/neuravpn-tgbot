@@ -538,10 +538,28 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 	}
 
 	if !createIfMissing && addDays == 0 {
-		// Still attempt to read primary client without creating on others
-		c, err := cfg.client.GetClientByTelegram(inboundIDs[0], telegramUser)
-		if err != nil {
-			return nil, err
+		// Read existing client without creating it, scanning all configured inbounds.
+		var c *xray.Client
+		for _, inboundID := range inboundIDs {
+			candidate, err := cfg.client.GetClientByTelegram(inboundID, telegramUser)
+			if err != nil {
+				return nil, err
+			}
+			if candidate == nil {
+				continue
+			}
+			if c == nil {
+				c = candidate
+				continue
+			}
+			candidateExp := time.UnixMilli(candidate.ExpiryTime)
+			currentExp := time.UnixMilli(c.ExpiryTime)
+			if currentExp.IsZero() {
+				continue
+			}
+			if candidateExp.IsZero() || candidateExp.After(currentExp) {
+				c = candidate
+			}
 		}
 		if c == nil {
 			return nil, nil
@@ -600,6 +618,11 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 		}
 	}
 	return result, nil
+}
+
+func ensureXrayAccessFresh(cfg *xraySettings, telegramUser string, email string, addDays int64, createIfMissing bool) (*accessInfo, error) {
+	accessCache.Delete(telegramUser)
+	return ensureXrayAccess(cfg, telegramUser, email, addDays, createIfMissing)
 }
 
 func fallbackEmail(userID string) string {
@@ -2127,7 +2150,7 @@ func publicSubscriptionURLForUser(cfg *xraySettings, userID string, info *access
 }
 
 func buildSubscriptionURLForUser(cfg *xraySettings, userID string) (string, string, *accessInfo, error) {
-	info, err := ensureXrayAccess(cfg, userID, fallbackEmail(userID), 0, false)
+	info, err := ensureXrayAccessFresh(cfg, userID, fallbackEmail(userID), 0, false)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -2357,7 +2380,7 @@ func syncMergedAccessForUser(userID string) error {
 	if userID == "" || mergedXrayCfg == nil || mergedXrayCfg.client == nil || xrayCfg == nil {
 		return nil
 	}
-	info, err := ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 0, false)
+	info, err := ensureXrayAccessFresh(xrayCfg, userID, fallbackEmail(userID), 0, false)
 	if err != nil {
 		return err
 	}
