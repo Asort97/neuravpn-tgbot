@@ -2372,7 +2372,7 @@ func syncMergedAccessForUser(userID string) error {
 	return err
 }
 
-func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, error) {
+func buildMergedProviderLinkWithPrimaryInfo(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (string, error) {
 	userID = strings.TrimSpace(userID)
 	subID = strings.TrimSpace(subID)
 	client, inboundID, err := findMergedProviderClient(cfg, userID, subID)
@@ -2380,12 +2380,11 @@ func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, e
 		return "", err
 	}
 	if client == nil {
-		if xrayCfg == nil {
-			return "", fmt.Errorf("основной xray не настроен")
-		}
-		primaryInfo, err := ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 0, false)
-		if err != nil {
-			return "", err
+		if primaryInfo == nil && xrayCfg != nil {
+			primaryInfo, err = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 0, false)
+			if err != nil {
+				return "", err
+			}
 		}
 		if primaryInfo == nil || primaryInfo.client == nil || primaryInfo.expireAt.IsZero() || primaryInfo.daysLeft <= 0 {
 			return "", fmt.Errorf("активная нода основного сервера не найдена")
@@ -2407,6 +2406,10 @@ func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, e
 		link = setVLESSLinkDisplayName(link, remark)
 	}
 	return link, nil
+}
+
+func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, error) {
+	return buildMergedProviderLinkWithPrimaryInfo(cfg, userID, subID, nil)
 }
 
 func looksLikeSubscriptionText(s string) bool {
@@ -2540,7 +2543,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	upstreamURL, subID, _, err := buildSubscriptionURLForUser(xrayCfg, targetUserID)
+	upstreamURL, subID, primaryInfo, err := buildSubscriptionURLForUser(xrayCfg, targetUserID)
 	if err != nil {
 		log.Printf("[merged-sub] build upstream failed user=%s: %v", targetUserID, err)
 		http.Error(w, "subscription not found", http.StatusNotFound)
@@ -2553,7 +2556,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mergedStatus := "primary_only"
-	if extraLink, err := buildMergedProviderLink(mergedXrayCfg, targetUserID, subID); err != nil {
+	if extraLink, err := buildMergedProviderLinkWithPrimaryInfo(mergedXrayCfg, targetUserID, subID, primaryInfo); err != nil {
 		log.Printf("[merged-sub] extra link unavailable user=%s: %v", targetUserID, err)
 	} else if mergedBody, err := mergeSubscriptionBody(body, extraLink); err != nil {
 		log.Printf("[merged-sub] merge failed user=%s: %v", targetUserID, err)
