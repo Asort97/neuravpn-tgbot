@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -128,6 +129,7 @@ type XRayClient struct {
 	webBasePath string
 	serverURL   string
 	httpClient  *http.Client
+	authMu      sync.Mutex
 }
 
 func New(username, password, host, port, webBasePath string) *XRayClient {
@@ -162,6 +164,9 @@ func New(username, password, host, port, webBasePath string) *XRayClient {
 
 // LoginToServer must be called before any other API calls.
 func (x *XRayClient) LoginToServer() error {
+	x.authMu.Lock()
+	defer x.authMu.Unlock()
+
 	url := fmt.Sprintf("%s/login", x.serverURL)
 
 	payload := map[string]interface{}{
@@ -191,37 +196,100 @@ func (x *XRayClient) LoginToServer() error {
 
 	body, _ := io.ReadAll(resp.Body)
 	colorfulprint.PrintState(fmt.Sprintf("login status=%d\n%s", resp.StatusCode, string(body)))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("xray login returned status=%d", resp.StatusCode)
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return fmt.Errorf("xray login returned empty body")
+	}
 
 	return nil
 }
 
-func (x *XRayClient) GetInboundById(id int) ([]Client, error) {
-	url := fmt.Sprintf("%s/panel/api/inbounds/get/%d", x.serverURL, id)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		colorfulprint.PrintError("Failed request", err)
-		return nil, err
+func responseSnippet(body []byte) string {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return "<empty>"
 	}
-	req.Header.Set("Accept", "application/json")
+	if len(trimmed) > 300 {
+		return trimmed[:300] + "..."
+	}
+	return trimmed
+}
+
+func shouldRetryAfterRelogin(statusCode int, body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return true
+	}
+	if len(trimmed) == 0 {
+		return true
+	}
+	if bytes.HasPrefix(trimmed, []byte("<")) {
+		return true
+	}
+	return false
+}
+
+func (x *XRayClient) doAPIRequest(method, url string, payload []byte, headers map[string]string) (int, []byte, error) {
+	return x.doAPIRequestOnce(method, url, payload, headers, true)
+}
+
+func (x *XRayClient) doAPIRequestOnce(method, url string, payload []byte, headers map[string]string, allowRetry bool) (int, []byte, error) {
+	var bodyReader io.Reader
+	if payload != nil {
+		bodyReader = bytes.NewReader(payload)
+	}
+
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return 0, nil, err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 
 	resp, err := x.httpClient.Do(req)
 	if err != nil {
-		colorfulprint.PrintError("Failed response", err)
-		return nil, err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		colorfulprint.PrintError("Failed to read response body", err)
+		return resp.StatusCode, nil, err
+	}
+
+	if allowRetry && shouldRetryAfterRelogin(resp.StatusCode, body) {
+		log.Printf("[XRAY] retry after re-login method=%s url=%s status=%d body=%s", method, url, resp.StatusCode, responseSnippet(body))
+		if err := x.LoginToServer(); err != nil {
+			return resp.StatusCode, body, fmt.Errorf("xray relogin failed: %w", err)
+		}
+		return x.doAPIRequestOnce(method, url, payload, headers, false)
+	}
+
+	return resp.StatusCode, body, nil
+}
+
+func (x *XRayClient) GetInboundById(id int) ([]Client, error) {
+	url := fmt.Sprintf("%s/panel/api/inbounds/get/%d", x.serverURL, id)
+
+	statusCode, body, err := x.doAPIRequest("GET", url, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		colorfulprint.PrintError("Failed response", err)
+		return nil, err
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		err := fmt.Errorf("unexpected status=%d body=%s", statusCode, responseSnippet(body))
+		colorfulprint.PrintError("Unexpected inbound status", err)
 		return nil, err
 	}
 
 	var inboundResp InboundResponse
 	if err := json.Unmarshal(body, &inboundResp); err != nil {
-		colorfulprint.PrintError("Failed to unmarshal inbound response", err)
-		return nil, err
+		wrappedErr := fmt.Errorf("%w; body=%s", err, responseSnippet(body))
+		colorfulprint.PrintError("Failed to unmarshal inbound response", wrappedErr)
+		return nil, wrappedErr
 	}
 
 	if !inboundResp.Success {
@@ -246,24 +314,13 @@ func (x *XRayClient) GetInboundById(id int) ([]Client, error) {
 func (x *XRayClient) GetAllInbounds() ([]InboundData, error) {
 	url := fmt.Sprintf("%s/panel/api/inbounds/list", x.serverURL)
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		colorfulprint.PrintError("Failed request", err)
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := x.httpClient.Do(req)
+	statusCode, body, err := x.doAPIRequest("GET", url, nil, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		colorfulprint.PrintError("Failed response", err)
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		colorfulprint.PrintError("Failed to read response body", err)
-		return nil, err
+	if statusCode < 200 || statusCode >= 300 {
+		return nil, fmt.Errorf("unexpected status=%d body=%s", statusCode, responseSnippet(body))
 	}
 
 	// 3X-UI returns { success, obj: [ ... ] }
@@ -273,8 +330,9 @@ func (x *XRayClient) GetAllInbounds() ([]InboundData, error) {
 		Obj     []InboundData `json:"obj"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		colorfulprint.PrintError("Failed to unmarshal inbounds list", err)
-		return nil, err
+		wrappedErr := fmt.Errorf("%w; body=%s", err, responseSnippet(body))
+		colorfulprint.PrintError("Failed to unmarshal inbounds list", wrappedErr)
+		return nil, wrappedErr
 	}
 	if !raw.Success {
 		return nil, fmt.Errorf("API returned success=false: %s", raw.Msg)
@@ -445,23 +503,18 @@ func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, e
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		colorfulprint.PrintError("Failed request", err)
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := x.httpClient.Do(req)
+	statusCode, body, err := x.doAPIRequest("POST", url, jsonBody, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
 	if err != nil {
 		colorfulprint.PrintError("Failed response", err)
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	colorfulprint.PrintState(fmt.Sprintf("add client status=%d\n%s", resp.StatusCode, string(body)))
+	colorfulprint.PrintState(fmt.Sprintf("add client status=%d\n%s", statusCode, string(body)))
+	if statusCode < 200 || statusCode >= 300 {
+		return nil, fmt.Errorf("add client returned status=%d body=%s", statusCode, responseSnippet(body))
+	}
 
 	return &client, nil
 }
@@ -501,23 +554,18 @@ func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		colorfulprint.PrintError("Failed request", err)
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := x.httpClient.Do(req)
+	statusCode, body, err := x.doAPIRequest("POST", url, jsonBody, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
 	if err != nil {
 		colorfulprint.PrintError("Failed response", err)
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	colorfulprint.PrintState(fmt.Sprintf("update client status=%d\n%s", resp.StatusCode, string(body)))
+	colorfulprint.PrintState(fmt.Sprintf("update client status=%d\n%s", statusCode, string(body)))
+	if statusCode < 200 || statusCode >= 300 {
+		return fmt.Errorf("update client returned status=%d body=%s", statusCode, responseSnippet(body))
+	}
 
 	return nil
 }
