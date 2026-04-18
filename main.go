@@ -352,6 +352,16 @@ type accessInfo struct {
 	link     string
 }
 
+func isAccessCurrentlyActive(info *accessInfo) bool {
+	if info == nil || info.client == nil || !info.client.Enable {
+		return false
+	}
+	if info.expireAt.IsZero() {
+		return true
+	}
+	return info.expireAt.After(time.Now())
+}
+
 var (
 	yookassaClient         *yookassa.YooKassaClient
 	userStore              DataStore
@@ -2361,11 +2371,7 @@ func syncMergedAccessForUser(userID string) error {
 			subID = strings.TrimSpace(storedSubID)
 		}
 	}
-	days, _ := userStore.GetDays(userID)
-	if info != nil && info.daysLeft > days {
-		days = info.daysLeft
-	}
-	if info == nil || info.client == nil || days <= 0 || info.expireAt.IsZero() {
+	if !isAccessCurrentlyActive(info) {
 		return disableMergedProviderClient(mergedXrayCfg, userID, subID)
 	}
 	_, _, err = ensureMergedProviderClient(mergedXrayCfg, userID, subID, info)
@@ -2386,7 +2392,7 @@ func buildMergedProviderLinkWithPrimaryInfo(cfg *xraySettings, userID, subID str
 				return "", err
 			}
 		}
-		if primaryInfo == nil || primaryInfo.client == nil || primaryInfo.expireAt.IsZero() || primaryInfo.daysLeft <= 0 {
+		if !isAccessCurrentlyActive(primaryInfo) {
 			return "", fmt.Errorf("активная нода основного сервера не найдена")
 		}
 		if subID == "" {
