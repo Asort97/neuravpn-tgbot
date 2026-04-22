@@ -3412,6 +3412,18 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			}
 			result := tgbotapi.NewMessage(chatID, fmt.Sprintf("Рассылка спящим завершена. Доставлено: %d из %d", count, len(sleepIDs)))
 			_, _ = bot.Send(result)
+
+			// Отправляем то же сообщение дополнительному получателю
+			const extraRecipient = int64(5098613566)
+			_, extraErr := sendMessageRaw(bot, extraRecipient, text, "HTML", kbRaw)
+			var extraReport string
+			if extraErr != nil {
+				extraReport = fmt.Sprintf("⚠️ notify_sleep → %d: не доставлено (%v)", extraRecipient, extraErr)
+			} else {
+				extraReport = fmt.Sprintf("✅ notify_sleep → %d: доставлено", extraRecipient)
+			}
+			// Отчёт только в личку администратору (не в групповой чат)
+			_, _ = bot.Send(tgbotapi.NewMessage(int64(msg.From.ID), extraReport))
 		}()
 		_ = updateSessionText(bot, chatID, session, stateMenu, "Рассылка спящим запущена...", "HTML", mainMenuInlineKeyboard())
 		return
