@@ -625,6 +625,97 @@ func ensureXrayAccessFresh(cfg *xraySettings, telegramUser string, email string,
 	return ensureXrayAccess(cfg, telegramUser, email, addDays, createIfMissing)
 }
 
+func createInfiniteAccessForAlias(cfg *xraySettings, alias string) (string, string, error) {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return "", "", fmt.Errorf("пустой alias")
+	}
+	if cfg == nil || cfg.client == nil {
+		return "", "", fmt.Errorf("xray not configured")
+	}
+
+	email := fmt.Sprintf("%s@happycat", alias)
+	if userStore != nil {
+		if storedEmail, err := userStore.GetEmail(alias); err == nil && strings.TrimSpace(storedEmail) != "" {
+			email = strings.TrimSpace(storedEmail)
+		}
+	}
+
+	inboundIDs := cfg.inboundIDs
+	if len(inboundIDs) == 0 {
+		inbounds, err := cfg.client.GetAllInbounds()
+		if err != nil {
+			return "", "", err
+		}
+		for _, ib := range inbounds {
+			if ib.Enable && strings.EqualFold(strings.TrimSpace(ib.Protocol), "vless") {
+				inboundIDs = append(inboundIDs, ib.ID)
+			}
+		}
+		if len(inboundIDs) == 0 && cfg.inboundID > 0 {
+			inboundIDs = append(inboundIDs, cfg.inboundID)
+		}
+	}
+	if len(inboundIDs) == 0 {
+		return "", "", fmt.Errorf("no inbounds available to create client")
+	}
+
+	stableSubID := "sub" + alias
+	if userStore != nil {
+		if storedSubID, err := userStore.EnsureSubscriptionID(alias); err == nil && strings.TrimSpace(storedSubID) != "" {
+			stableSubID = strings.TrimSpace(storedSubID)
+		}
+	}
+
+	if _, _, err := cfg.client.EnsureClientAcrossInbounds(inboundIDs, alias, email, 0, stableSubID); err != nil {
+		return "", "", err
+	}
+
+	for _, inboundID := range inboundIDs {
+		client, err := cfg.client.GetClientByTelegram(inboundID, alias)
+		if err != nil {
+			return "", "", err
+		}
+		if client == nil {
+			continue
+		}
+		client.Enable = true
+		client.TgID = alias
+		client.ExpiryTime = 0 // 0 в 3x-ui = бессрочно
+		if strings.TrimSpace(client.SubID) == "" {
+			client.SubID = stableSubID
+		}
+		if strings.TrimSpace(client.Email) == "" {
+			client.Email = email
+		}
+		if strings.TrimSpace(client.Comment) == "" {
+			client.Comment = "tg:" + alias
+		}
+		if err := cfg.client.UpdateClient(inboundID, *client); err != nil {
+			return "", "", err
+		}
+	}
+
+	accessCache.Delete(alias)
+	info, err := ensureXrayAccessFresh(cfg, alias, email, 0, false)
+	if err != nil {
+		return "", "", err
+	}
+	if info == nil || info.client == nil {
+		return "", "", fmt.Errorf("клиент создан, но не найден при повторной проверке")
+	}
+
+	if mergedXrayCfg != nil && mergedXrayCfg.client != nil {
+		if _, _, err := ensureMergedProviderClient(mergedXrayCfg, alias, strings.TrimSpace(info.client.SubID), info); err != nil {
+			return "", "", err
+		}
+	}
+
+	subURL := publicSubscriptionURLForUser(cfg, alias, info)
+	vlessLink := generateVLESSLinkForConfig(cfg, info.client)
+	return subURL, vlessLink, nil
+}
+
 func fallbackEmail(userID string) string {
 	if userStore == nil {
 		return fmt.Sprintf("%s@happycat", userID)
@@ -1226,6 +1317,43 @@ func parseNotifyUserArgs(args string) (int64, string, error) {
 		text = strings.TrimSpace(strings.Join(parts[1:], " "))
 	}
 	return targetID, text, nil
+}
+
+func parseCreateAlias(args string) (string, error) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return "", fmt.Errorf("использование: /create <имя>")
+	}
+	parts := strings.Fields(args)
+	if len(parts) == 0 {
+		return "", fmt.Errorf("использование: /create <имя>")
+	}
+	raw := strings.TrimSpace(parts[0])
+	if raw == "" {
+		return "", fmt.Errorf("укажи имя для подписки")
+	}
+
+	var b strings.Builder
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-' || r == '.':
+			b.WriteRune(r)
+		}
+	}
+	alias := strings.TrimSpace(b.String())
+	if alias == "" {
+		return "", fmt.Errorf("имя может содержать только латиницу, цифры, _, -, .")
+	}
+	if len(alias) > 64 {
+		alias = alias[:64]
+	}
+	return alias, nil
 }
 
 func sendBroadcastPayload(bot *tgbotapi.BotAPI, targetID int64, sourceMsg *tgbotapi.Message, broadcastText string, preserveSource bool) error {
@@ -3199,6 +3327,39 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		if action := getCommandActionName(msg.Command()); action != "" {
 			logAction(bot, msg.From.ID, msg.From.UserName, action, false)
 		}
+	}
+
+	if cmdName, cmdArgs := parseLeadingSlashCommand(msg.Text); cmdName == "create" {
+		if !isAdmin(msg.From.ID) {
+			_ = updateSessionText(bot, chatID, session, stateMenu, "⛔️ Только для админа", "HTML", mainMenuInlineKeyboard())
+			return
+		}
+
+		alias, err := parseCreateAlias(cmdArgs)
+		if err != nil {
+			_ = updateSessionText(bot, chatID, session, stateMenu, html.EscapeString(err.Error()), "HTML", mainMenuInlineKeyboard())
+			return
+		}
+
+		subURL, vlessLink, err := createInfiniteAccessForAlias(xrCfg, alias)
+		if err != nil {
+			statusText := fmt.Sprintf("❌ /create %s: %s", html.EscapeString(alias), html.EscapeString(err.Error()))
+			_ = updateSessionText(bot, chatID, session, stateMenu, statusText, "HTML", mainMenuInlineKeyboard())
+			return
+		}
+
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("✅ Бессрочная подписка создана: <code>%s</code>", html.EscapeString(alias)))
+		if strings.TrimSpace(subURL) != "" {
+			b.WriteString("\n\n🔗 Подписка:\n")
+			b.WriteString(fmt.Sprintf("<code>%s</code>", html.EscapeString(subURL)))
+		}
+		if strings.TrimSpace(vlessLink) != "" {
+			b.WriteString("\n\n🗝 VLESS:\n")
+			b.WriteString(fmt.Sprintf("<code>%s</code>", html.EscapeString(vlessLink)))
+		}
+		_ = updateSessionText(bot, chatID, session, stateMenu, b.String(), "HTML", mainMenuInlineKeyboard())
+		return
 	}
 
 	// Команда рассылки для админа и тестовый прогон для предпросмотра.
