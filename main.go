@@ -2352,18 +2352,18 @@ func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Cl
 }
 
 func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
+	return generateVLESSLinkForConfigWithInbound(cfg, client, 0)
+}
+
+func generateVLESSLinkForConfigWithInbound(cfg *xraySettings, client *xray.Client, inboundID int) string {
 	if cfg == nil || cfg.client == nil || client == nil {
 		return ""
 	}
 	if strings.TrimSpace(cfg.serverAddress) == "" || strings.TrimSpace(cfg.serverName) == "" || strings.TrimSpace(cfg.publicKey) == "" || strings.TrimSpace(cfg.shortID) == "" || cfg.serverPort <= 0 {
 		return ""
 	}
-	link := cfg.client.GenerateVLESSLink(client, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
-	fingerprint := strings.TrimSpace(cfg.fingerprint)
-	if fingerprint == "" || fingerprint == "chrome" {
-		return link
-	}
-	return strings.Replace(link, "fp=chrome", "fp="+url.QueryEscape(fingerprint), 1)
+	link := cfg.client.GenerateVLESSLinkForInbound(client, inboundID, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX, cfg.fingerprint)
+	return link
 }
 
 func mergedInboundRemark(cfg *xraySettings, inboundID int) string {
@@ -2555,7 +2555,7 @@ func buildMergedProviderLinkWithPrimaryInfo(cfg *xraySettings, userID, subID str
 		}
 		log.Printf("[merged-sync] auto-created merged client user=%s inbound=%d", userID, inboundID)
 	}
-	link := generateVLESSLinkForConfig(cfg, client)
+	link := generateVLESSLinkForConfigWithInbound(cfg, client, inboundID)
 	if strings.TrimSpace(link) == "" {
 		return "", fmt.Errorf("link config for merged xray is incomplete")
 	}
@@ -2694,10 +2694,6 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSpace(parts[1])
 	if !isValidMergedSubscriptionToken(targetUserID, token) {
 		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-	if _, err := strconv.ParseInt(targetUserID, 10, 64); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	upstreamURL, subID, primaryInfo, err := buildSubscriptionURLForUser(xrayCfg, targetUserID)
@@ -3354,7 +3350,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			b.WriteString("\n\n🔗 Подписка:\n")
 			b.WriteString(fmt.Sprintf("<code>%s</code>", html.EscapeString(subURL)))
 		}
-		if strings.TrimSpace(vlessLink) != "" {
+		if strings.TrimSpace(vlessLink) != "" && !strings.Contains(strings.ToLower(vlessLink), "get_from_3xui_panel") {
 			b.WriteString("\n\n🗝 VLESS:\n")
 			b.WriteString(fmt.Sprintf("<code>%s</code>", html.EscapeString(vlessLink)))
 		}

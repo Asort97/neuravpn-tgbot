@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -426,6 +427,163 @@ func (x *XRayClient) GenerateVLESSLink(client *Client, serverAddress string, por
 
 	if client.Email != "" {
 		link += fmt.Sprintf("#%s", client.Email)
+	}
+
+	return link
+}
+
+// parseTransportParams extracts transport-specific query params from raw streamSettings JSON.
+// Returns params string like "type=xhttp" or "type=tcp&headerType=none" etc.
+func parseTransportParams(streamSettings string) string {
+	raw := strings.TrimSpace(streamSettings)
+	if raw == "" {
+		return "type=tcp&headerType=none"
+	}
+
+	var ss struct {
+		Network       string `json:"network"`
+		Security      string `json:"security"`
+		XhttpSettings struct {
+			Path string `json:"path"`
+			Host string `json:"host"`
+			Mode string `json:"mode"`
+		} `json:"xhttpSettings"`
+		WsSettings struct {
+			Path    string            `json:"path"`
+			Headers map[string]string `json:"headers"`
+		} `json:"wsSettings"`
+		GrpcSettings struct {
+			ServiceName string `json:"serviceName"`
+			Mode        string `json:"mode"`
+		} `json:"grpcSettings"`
+		HttpSettings struct {
+			Path string   `json:"path"`
+			Host []string `json:"host"`
+		} `json:"httpSettings"`
+		SplitHttpSettings struct {
+			Path string `json:"path"`
+			Host string `json:"host"`
+		} `json:"splitHttpSettings"`
+		TcpSettings struct {
+			Header struct {
+				Type string `json:"type"`
+			} `json:"header"`
+		} `json:"tcpSettings"`
+	}
+
+	if err := json.Unmarshal([]byte(raw), &ss); err != nil {
+		return "type=tcp&headerType=none"
+	}
+
+	network := strings.ToLower(strings.TrimSpace(ss.Network))
+	if network == "" {
+		network = "tcp"
+	}
+
+	switch network {
+	case "xhttp", "splithttp":
+		path := strings.TrimSpace(ss.XhttpSettings.Path)
+		if path == "" {
+			path = strings.TrimSpace(ss.SplitHttpSettings.Path)
+		}
+		if path == "" {
+			path = "/"
+		}
+		host := strings.TrimSpace(ss.XhttpSettings.Host)
+		if host == "" {
+			host = strings.TrimSpace(ss.SplitHttpSettings.Host)
+		}
+		mode := strings.TrimSpace(ss.XhttpSettings.Mode)
+		params := fmt.Sprintf("type=%s&path=%s", network, url.QueryEscape(path))
+		if host != "" {
+			params += "&host=" + url.QueryEscape(host)
+		}
+		if mode != "" {
+			params += "&mode=" + url.QueryEscape(mode)
+		}
+		return params
+	case "ws":
+		path := strings.TrimSpace(ss.WsSettings.Path)
+		if path == "" {
+			path = "/"
+		}
+		host := strings.TrimSpace(ss.WsSettings.Headers["Host"])
+		params := fmt.Sprintf("type=ws&path=%s", url.QueryEscape(path))
+		if host != "" {
+			params += "&host=" + url.QueryEscape(host)
+		}
+		return params
+	case "grpc":
+		svcName := strings.TrimSpace(ss.GrpcSettings.ServiceName)
+		mode := strings.TrimSpace(ss.GrpcSettings.Mode)
+		params := "type=grpc"
+		if svcName != "" {
+			params += "&serviceName=" + url.QueryEscape(svcName)
+		}
+		if mode != "" {
+			params += "&mode=" + url.QueryEscape(mode)
+		}
+		return params
+	case "h2", "http":
+		path := strings.TrimSpace(ss.HttpSettings.Path)
+		if path == "" {
+			path = "/"
+		}
+		params := fmt.Sprintf("type=h2&path=%s", url.QueryEscape(path))
+		if len(ss.HttpSettings.Host) > 0 {
+			params += "&host=" + url.QueryEscape(ss.HttpSettings.Host[0])
+		}
+		return params
+	default: // tcp
+		headerType := strings.TrimSpace(ss.TcpSettings.Header.Type)
+		if headerType == "" {
+			headerType = "none"
+		}
+		return fmt.Sprintf("type=tcp&headerType=%s", headerType)
+	}
+}
+
+// GenerateVLESSLinkForInbound generates a VLESS link using the actual transport settings
+// read from the specified inbound, instead of hardcoding tcp.
+func (x *XRayClient) GenerateVLESSLinkForInbound(client *Client, inboundID int, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string, fingerprint string) string {
+	spx := spiderX
+	if strings.TrimSpace(spx) == "" {
+		spx = "/"
+	}
+	fp := fingerprint
+	if strings.TrimSpace(fp) == "" {
+		fp = "chrome"
+	}
+
+	transportParams := "type=tcp&headerType=none"
+	inbounds, err := x.GetAllInbounds()
+	if err == nil {
+		for _, ib := range inbounds {
+			if ib.ID == inboundID {
+				transportParams = parseTransportParams(ib.StreamSettings)
+				break
+			}
+		}
+	}
+
+	link := fmt.Sprintf("vless://%s@%s:%d?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&spx=%s&%s",
+		client.ID,
+		serverAddress,
+		port,
+		url.QueryEscape(serverName),
+		fp,
+		publicKey,
+		shortID,
+		url.QueryEscape(spx),
+		transportParams,
+	)
+
+	if client.Flow != "" {
+		link += fmt.Sprintf("&flow=%s", client.Flow)
+	}
+
+	if client.Email != "" {
+		link += fmt.Sprintf("#%s", url.PathEscape(client.Email))
 	}
 
 	return link
