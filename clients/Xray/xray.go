@@ -440,16 +440,12 @@ func parseTransportParams(streamSettings string) string {
 		return "type=tcp&headerType=none"
 	}
 
-	var ss struct {
-		Network       string `json:"network"`
-		Security      string `json:"security"`
-		XhttpSettings struct {
-			Path  string          `json:"path"`
-			Host  string          `json:"host"`
-			Mode  string          `json:"mode"`
-			Extra json.RawMessage `json:"extra"`
-		} `json:"xhttpSettings"`
-		WsSettings struct {
+	// First pass: get network type and raw xhttpSettings blob
+	var outer struct {
+		Network           string          `json:"network"`
+		XhttpSettings     json.RawMessage `json:"xhttpSettings"`
+		SplitHttpSettings json.RawMessage `json:"splitHttpSettings"`
+		WsSettings        struct {
 			Path    string            `json:"path"`
 			Headers map[string]string `json:"headers"`
 		} `json:"wsSettings"`
@@ -461,10 +457,6 @@ func parseTransportParams(streamSettings string) string {
 			Path string   `json:"path"`
 			Host []string `json:"host"`
 		} `json:"httpSettings"`
-		SplitHttpSettings struct {
-			Path string `json:"path"`
-			Host string `json:"host"`
-		} `json:"splitHttpSettings"`
 		TcpSettings struct {
 			Header struct {
 				Type string `json:"type"`
@@ -472,29 +464,40 @@ func parseTransportParams(streamSettings string) string {
 		} `json:"tcpSettings"`
 	}
 
-	if err := json.Unmarshal([]byte(raw), &ss); err != nil {
+	if err := json.Unmarshal([]byte(raw), &outer); err != nil {
 		return "type=tcp&headerType=none"
 	}
 
-	network := strings.ToLower(strings.TrimSpace(ss.Network))
+	network := strings.ToLower(strings.TrimSpace(outer.Network))
 	if network == "" {
 		network = "tcp"
 	}
 
 	switch network {
 	case "xhttp", "splithttp":
-		path := strings.TrimSpace(ss.XhttpSettings.Path)
-		if path == "" {
-			path = strings.TrimSpace(ss.SplitHttpSettings.Path)
+		// Pick the right settings blob
+		settingsRaw := outer.XhttpSettings
+		if len(settingsRaw) == 0 || string(settingsRaw) == "null" {
+			settingsRaw = outer.SplitHttpSettings
 		}
+
+		// Second pass: extract individual fields for standard params
+		var xhttpFields struct {
+			Path string `json:"path"`
+			Host string `json:"host"`
+			Mode string `json:"mode"`
+		}
+		if len(settingsRaw) > 0 && string(settingsRaw) != "null" {
+			_ = json.Unmarshal(settingsRaw, &xhttpFields)
+		}
+
+		path := strings.TrimSpace(xhttpFields.Path)
 		if path == "" {
 			path = "/"
 		}
-		host := strings.TrimSpace(ss.XhttpSettings.Host)
-		if host == "" {
-			host = strings.TrimSpace(ss.SplitHttpSettings.Host)
-		}
-		mode := strings.TrimSpace(ss.XhttpSettings.Mode)
+		host := strings.TrimSpace(xhttpFields.Host)
+		mode := strings.TrimSpace(xhttpFields.Mode)
+
 		params := fmt.Sprintf("type=%s&path=%s", network, url.QueryEscape(path))
 		if host != "" {
 			params += "&host=" + url.QueryEscape(host)
@@ -502,24 +505,25 @@ func parseTransportParams(streamSettings string) string {
 		if mode != "" {
 			params += "&mode=" + url.QueryEscape(mode)
 		}
-		if len(ss.XhttpSettings.Extra) > 0 && string(ss.XhttpSettings.Extra) != "null" {
-			params += "&extra=" + url.QueryEscape(string(ss.XhttpSettings.Extra))
+		// Pass entire xhttpSettings as extra so clients get all server-side params
+		if len(settingsRaw) > 0 && string(settingsRaw) != "null" {
+			params += "&extra=" + url.QueryEscape(string(settingsRaw))
 		}
 		return params
 	case "ws":
-		path := strings.TrimSpace(ss.WsSettings.Path)
+		path := strings.TrimSpace(outer.WsSettings.Path)
 		if path == "" {
 			path = "/"
 		}
-		host := strings.TrimSpace(ss.WsSettings.Headers["Host"])
+		host := strings.TrimSpace(outer.WsSettings.Headers["Host"])
 		params := fmt.Sprintf("type=ws&path=%s", url.QueryEscape(path))
 		if host != "" {
 			params += "&host=" + url.QueryEscape(host)
 		}
 		return params
 	case "grpc":
-		svcName := strings.TrimSpace(ss.GrpcSettings.ServiceName)
-		mode := strings.TrimSpace(ss.GrpcSettings.Mode)
+		svcName := strings.TrimSpace(outer.GrpcSettings.ServiceName)
+		mode := strings.TrimSpace(outer.GrpcSettings.Mode)
 		params := "type=grpc"
 		if svcName != "" {
 			params += "&serviceName=" + url.QueryEscape(svcName)
@@ -529,17 +533,17 @@ func parseTransportParams(streamSettings string) string {
 		}
 		return params
 	case "h2", "http":
-		path := strings.TrimSpace(ss.HttpSettings.Path)
+		path := strings.TrimSpace(outer.HttpSettings.Path)
 		if path == "" {
 			path = "/"
 		}
 		params := fmt.Sprintf("type=h2&path=%s", url.QueryEscape(path))
-		if len(ss.HttpSettings.Host) > 0 {
-			params += "&host=" + url.QueryEscape(ss.HttpSettings.Host[0])
+		if len(outer.HttpSettings.Host) > 0 {
+			params += "&host=" + url.QueryEscape(outer.HttpSettings.Host[0])
 		}
 		return params
 	default: // tcp
-		headerType := strings.TrimSpace(ss.TcpSettings.Header.Type)
+		headerType := strings.TrimSpace(outer.TcpSettings.Header.Type)
 		if headerType == "" {
 			headerType = "none"
 		}
