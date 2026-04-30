@@ -136,6 +136,7 @@ const (
 	stateInstructions SessionState = "instructions"
 	stateCollectEmail SessionState = "collect_email"
 	stateEditEmail    SessionState = "edit_email"
+	stateEnterPromo   SessionState = "enter_promo"
 )
 
 type RatePlan struct {
@@ -1356,6 +1357,42 @@ func parseCreateAlias(args string) (string, error) {
 	return alias, nil
 }
 
+// handleCreatePromocode обрабатывает команду /create_promocode НАЗВАНИЕ ЧАСОВ ПРОЦЕНТ
+func handleCreatePromocode(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, args string) {
+	usage := "использование: /create_promocode НАЗВАНИЕ ЧАСОВ ПРОЦЕНТ\nнапример: /create_promocode SALE50 72 50"
+	parts := strings.Fields(strings.TrimSpace(args))
+	if len(parts) < 3 {
+		_ = updateSessionText(bot, chatID, session, stateMenu, usage, "HTML", mainMenuInlineKeyboard())
+		return
+	}
+	code := strings.ToUpper(parts[0])
+	hours, err := strconv.Atoi(parts[1])
+	if err != nil || hours <= 0 {
+		_ = updateSessionText(bot, chatID, session, stateMenu, "ЧАСОВ должно быть положительным числом\n"+usage, "HTML", mainMenuInlineKeyboard())
+		return
+	}
+	discount, err := strconv.Atoi(parts[2])
+	if err != nil || discount <= 0 || discount > 100 {
+		_ = updateSessionText(bot, chatID, session, stateMenu, "ПРОЦЕНТ должен быть от 1 до 100\n"+usage, "HTML", mainMenuInlineKeyboard())
+		return
+	}
+	pg, ok := userStore.(interface {
+		CreatePromocode(code string, discountPercent int, validForHours int) error
+	})
+	if !ok {
+		_ = updateSessionText(bot, chatID, session, stateMenu, "промокоды не поддерживаются в текущем хранилище", "HTML", mainMenuInlineKeyboard())
+		return
+	}
+	if err := pg.CreatePromocode(code, discount, hours); err != nil {
+		log.Printf("CreatePromocode error: %v", err)
+		_ = updateSessionText(bot, chatID, session, stateMenu, "Ошибка создания промокода: "+html.EscapeString(err.Error()), "HTML", mainMenuInlineKeyboard())
+		return
+	}
+	text := fmt.Sprintf("✅ промокод создан\n\nкод: <code>%s</code>\nскидка: <b>%d%%</b>\nдействует: <b>%d ч.</b>",
+		html.EscapeString(code), discount, hours)
+	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", mainMenuInlineKeyboard())
+}
+
 func sendBroadcastPayload(bot *tgbotapi.BotAPI, targetID int64, sourceMsg *tgbotapi.Message, broadcastText string, preserveSource bool) error {
 	if bot == nil || sourceMsg == nil {
 		return fmt.Errorf("broadcast source is empty")
@@ -1769,6 +1806,9 @@ func rateKeyboardRaw(chatID int64) rawInlineKeyboardMarkup {
 		})
 	}
 	rows = append(rows, []rawInlineKeyboardButton{
+		rawCallbackButton("🎫 активировать промокод", "enter_promo", "", ""),
+	})
+	rows = append(rows, []rawInlineKeyboardButton{
 		rawCallbackButton("назад", "nav_status", "", "5264852846527941278"),
 	})
 	return rawInlineKeyboardMarkup{InlineKeyboard: rows}
@@ -1793,6 +1833,7 @@ func choosePayKeyboardRaw(plan RatePlan) rawInlineKeyboardMarkup {
 		{rawCallbackButton(fmt.Sprintf("⭐ звёздами (%d ⭐)", stars), "pay_stars_"+plan.ID, "", "")},
 		{rawCallbackButton(fmt.Sprintf("💳 картой с автопродлением (%.0f ₽)", plan.Amount), "pay_card_"+plan.ID, "", "")},
 		{rawCallbackButton(fmt.Sprintf("💲 любым способом (%.0f ₽)", plan.Amount), "pay_any_"+plan.ID, "", "")},
+		{rawCallbackButton("🎫 активировать промокод", "enter_promo", "", "")},
 		{
 			rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
 			rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
@@ -3358,6 +3399,15 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		return
 	}
 
+	if cmdName, cmdArgs := parseLeadingSlashCommand(msg.Text); cmdName == "create_promocode" {
+		if !isAdmin(msg.From.ID) {
+			_ = updateSessionText(bot, chatID, session, stateMenu, "⛔️ Только для админа", "HTML", mainMenuInlineKeyboard())
+			return
+		}
+		handleCreatePromocode(bot, chatID, session, cmdArgs)
+		return
+	}
+
 	// Команда рассылки для админа и тестовый прогон для предпросмотра.
 	if cmdName, cmdArgs := parseLeadingSlashCommand(msg.Text); isNotifyUserCommandName(cmdName) {
 		if !isAdmin(msg.From.ID) {
@@ -3713,6 +3763,36 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		handleStatus(bot, &tgbotapi.CallbackQuery{Message: msg}, session, xrCfg)
 		return
 	}
+
+	if session.State == stateEnterPromo {
+		userID := strconv.FormatInt(msg.From.ID, 10)
+		code := strings.ToUpper(strings.TrimSpace(msg.Text))
+		pg, ok := userStore.(interface {
+			ActivatePromocode(userID, code string) (int, time.Time, bool, error)
+		})
+		if !ok {
+			handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
+			return
+		}
+		discount, until, alreadyUsed, err := pg.ActivatePromocode(userID, code)
+		var notice string
+		if err != nil && err.Error() == "not found" {
+			notice = "❌ промокод не найден или устарел"
+		} else if err != nil {
+			log.Printf("ActivatePromocode error: %v", err)
+			notice = "❌ ошибка активации"
+		} else if alreadyUsed {
+			notice = "❌ этот промокод уже был использован"
+		} else {
+			notice = fmt.Sprintf("✅ промокод активирован! скидка %d%% действует до %s", discount, until.In(time.Local).Format("02.01.2006"))
+		}
+		// Отправляем уведомление отдельным сообщением (popup через обычный send)
+		noticeMsg := tgbotapi.NewMessage(chatID, notice)
+		_, _ = bot.Send(noticeMsg)
+		// Возвращаем пользователя на экран покупки
+		handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
+		return
+	}
 }
 
 func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSession, xrCfg *xraySettings) {
@@ -3917,6 +3997,13 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		handleGetVPN(bot, cq, session, xrCfg)
 	case data == "nav_topup":
 		handleTopUp(bot, cq, session)
+	case data == "enter_promo":
+		promoKb := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("назад", "nav_topup", "", "5264852846527941278")},
+		}}
+		_ = updateSessionTextRaw(bot, chatID, session, stateEnterPromo,
+			"🎫 введите промокод:", "HTML", promoKb)
+		ackCallback(bot, cq, "")
 	case data == "nav_status":
 		handleStatus(bot, cq, session, xrCfg)
 	case data == "nav_referral":
@@ -4558,21 +4645,37 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 	ackCallback(bot, cq, "выберите способ оплаты")
 }
 func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan, saveCard bool) error {
+	userID := strconv.FormatInt(chatID, 10)
+	finalAmount := plan.Amount
+
+	// Применяем скидку по активному промокоду
+	if pg, ok := userStore.(interface {
+		GetActivePromocode(userID string) (*struct {
+			Code          string
+			Discount      int
+			DiscountUntil time.Time
+		}, error)
+	}); ok {
+		if promo, err := pg.GetActivePromocode(userID); err == nil && promo != nil {
+			finalAmount = math.Round(plan.Amount*(1-float64(promo.Discount)/100)*100) / 100
+		}
+	}
+
 	metadata := map[string]interface{}{
 		"plan_id":     plan.ID,
 		"plan_title":  plan.Title,
 		"plan_days":   plan.Days,
-		"plan_amount": plan.Amount,
+		"plan_amount": finalAmount,
 	}
 
-	email, _ := userStore.GetEmail(strconv.FormatInt(chatID, 10))
-	confirmationURL, err := yookassaClient.CreatePaymentAndGetURL(plan.Amount, plan.Title, chatID, metadata, email, saveCard)
+	email, _ := userStore.GetEmail(userID)
+	confirmationURL, err := yookassaClient.CreatePaymentAndGetURL(finalAmount, plan.Title, chatID, metadata, email, saveCard)
 	if err != nil {
 		return err
 	}
 
 	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">💳</tg-emoji> <b>%s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.0f ₽</b>\n\nспособы оплаты:\n• SberPay\n• T-Pay\n• СБП\n• ЮMoney\n• MirPay\n• Банковская карта\n\nнажмите «оплатить», чтобы открыть страницу оплаты.",
-		plan.Title, plan.Amount)
+		plan.Title, finalAmount)
 	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawURLButton("оплатить", confirmationURL, "5344015205531686528")},
 		{rawCallbackButton("я оплатил", "check_payment", "", "5345823764720426390")},

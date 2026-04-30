@@ -97,6 +97,26 @@ CREATE TABLE IF NOT EXISTS users (
 			ADD COLUMN IF NOT EXISTS amount_value NUMERIC(12,2) NOT NULL DEFAULT 0,
 			ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'RUB';
 	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS promocodes (
+			code        TEXT PRIMARY KEY,
+			discount    INT  NOT NULL,
+			expires_at  TIMESTAMPTZ NOT NULL,
+			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE TABLE IF NOT EXISTS user_promocodes (
+			user_id       TEXT NOT NULL,
+			code          TEXT NOT NULL REFERENCES promocodes(code),
+			activated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			discount_until TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (user_id, code)
+		);
+		CREATE INDEX IF NOT EXISTS idx_user_promocodes_user_id ON user_promocodes(user_id);
+	`)
 	return err
 }
 
@@ -698,4 +718,114 @@ func (s *Store) GetAllUserIDs() ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// --- Промокоды ---
+
+// CreatePromocode создаёт новый промокод. code нормализуется в верхний регистр.
+func (s *Store) CreatePromocode(code string, discountPercent int, validForHours int) error {
+	ctx := context.Background()
+	code = strings.ToUpper(strings.TrimSpace(code))
+	expiresAt := time.Now().UTC().Add(time.Duration(validForHours) * time.Hour)
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO promocodes (code, discount, expires_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (code) DO UPDATE SET
+			discount = EXCLUDED.discount,
+			expires_at = EXCLUDED.expires_at
+	`, code, discountPercent, expiresAt)
+	return err
+}
+
+// PromocodeInfo содержит данные о промокоде.
+type PromocodeInfo struct {
+	Code      string
+	Discount  int
+	ExpiresAt time.Time
+}
+
+// GetPromocode возвращает промокод, если он существует и не истёк.
+func (s *Store) GetPromocode(code string) (*PromocodeInfo, error) {
+	ctx := context.Background()
+	code = strings.ToUpper(strings.TrimSpace(code))
+	var info PromocodeInfo
+	err := s.pool.QueryRow(ctx, `
+		SELECT code, discount, expires_at FROM promocodes
+		WHERE code = $1 AND expires_at > NOW()
+	`, code).Scan(&info.Code, &info.Discount, &info.ExpiresAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &info, nil
+}
+
+// ActivatePromocode активирует промокод для пользователя.
+// discount_until = expires_at промокода (скидка действует до конца срока промокода).
+// Возвращает false, если промокод уже был активирован этим пользователем или не существует/истёк.
+func (s *Store) ActivatePromocode(userID, code string) (discountPercent int, discountUntil time.Time, alreadyUsed bool, err error) {
+	ctx := context.Background()
+	code = strings.ToUpper(strings.TrimSpace(code))
+
+	info, err := s.GetPromocode(code)
+	if err != nil {
+		return 0, time.Time{}, false, err
+	}
+	if info == nil {
+		return 0, time.Time{}, false, fmt.Errorf("not found")
+	}
+
+	// Проверяем не активировал ли уже этот пользователь
+	var exists bool
+	_ = s.pool.QueryRow(ctx, `
+		SELECT TRUE FROM user_promocodes WHERE user_id = $1 AND code = $2
+	`, userID, code).Scan(&exists)
+	if exists {
+		return 0, time.Time{}, true, nil
+	}
+
+	discountUntil = info.ExpiresAt
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO user_promocodes (user_id, code, discount_until)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING
+	`, userID, code, discountUntil)
+	if err != nil {
+		return 0, time.Time{}, false, err
+	}
+	return info.Discount, discountUntil, false, nil
+}
+
+// GetActivePromocode возвращает активный промокод пользователя (самый свежий с discount_until > NOW()).
+// Если нет — возвращает nil, nil.
+func (s *Store) GetActivePromocode(userID string) (*struct {
+	Code          string
+	Discount      int
+	DiscountUntil time.Time
+}, error) {
+	ctx := context.Background()
+	var code string
+	var discount int
+	var until time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT up.code, p.discount, up.discount_until
+		FROM user_promocodes up
+		JOIN promocodes p ON p.code = up.code
+		WHERE up.user_id = $1 AND up.discount_until > NOW()
+		ORDER BY up.discount_until DESC
+		LIMIT 1
+	`, userID).Scan(&code, &discount, &until)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &struct {
+		Code          string
+		Discount      int
+		DiscountUntil time.Time
+	}{Code: code, Discount: discount, DiscountUntil: until}, nil
 }
