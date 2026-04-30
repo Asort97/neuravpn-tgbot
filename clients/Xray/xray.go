@@ -564,7 +564,9 @@ func (x *XRayClient) GenerateVLESSLinkForInbound(client *Client, inboundID int, 
 	if err == nil {
 		for _, ib := range inbounds {
 			if ib.ID == inboundID {
+				log.Printf("[GenerateVLESSLinkForInbound] inbound=%d streamSettings=%s", inboundID, ib.StreamSettings)
 				transportParams = parseTransportParams(ib.StreamSettings)
+				log.Printf("[GenerateVLESSLinkForInbound] transportParams=%s", transportParams)
 				break
 			}
 		}
