@@ -444,9 +444,10 @@ func parseTransportParams(streamSettings string) string {
 		Network       string `json:"network"`
 		Security      string `json:"security"`
 		XhttpSettings struct {
-			Path string `json:"path"`
-			Host string `json:"host"`
-			Mode string `json:"mode"`
+			Path  string          `json:"path"`
+			Host  string          `json:"host"`
+			Mode  string          `json:"mode"`
+			Extra json.RawMessage `json:"extra"`
 		} `json:"xhttpSettings"`
 		WsSettings struct {
 			Path    string            `json:"path"`
@@ -500,6 +501,9 @@ func parseTransportParams(streamSettings string) string {
 		}
 		if mode != "" {
 			params += "&mode=" + url.QueryEscape(mode)
+		}
+		if len(ss.XhttpSettings.Extra) > 0 && string(ss.XhttpSettings.Extra) != "null" {
+			params += "&extra=" + url.QueryEscape(string(ss.XhttpSettings.Extra))
 		}
 		return params
 	case "ws":
