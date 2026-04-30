@@ -3808,12 +3808,17 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			notice = fmt.Sprintf("✅ промокод активирован! скидка %d%% действует до %s", discount, until.In(time.Local).Format("02.01.2006"))
 		}
 		if session.PendingCallbackQueryID != "" {
-			_, _ = bot.Request(tgbotapi.CallbackConfig{
+			_, alertErr := bot.Request(tgbotapi.CallbackConfig{
 				CallbackQueryID: session.PendingCallbackQueryID,
 				Text:            notice,
 				ShowAlert:       true,
 			})
 			session.PendingCallbackQueryID = ""
+			if alertErr != nil {
+				log.Printf("promo alert failed: %v", alertErr)
+				noticeMsg := tgbotapi.NewMessage(chatID, notice)
+				_, _ = bot.Send(noticeMsg)
+			}
 		} else {
 			noticeMsg := tgbotapi.NewMessage(chatID, notice)
 			_, _ = bot.Send(noticeMsg)
