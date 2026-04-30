@@ -1790,7 +1790,7 @@ func rateKeyboardRaw(chatID int64) rawInlineKeyboardMarkup {
 		})
 	}
 	rows = append(rows, []rawInlineKeyboardButton{
-		rawCallbackButton("🎫 активировать промокод", "enter_promo", "", ""),
+		rawCallbackButton("активировать промокод", "enter_promo", "", "5345823764720426390"),
 	})
 	rows = append(rows, []rawInlineKeyboardButton{
 		rawCallbackButton("назад", "nav_status", "", "5264852846527941278"),
@@ -4031,7 +4031,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			{rawCallbackButton("назад", "nav_topup", "", "5264852846527941278")},
 		}}
 		_ = updateSessionTextRaw(bot, chatID, session, stateEnterPromo,
-			"🎫 введите промокод:", "HTML", promoKb)
+			"<tg-emoji emoji-id=\"5345823764720426390\">💰</tg-emoji> введите промокод:", "HTML", promoKb)
 	case data == "nav_status":
 		handleStatus(bot, cq, session, xrCfg)
 	case data == "nav_referral":
