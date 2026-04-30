@@ -1854,7 +1854,7 @@ func choosePayKeyboardRaw(plan RatePlan, discountPct int) rawInlineKeyboardMarku
 		{rawCallbackButton(fmt.Sprintf("⭐ звёздами (%d ⭐)", stars), "pay_stars_"+plan.ID, "", "")},
 		{rawCallbackButton(cardLabel, "pay_card_"+plan.ID, "", "")},
 		{rawCallbackButton(anyLabel, "pay_any_"+plan.ID, "", "")},
-		{rawCallbackButton("🎫 активировать промокод", "enter_promo", "", "")},
+		{rawCallbackButton("активировать промокод", "enter_promo", "", "5345823764720426390")},
 		{
 			rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
 			rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
