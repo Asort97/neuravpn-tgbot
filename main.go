@@ -296,23 +296,24 @@ var ratePlanByID = func() map[string]RatePlan {
 }()
 
 type UserSession struct {
-	MessageID            int
-	State                SessionState
-	ContentType          string
-	PendingPlanID        string
-	PendingSaveCard      bool
-	LastAccess           string
-	LastLink             string
-	CertFileName         string
-	CertFileBytes        []byte
-	LastAction           string
-	LastActionAt         time.Time
-	SessionID            int
-	SessionStart         time.Time
-	Actions              []string
-	AutopayProposalMsgID int
-	PaymentGen           int64
-	LastReminderAt       time.Time
+	MessageID              int
+	State                  SessionState
+	ContentType            string
+	PendingPlanID          string
+	PendingSaveCard        bool
+	PendingCallbackQueryID string
+	LastAccess             string
+	LastLink               string
+	CertFileName           string
+	CertFileBytes          []byte
+	LastAction             string
+	LastActionAt           time.Time
+	SessionID              int
+	SessionStart           time.Time
+	Actions                []string
+	AutopayProposalMsgID   int
+	PaymentGen             int64
+	LastReminderAt         time.Time
 }
 
 type logSession struct {
@@ -323,13 +324,6 @@ type logSession struct {
 	IsNew   bool
 	Sending bool
 	Dirty   bool
-}
-
-func minutesLabel(n int) string {
-	if n <= 1 {
-		return "1 мин"
-	}
-	return fmt.Sprintf("%d мин", n)
 }
 
 type xraySettings struct {
@@ -351,16 +345,6 @@ type accessInfo struct {
 	expireAt time.Time
 	daysLeft int64
 	link     string
-}
-
-func isAccessCurrentlyActive(info *accessInfo) bool {
-	if info == nil || info.client == nil || !info.client.Enable {
-		return false
-	}
-	if info.expireAt.IsZero() {
-		return true
-	}
-	return info.expireAt.After(time.Now())
 }
 
 var (
@@ -1819,6 +1803,18 @@ const (
 	starsPayloadPrefix = "stars:"
 )
 
+func minutesLabel(mins int) string {
+	if mins < 60 {
+		return fmt.Sprintf("%d мин", mins)
+	}
+	h := mins / 60
+	m := mins % 60
+	if m == 0 {
+		return fmt.Sprintf("%d ч", h)
+	}
+	return fmt.Sprintf("%d ч %d мин", h, m)
+}
+
 func starsAmountForPlan(plan RatePlan) int {
 	n := int(math.Round(plan.Amount * 0.9))
 	if n < 1 {
@@ -1827,12 +1823,37 @@ func starsAmountForPlan(plan RatePlan) int {
 	return n
 }
 
-func choosePayKeyboardRaw(plan RatePlan) rawInlineKeyboardMarkup {
+func getActivePromoDiscount(userID string) (discountPct int, ok bool) {
+	pg, okCast := userStore.(interface {
+		GetActivePromocode(userID string) (*struct {
+			Code          string
+			Discount      int
+			DiscountUntil time.Time
+		}, error)
+	})
+	if !okCast {
+		return 0, false
+	}
+	promo, err := pg.GetActivePromocode(userID)
+	if err != nil || promo == nil {
+		return 0, false
+	}
+	return promo.Discount, true
+}
+
+func choosePayKeyboardRaw(plan RatePlan, discountPct int) rawInlineKeyboardMarkup {
 	stars := starsAmountForPlan(plan)
+	cardLabel := fmt.Sprintf("💳 картой с автопродлением (%.0f ₽)", plan.Amount)
+	anyLabel := fmt.Sprintf("💲 любым способом (%.0f ₽)", plan.Amount)
+	if discountPct > 0 {
+		discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100) / 100
+		cardLabel = fmt.Sprintf("💳 картой с автопродлением (%.0f ₽ −%d%%)", discounted, discountPct)
+		anyLabel = fmt.Sprintf("💲 любым способом (%.0f ₽ −%d%%)", discounted, discountPct)
+	}
 	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawCallbackButton(fmt.Sprintf("⭐ звёздами (%d ⭐)", stars), "pay_stars_"+plan.ID, "", "")},
-		{rawCallbackButton(fmt.Sprintf("💳 картой с автопродлением (%.0f ₽)", plan.Amount), "pay_card_"+plan.ID, "", "")},
-		{rawCallbackButton(fmt.Sprintf("💲 любым способом (%.0f ₽)", plan.Amount), "pay_any_"+plan.ID, "", "")},
+		{rawCallbackButton(cardLabel, "pay_card_"+plan.ID, "", "")},
+		{rawCallbackButton(anyLabel, "pay_any_"+plan.ID, "", "")},
 		{rawCallbackButton("🎫 активировать промокод", "enter_promo", "", "")},
 		{
 			rawCallbackButton("назад", "nav_topup", "", "5264852846527941278"),
@@ -3786,10 +3807,17 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		} else {
 			notice = fmt.Sprintf("✅ промокод активирован! скидка %d%% действует до %s", discount, until.In(time.Local).Format("02.01.2006"))
 		}
-		// Отправляем уведомление отдельным сообщением (popup через обычный send)
-		noticeMsg := tgbotapi.NewMessage(chatID, notice)
-		_, _ = bot.Send(noticeMsg)
-		// Возвращаем пользователя на экран покупки
+		if session.PendingCallbackQueryID != "" {
+			_, _ = bot.Request(tgbotapi.CallbackConfig{
+				CallbackQueryID: session.PendingCallbackQueryID,
+				Text:            notice,
+				ShowAlert:       true,
+			})
+			session.PendingCallbackQueryID = ""
+		} else {
+			noticeMsg := tgbotapi.NewMessage(chatID, notice)
+			_, _ = bot.Send(noticeMsg)
+		}
 		handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
 		return
 	}
@@ -3998,12 +4026,12 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	case data == "nav_topup":
 		handleTopUp(bot, cq, session)
 	case data == "enter_promo":
+		session.PendingCallbackQueryID = cq.ID
 		promoKb := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("назад", "nav_topup", "", "5264852846527941278")},
 		}}
 		_ = updateSessionTextRaw(bot, chatID, session, stateEnterPromo,
 			"🎫 введите промокод:", "HTML", promoKb)
-		ackCallback(bot, cq, "")
 	case data == "nav_status":
 		handleStatus(bot, cq, session, xrCfg)
 	case data == "nav_referral":
@@ -4619,12 +4647,19 @@ func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNe
 
 func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
+	userID := strconv.FormatInt(chatID, 10)
 	session.PendingPlanID = ""
+	discountPct, hasDiscount := getActivePromoDiscount(userID)
 	var builder strings.Builder
 	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nоплата ⭐ звездами - <b>скидка 10%.</b>\n\nтарифы:\n")
 	for _, plan := range ratePlans {
 		stars := starsAmountForPlan(plan)
-		builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount, stars))
+		if hasDiscount {
+			discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100) / 100
+			builder.WriteString(fmt.Sprintf("• %d дней — <s>%.0f ₽</s> %.0f ₽ (-%d%%) или %d⭐\n", plan.Days, plan.Amount, discounted, discountPct, stars))
+		} else {
+			builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount, stars))
+		}
 	}
 	if isAdmin(chatID) {
 		builder.WriteString(fmt.Sprintf("• %s — %.0f ₽ (тест)\n", testPlan.Title, testPlan.Amount))
@@ -4634,14 +4669,21 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 }
 func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, plan RatePlan) {
 	chatID := cq.Message.Chat.ID
+	userID := strconv.FormatInt(chatID, 10)
 	session.PendingPlanID = plan.ID
 
 	stars := starsAmountForPlan(plan)
+	discountPct, hasDiscount := getActivePromoDiscount(userID)
+	priceStr := fmt.Sprintf("%.0f ₽", plan.Amount)
+	if hasDiscount {
+		discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100) / 100
+		priceStr = fmt.Sprintf("%.0f ₽ (−%d%%, итого %.0f ₽)", plan.Amount, discountPct, discounted)
+	}
 	text := fmt.Sprintf(
-		"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nвыберите способ оплаты:",
-		plan.Days, plan.Amount, stars,
+		"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %s или %d ⭐\n\nвыберите способ оплаты:",
+		plan.Days, priceStr, stars,
 	)
-	_ = updateSessionTextRaw(bot, chatID, session, stateChoosePay, text, "HTML", choosePayKeyboardRaw(plan))
+	_ = updateSessionTextRaw(bot, chatID, session, stateChoosePay, text, "HTML", choosePayKeyboardRaw(plan, discountPct))
 	ackCallback(bot, cq, "выберите способ оплаты")
 }
 func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan, saveCard bool) error {
