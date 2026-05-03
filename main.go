@@ -522,13 +522,29 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 		return nil, fmt.Errorf("no inbounds available to ensure client")
 	}
 
+	// Skip temporarily unavailable inbounds to avoid total outage when one node times out.
+	var reachableInboundIDs []int
+	for _, inboundID := range inboundIDs {
+		if _, err := cfg.client.GetInboundById(inboundID); err != nil {
+			log.Printf("[xray] skip unavailable inbound=%d user=%s err=%v", inboundID, telegramUser, err)
+			continue
+		}
+		reachableInboundIDs = append(reachableInboundIDs, inboundID)
+	}
+	if len(reachableInboundIDs) > 0 {
+		inboundIDs = reachableInboundIDs
+	}
+
 	if !createIfMissing && addDays == 0 {
 		// Read existing client without creating it, scanning all configured inbounds.
 		var c *xray.Client
+		var lastErr error
 		for _, inboundID := range inboundIDs {
 			candidate, err := cfg.client.GetClientByTelegram(inboundID, telegramUser)
 			if err != nil {
-				return nil, err
+				lastErr = err
+				log.Printf("[xray] read client failed inbound=%d user=%s err=%v", inboundID, telegramUser, err)
+				continue
 			}
 			if candidate == nil {
 				continue
@@ -547,6 +563,9 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 			}
 		}
 		if c == nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
 			return nil, nil
 		}
 		// Normalize minimal fields
@@ -2392,11 +2411,14 @@ func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Cl
 	if err != nil {
 		return nil, 0, err
 	}
+	var lastErr error
 	for _, inboundID := range inboundIDs {
 		if strings.TrimSpace(subID) != "" {
 			client, err := cfg.client.GetClientBySubID(inboundID, subID)
 			if err != nil {
-				return nil, 0, err
+				lastErr = err
+				log.Printf("[merged] lookup by sub failed inbound=%d user=%s err=%v", inboundID, userID, err)
+				continue
 			}
 			if client != nil {
 				return client, inboundID, nil
@@ -2404,11 +2426,16 @@ func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Cl
 		}
 		client, err := cfg.client.GetClientByTelegram(inboundID, userID)
 		if err != nil {
-			return nil, 0, err
+			lastErr = err
+			log.Printf("[merged] lookup by tg failed inbound=%d user=%s err=%v", inboundID, userID, err)
+			continue
 		}
 		if client != nil {
 			return client, inboundID, nil
 		}
+	}
+	if lastErr != nil {
+		return nil, 0, lastErr
 	}
 	return nil, 0, nil
 }
@@ -2483,15 +2510,21 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		stableUUID = uuid.New().String()
 	}
 	primaryInboundID := inboundIDs[0]
+	var lastErr error
+	updatedAny := false
 	for _, inboundID := range inboundIDs {
 		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
 		if lookupErr != nil {
-			return nil, 0, lookupErr
+			lastErr = lookupErr
+			log.Printf("[merged] skip inbound=%d user=%s lookup err=%v", inboundID, userID, lookupErr)
+			continue
 		}
 		if existing == nil && stableSubID != "" {
 			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, stableSubID)
 			if lookupErr != nil {
-				return nil, 0, lookupErr
+				lastErr = lookupErr
+				log.Printf("[merged] skip inbound=%d user=%s lookup by sub err=%v", inboundID, userID, lookupErr)
+				continue
 			}
 		}
 		clientData := xray.Client{
@@ -2506,9 +2539,16 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		if existing == nil {
 			created, addErr := cfg.client.AddClientWithData(inboundID, clientData)
 			if addErr != nil {
-				return nil, 0, addErr
+				lastErr = addErr
+				log.Printf("[merged] skip inbound=%d user=%s add err=%v", inboundID, userID, addErr)
+				continue
 			}
+			updatedAny = true
 			if inboundID == primaryInboundID {
+				client = created
+				foundInboundID = inboundID
+			}
+			if client == nil {
 				client = created
 				foundInboundID = inboundID
 			}
@@ -2518,13 +2558,19 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		clientData.CreatedAt = existing.CreatedAt
 		clientData.UpdatedAt = existing.UpdatedAt
 		if err := cfg.client.UpdateClient(inboundID, clientData); err != nil {
-			return nil, 0, err
+			lastErr = err
+			log.Printf("[merged] skip inbound=%d user=%s update err=%v", inboundID, userID, err)
+			continue
 		}
+		updatedAny = true
 		if inboundID == foundInboundID || (client == nil && inboundID == primaryInboundID) {
 			updated := clientData
 			client = &updated
 			foundInboundID = inboundID
 		}
+	}
+	if !updatedAny && lastErr != nil {
+		return nil, 0, lastErr
 	}
 	if client == nil {
 		return nil, 0, fmt.Errorf("не удалось создать ноду второго сервера")
