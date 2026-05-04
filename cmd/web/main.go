@@ -530,10 +530,14 @@ func randomToken(n int) string {
 }
 
 func setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
-	http.SetCookie(w, &http.Cookie{Name: "nvpn_session", Value: token, Path: "/", Expires: expires, HttpOnly: true, Secure: true, SameSite: webCookieSameSite()})
+	http.SetCookie(w, &http.Cookie{Name: "nvpn_session", Value: token, Path: "/", Expires: expires, HttpOnly: true, Secure: webCookieSecure(), SameSite: webCookieSameSite()})
 }
 func clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: "nvpn_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: webCookieSameSite()})
+	http.SetCookie(w, &http.Cookie{Name: "nvpn_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: webCookieSecure(), SameSite: webCookieSameSite()})
+}
+
+func webCookieSecure() bool {
+	return strings.ToLower(strings.TrimSpace(os.Getenv("WEB_COOKIE_SECURE"))) != "false"
 }
 
 func webCookieSameSite() http.SameSite {
