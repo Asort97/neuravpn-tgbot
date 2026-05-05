@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/mail"
@@ -117,6 +118,7 @@ const (
 	stateInstructions SessionState = "instructions"
 	stateCollectEmail SessionState = "collect_email"
 	stateEditEmail    SessionState = "edit_email"
+	stateEnterPromo   SessionState = "enter_promo"
 )
 
 type UserSession struct {
@@ -450,11 +452,34 @@ func sessionAction(bot *vkbot.Bot, peerID int, session *UserSession, action stri
 // Formatting helpers
 // ────────────────────────────────────────────────────────────────
 
-func minutesLabel(n int) string {
-	if n <= 1 {
-		return "1 мин"
+func minutesLabel(mins int) string {
+	if mins < 60 {
+		return fmt.Sprintf("%d мин", mins)
 	}
-	return fmt.Sprintf("%d мин", n)
+	h := mins / 60
+	m := mins % 60
+	if m == 0 {
+		return fmt.Sprintf("%d ч", h)
+	}
+	return fmt.Sprintf("%d ч %d мин", h, m)
+}
+
+func getActivePromoDiscount(userID string) (discountPct int, ok bool) {
+	pg, okCast := userStore.(interface {
+		GetActivePromocode(userID string) (*struct {
+			Code          string
+			Discount      int
+			DiscountUntil time.Time
+		}, error)
+	})
+	if !okCast {
+		return 0, false
+	}
+	promo, err := pg.GetActivePromocode(userID)
+	if err != nil || promo == nil {
+		return 0, false
+	}
+	return promo.Discount, true
 }
 
 func formatExpiryUTC(t time.Time) string {
@@ -563,6 +588,9 @@ func rateKeyboard(peerID int) rawkbd.Markup {
 		rows = append(rows, row)
 	}
 	rows = append(rows, []rawkbd.Button{
+		rawkbd.CallbackButton("🎟️ активировать промокод", "enter_promo", "", ""),
+	})
+	rows = append(rows, []rawkbd.Button{
 		rawkbd.CallbackButton("⬅️ назад", "nav_status", "", ""),
 	})
 	return rawkbd.Markup{Buttons: rows}
@@ -629,10 +657,37 @@ func ensureXrayAccess(cfg *xraySettings, userIDStr string, email string, addDays
 		return nil, fmt.Errorf("no inbounds available to ensure client")
 	}
 
+	// Пропускаем временно недоступные inbound'ы, чтобы таймаут одного узла не блокировал всё
+	var reachableInboundIDs []int
+	for _, inboundID := range inboundIDs {
+		if _, err := cfg.client.GetInboundById(inboundID); err != nil {
+			log.Printf("[xray] skip unavailable inbound=%d user=%s err=%v", inboundID, userIDStr, err)
+			continue
+		}
+		reachableInboundIDs = append(reachableInboundIDs, inboundID)
+	}
+	if len(reachableInboundIDs) > 0 {
+		inboundIDs = reachableInboundIDs
+	}
+
 	if !createIfMissing && addDays == 0 {
-		c, err := cfg.client.GetClientByTelegram(inboundIDs[0], userIDStr)
-		if err != nil {
-			return nil, err
+		var c *xray.Client
+		var lastErr error
+		for _, inboundID := range inboundIDs {
+			candidate, err := cfg.client.GetClientByTelegram(inboundID, userIDStr)
+			if err != nil {
+				lastErr = err
+				log.Printf("[xray] read client failed inbound=%d user=%s err=%v", inboundID, userIDStr, err)
+				continue
+			}
+			if candidate == nil {
+				continue
+			}
+			c = candidate
+			break
+		}
+		if c == nil && lastErr != nil {
+			return nil, lastErr
 		}
 		if c == nil {
 			return nil, nil
@@ -941,15 +996,21 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		return nil, 0, fmt.Errorf("uuid primary client is empty")
 	}
 	primaryInboundID := inboundIDs[0]
+	var lastErr error
+	updatedAny := false
 	for _, inboundID := range inboundIDs {
 		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
 		if lookupErr != nil {
-			return nil, 0, lookupErr
+			lastErr = lookupErr
+			log.Printf("[merged] skip inbound=%d user=%s lookup err=%v", inboundID, userID, lookupErr)
+			continue
 		}
 		if existing == nil && stableSubID != "" {
 			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, stableSubID)
 			if lookupErr != nil {
-				return nil, 0, lookupErr
+				lastErr = lookupErr
+				log.Printf("[merged] skip inbound=%d user=%s lookup by sub err=%v", inboundID, userID, lookupErr)
+				continue
 			}
 		}
 		clientData := xray.Client{
@@ -964,9 +1025,16 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		if existing == nil {
 			created, addErr := cfg.client.AddClientWithData(inboundID, clientData)
 			if addErr != nil {
-				return nil, 0, addErr
+				lastErr = addErr
+				log.Printf("[merged] skip inbound=%d user=%s add err=%v", inboundID, userID, addErr)
+				continue
 			}
+			updatedAny = true
 			if inboundID == primaryInboundID {
+				client = created
+				foundInboundID = inboundID
+			}
+			if client == nil {
 				client = created
 				foundInboundID = inboundID
 			}
@@ -976,13 +1044,19 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		clientData.CreatedAt = existing.CreatedAt
 		clientData.UpdatedAt = existing.UpdatedAt
 		if err := cfg.client.UpdateClient(inboundID, clientData); err != nil {
-			return nil, 0, err
+			lastErr = err
+			log.Printf("[merged] skip inbound=%d user=%s update err=%v", inboundID, userID, err)
+			continue
 		}
+		updatedAny = true
 		if inboundID == foundInboundID || (client == nil && inboundID == primaryInboundID) {
 			updated := clientData
 			client = &updated
 			foundInboundID = inboundID
 		}
+	}
+	if !updatedAny && lastErr != nil {
+		return nil, 0, lastErr
 	}
 	if client == nil {
 		return nil, 0, fmt.Errorf("не удалось создать ноду второго сервера")
@@ -1491,19 +1565,39 @@ func issuePlanAccess(bot *vkbot.Bot, peerID int, session *UserSession, plan Rate
 // ────────────────────────────────────────────────────────────────
 
 func startPaymentForPlan(bot *vkbot.Bot, peerID int, session *UserSession, plan RatePlan) error {
+	userIDStr := resolvedUserID(peerID)
+	finalAmount := plan.Amount
+
+	// Применяем скидку по активному промокоду
+	if pg, ok := userStore.(interface {
+		GetActivePromocode(userID string) (*struct {
+			Code          string
+			Discount      int
+			DiscountUntil time.Time
+		}, error)
+	}); ok {
+		if promo, err := pg.GetActivePromocode(userIDStr); err == nil && promo != nil {
+			finalAmount = math.Round(plan.Amount*(1-float64(promo.Discount)/100)*100) / 100
+		}
+	}
+
 	metadata := map[string]interface{}{
 		"plan_id":     plan.ID,
 		"plan_title":  plan.Title,
 		"plan_days":   plan.Days,
 		"plan_amount": plan.Amount,
 	}
-	email, _ := userStore.GetEmail(resolvedUserID(peerID))
-	confirmationURL, err := yookassaClient.CreatePaymentURL(int64(peerID), plan.Amount, plan.Title, metadata, email)
+	email, _ := userStore.GetEmail(userIDStr)
+	confirmationURL, err := yookassaClient.CreatePaymentURL(int64(peerID), finalAmount, plan.Title, metadata, email)
 	if err != nil {
 		return err
 	}
 
-	text := fmt.Sprintf("💳 %s\n\n💰 Сумма к оплате: %.0f ₽\n📝 Описание: %s\n\nНажмите «Оплатить», чтобы продолжить.", plan.Title, plan.Amount, plan.Title)
+	priceText := fmt.Sprintf("%.0f ₽", finalAmount)
+	if finalAmount != plan.Amount {
+		priceText = fmt.Sprintf("%.0f ₽ (скидка, было %.0f ₽)", finalAmount, plan.Amount)
+	}
+	text := fmt.Sprintf("💳 %s\n\n💰 Сумма к оплате: %s\n📝 Описание: %s\n\nНажмите «Оплатить», чтобы продолжить.", plan.Title, priceText, plan.Title)
 
 	kb := rawkbd.Markup{
 		Buttons: [][]rawkbd.Button{
@@ -2063,12 +2157,53 @@ func handleStatus(bot *vkbot.Bot, peerID int, session *UserSession, xrCfg *xrayS
 	_ = updateSessionText(bot, peerID, session, stateStatus, profileText, kb)
 }
 
+// handleCreatePromocode обрабатывает команду /create_promocode НАЗВАНИЕ ЧАСОВ ПРОЦЕНТ
+func handleCreatePromocode(bot *vkbot.Bot, peerID int, session *UserSession, args string) {
+	usage := "использование: /create_promocode НАЗВАНИЕ ЧАСОВ ПРОЦЕНТ\nпример: /create_promocode SALE50 72 50"
+	parts := strings.Fields(strings.TrimSpace(args))
+	if len(parts) < 3 {
+		_, _ = bot.SendMessage(peerID, usage, nil)
+		return
+	}
+	code := strings.ToUpper(parts[0])
+	hours, err := strconv.Atoi(parts[1])
+	if err != nil || hours <= 0 {
+		_, _ = bot.SendMessage(peerID, "ЧАСОВ должно быть положительным числом\n"+usage, nil)
+		return
+	}
+	discount, err := strconv.Atoi(parts[2])
+	if err != nil || discount <= 0 || discount > 100 {
+		_, _ = bot.SendMessage(peerID, "ПРОЦЕНТ должен быть от 1 до 100\n"+usage, nil)
+		return
+	}
+	pg, ok := userStore.(interface {
+		CreatePromocode(code string, discountPercent int, validForHours int) error
+	})
+	if !ok {
+		_, _ = bot.SendMessage(peerID, "промокоды не поддерживаются в текущем хранилище", nil)
+		return
+	}
+	if err := pg.CreatePromocode(code, discount, hours); err != nil {
+		log.Printf("CreatePromocode error: %v", err)
+		_, _ = bot.SendMessage(peerID, "ошибка создания промокода: "+err.Error(), nil)
+		return
+	}
+	_, _ = bot.SendMessage(peerID, fmt.Sprintf("✅ промокод создан\n\nкод: %s\nскидка: %d%%\nдействует: %d ч.", code, discount, hours), nil)
+}
+
 func handleTopUp(bot *vkbot.Bot, peerID int, session *UserSession) {
 	session.PendingPlanID = ""
+	userIDStr := resolvedUserID(peerID)
+	discountPct, hasDiscount := getActivePromoDiscount(userIDStr)
 	var builder strings.Builder
 	builder.WriteString("💰 покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\n\nтарифы:\n")
 	for _, plan := range availableRatePlans(peerID) {
-		builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽\n", plan.Days, plan.Amount))
+		if hasDiscount {
+			discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100) / 100
+			builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ → %.0f ₽ (-%d%%)\n", plan.Days, plan.Amount, discounted, discountPct))
+		} else {
+			builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽\n", plan.Days, plan.Amount))
+		}
 	}
 	header := strings.TrimSuffix(builder.String(), "\n")
 	_ = updateSessionText(bot, peerID, session, stateTopUp, header, rateKeyboard(peerID))
@@ -2077,6 +2212,10 @@ func handleTopUp(bot *vkbot.Bot, peerID int, session *UserSession) {
 func handleRateSelection(bot *vkbot.Bot, peerID int, eventID string, session *UserSession, plan RatePlan) {
 	session.PendingPlanID = plan.ID
 	userIDStr := resolvedUserID(peerID)
+
+	discountPct, hasDiscount := getActivePromoDiscount(userIDStr)
+	_ = discountPct
+	_ = hasDiscount
 
 	// Check if email is on file
 	if email, _ := userStore.GetEmail(userIDStr); strings.TrimSpace(email) == "" {
@@ -2904,6 +3043,15 @@ func handleEvent(bot *vkbot.Bot, obj events.MessageEventObject, xrCfg *xraySetti
 		handleQRCode(bot, peerID, session, xrCfg)
 	case data == "nav_topup":
 		handleTopUp(bot, peerID, session)
+	case data == "enter_promo":
+		kb := rawkbd.Markup{
+			Buttons: [][]rawkbd.Button{
+				{rawkbd.CallbackButton("⬅️ назад", "nav_topup", "", "")},
+			},
+		}
+		_ = updateSessionText(bot, peerID, session, stateEnterPromo, "🎟️ введите промокод:", kb)
+		_ = bot.SendEventAnswer(eventID, peerID, userID, "введите промокод")
+		return
 	case data == "nav_status":
 		handleStatus(bot, peerID, session, xrCfg)
 	case data == "nav_referral":
@@ -3050,6 +3198,9 @@ func handleMessage(bot *vkbot.Bot, msg events.MessageNewObject, xrCfg *xraySetti
 		case "adcheck":
 			handleAdCheck(bot, peerID, args)
 			return
+		case "create_promocode":
+			handleCreatePromocode(bot, peerID, session, args)
+			return
 		}
 	}
 
@@ -3086,6 +3237,35 @@ func handleMessage(bot *vkbot.Bot, msg events.MessageNewObject, xrCfg *xraySetti
 		}
 		_ = userStore.SetEmail(userIDStr, addr.Address)
 		handleStatus(bot, peerID, session, xrCfg)
+		return
+	}
+
+	// State: enter promo code
+	if session.State == stateEnterPromo {
+		userIDStr := resolvedUserID(fromID)
+		code := strings.ToUpper(strings.TrimSpace(text))
+		pg, ok := userStore.(interface {
+			ActivatePromocode(userID, code string) (int, time.Time, bool, error)
+		})
+		if !ok {
+			handleTopUp(bot, peerID, session)
+			return
+		}
+		discount, until, alreadyUsed, err := pg.ActivatePromocode(userIDStr, code)
+		var notice string
+		if err != nil && err.Error() == "not found" {
+			notice = "❌ промокод не найден или устарел"
+		} else if err != nil {
+			log.Printf("ActivatePromocode error: %v", err)
+			notice = "❌ ошибка активации"
+		} else if alreadyUsed {
+			notice = "❌ этот промокод уже был использован"
+		} else {
+			notice = fmt.Sprintf("✅ промокод активирован! скидка %d%% действует до %s", discount, until.In(time.Local).Format("02.01.2006"))
+		}
+		// В VK нет TG popup, отправляем обычным сообщением
+		_, _ = bot.SendMessage(peerID, notice, nil)
+		handleTopUp(bot, peerID, session)
 		return
 	}
 
@@ -3278,6 +3458,22 @@ func main() {
 		} else {
 			mergedXrayCfg = &xraySettings{client: mergedClient, inboundID: mergedInboundID, inboundIDs: mergedInboundIDs}
 			log.Println("🧪 Skipping merged xray login in test mode")
+		}
+	} else {
+		mergedXrayUser := strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME"))
+		mergedXrayPass := strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD"))
+		var missing []string
+		if mergedXrayHost == "" {
+			missing = append(missing, "MERGED_XRAY_HOST or MERGED_XRAY_PANEL_URL")
+		}
+		if mergedXrayUser == "" {
+			missing = append(missing, "MERGED_XRAY_USERNAME")
+		}
+		if mergedXrayPass == "" {
+			missing = append(missing, "MERGED_XRAY_PASSWORD")
+		}
+		if len(missing) > 0 {
+			log.Printf("⚠️ merged xray disabled: missing %s", strings.Join(missing, ", "))
 		}
 	}
 
