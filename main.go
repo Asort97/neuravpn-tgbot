@@ -924,18 +924,18 @@ func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Cl
 }
 
 func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
+	return generateVLESSLinkForConfigWithInbound(cfg, client, 0)
+}
+
+func generateVLESSLinkForConfigWithInbound(cfg *xraySettings, client *xray.Client, inboundID int) string {
 	if cfg == nil || cfg.client == nil || client == nil {
 		return ""
 	}
 	if strings.TrimSpace(cfg.serverAddress) == "" || strings.TrimSpace(cfg.serverName) == "" || strings.TrimSpace(cfg.publicKey) == "" || strings.TrimSpace(cfg.shortID) == "" || cfg.serverPort <= 0 {
 		return ""
 	}
-	link := cfg.client.GenerateVLESSLink(client, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX)
-	fingerprint := strings.TrimSpace(cfg.fingerprint)
-	if fingerprint == "" || fingerprint == "chrome" {
-		return link
-	}
-	return strings.Replace(link, "fp=chrome", "fp="+url.QueryEscape(fingerprint), 1)
+	link := cfg.client.GenerateVLESSLinkForInbound(client, inboundID, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX, cfg.fingerprint)
+	return link
 }
 
 func mergedInboundRemark(cfg *xraySettings, inboundID int) string {
@@ -1154,7 +1154,7 @@ func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, e
 		}
 		log.Printf("[merged-sync] auto-created merged client user=%s inbound=%d", userID, inboundID)
 	}
-	link := generateVLESSLinkForConfig(cfg, client)
+	link := generateVLESSLinkForConfigWithInbound(cfg, client, inboundID)
 	if strings.TrimSpace(link) == "" {
 		return "", fmt.Errorf("link config for merged xray is incomplete")
 	}
