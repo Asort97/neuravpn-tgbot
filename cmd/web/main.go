@@ -38,6 +38,7 @@ type app struct {
 	mergedSecret string
 	yooShopID    string
 	yooSecret    string
+	adminIDs     map[string]bool
 }
 
 type plan struct {
@@ -53,6 +54,8 @@ var plans = []plan{
 	{ID: "90d", Title: "90 дней", Amount: 249, Days: 90},
 	{ID: "365d", Title: "365 дней", Amount: 949, Days: 365},
 }
+
+var testPlan = plan{ID: "test_1d", Title: "Тест 1 день", Amount: 1, Days: 1}
 
 func main() {
 	dsn := strings.TrimSpace(os.Getenv("DB_DSN"))
@@ -85,6 +88,7 @@ func main() {
 		mergedSecret: strings.TrimSpace(os.Getenv("MERGED_SUB_SECRET")),
 		yooShopID:    strings.TrimSpace(os.Getenv("YOOKASSA_STORE_ID")),
 		yooSecret:    strings.TrimSpace(os.Getenv("YOOKASSA_API_KEY")),
+		adminIDs:     parseAdminIDs(os.Getenv("ADMIN_IDS")),
 	}
 	if err := a.initSchema(context.Background()); err != nil {
 		log.Fatalf("schema init failed: %v", err)
@@ -95,7 +99,7 @@ func main() {
 	mux.HandleFunc("/api/auth/verify-code", a.handleVerifyCode)
 	mux.HandleFunc("/api/auth/logout", a.handleLogout)
 	mux.HandleFunc("/api/me", a.requireAuth(a.handleMe))
-	mux.HandleFunc("/api/plans", a.handlePlans)
+	mux.HandleFunc("/api/plans", a.requireAuth(a.handlePlans))
 	mux.HandleFunc("/api/payments/create", a.requireAuth(a.handleCreatePayment))
 	mux.HandleFunc("/api/autopay/disable", a.requireAuth(a.handleDisableAutopay))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, map[string]any{"ok": true}) })
@@ -289,8 +293,12 @@ FROM users WHERE id=$1`, userID).Scan(&email, &days, &subID, &autopay, &autopayP
 	})
 }
 
-func (a *app) handlePlans(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"plans": plans})
+func (a *app) handlePlans(w http.ResponseWriter, r *http.Request, userID string) {
+	visible := append([]plan(nil), plans...)
+	if a.adminIDs[userID] {
+		visible = append(visible, testPlan)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plans": visible})
 }
 
 func (a *app) handleCreatePayment(w http.ResponseWriter, r *http.Request, userID string) {
@@ -306,7 +314,7 @@ func (a *app) handleCreatePayment(w http.ResponseWriter, r *http.Request, userID
 		writeJSON(w, http.StatusBadRequest, errResp("bad json"))
 		return
 	}
-	p, ok := findPlan(req.PlanID)
+	p, ok := a.findPlan(userID, req.PlanID)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, errResp("тариф не найден"))
 		return
@@ -437,7 +445,15 @@ func (a *app) createYooPayment(ctx context.Context, userID, email string, p plan
 		"description":         "NeuraVPN " + p.Title,
 		"save_payment_method": saveCard,
 		"expires_at":          time.Now().UTC().Add(20 * time.Minute).Format(time.RFC3339),
-		"metadata":            map[string]any{"chat_id": chatID, "user_id": userID, "plan_id": p.ID, "plan_days": p.Days, "source": "website"},
+		"metadata": map[string]any{
+			"chat_id":     chatID,
+			"user_id":     userID,
+			"plan_id":     p.ID,
+			"plan_title":  p.Title,
+			"plan_days":   p.Days,
+			"plan_amount": p.Amount,
+			"source":      "website",
+		},
 	}
 	if email != "" {
 		reqBody["receipt"] = receipt(email, p)
@@ -477,11 +493,14 @@ func receipt(email string, p plan) map[string]any {
 	return map[string]any{"customer": map[string]string{"email": email}, "items": []map[string]any{{"description": "NeuraVPN " + p.Title, "quantity": "1.00", "amount": map[string]string{"value": fmt.Sprintf("%.2f", p.Amount), "currency": "RUB"}, "vat_code": 1, "payment_mode": "full_payment", "payment_subject": "service"}}}
 }
 
-func findPlan(id string) (plan, bool) {
+func (a *app) findPlan(userID, id string) (plan, bool) {
 	for _, p := range plans {
 		if p.ID == id {
 			return p, true
 		}
+	}
+	if id == testPlan.ID && a.adminIDs[userID] {
+		return testPlan, true
 	}
 	return plan{}, false
 }
@@ -556,6 +575,17 @@ func maskID(id string) string {
 		return id
 	}
 	return id[:4] + strings.Repeat("*", int(math.Min(4, float64(len(id)-6)))) + id[len(id)-3:]
+}
+
+func parseAdminIDs(raw string) map[string]bool {
+	ids := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		id := strings.TrimSpace(part)
+		if id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
 }
 
 func sendLoginCode(email, code string) error {
