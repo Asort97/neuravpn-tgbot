@@ -492,16 +492,28 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 		return nil
 	}
 
+	// In 3x-ui the structure is:
+	// realitySettings.settings.publicKey / .fingerprint / .spiderX
+	// realitySettings.shortIds[]
+	// realitySettings.serverNames[]
+	// realitySettings.dest
 	var outer struct {
 		Security        string `json:"security"`
 		RealitySettings struct {
-			Dest         string   `json:"dest"`
-			ServerNames  []string `json:"serverNames"`
-			PublicKey    string   `json:"publicKey"`
-			ShortIds     []string `json:"shortIds"`
-			Fingerprint  string   `json:"fingerprints"` // sometimes "fingerprints" array, sometimes "fingerprint"
+			Dest        string   `json:"dest"`
+			ServerNames []string `json:"serverNames"`
+			ShortIds    []string `json:"shortIds"`
+			// Client-visible params nested inside "settings"
+			Settings struct {
+				PublicKey   string `json:"publicKey"`
+				Fingerprint string `json:"fingerprint"`
+				SpiderX     string `json:"spiderX"`
+			} `json:"settings"`
+			// Some older panel versions store them flat (fallback)
+			PublicKey   string   `json:"publicKey"`
+			Fingerprint string   `json:"fingerprint"`
 			Fingerprints []string `json:"fingerprints"`
-			SpiderX      string   `json:"spiderX"`
+			SpiderX     string   `json:"spiderX"`
 		} `json:"realitySettings"`
 	}
 
@@ -514,8 +526,11 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 
 	r := outer.RealitySettings
 
-	// publicKey
-	pk := strings.TrimSpace(r.PublicKey)
+	// publicKey: prefer settings.publicKey, fallback to flat
+	pk := strings.TrimSpace(r.Settings.PublicKey)
+	if pk == "" {
+		pk = strings.TrimSpace(r.PublicKey)
+	}
 	if pk == "" {
 		return nil
 	}
@@ -543,9 +558,9 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 		serverName = strings.TrimSpace(host)
 	}
 
-	// fingerprint
-	fp := ""
-	if len(r.Fingerprints) > 0 {
+	// fingerprint: prefer settings.fingerprint, then flat fingerprints[], then flat fingerprint
+	fp := strings.TrimSpace(r.Settings.Fingerprint)
+	if fp == "" && len(r.Fingerprints) > 0 {
 		fp = strings.TrimSpace(r.Fingerprints[0])
 	}
 	if fp == "" {
@@ -555,7 +570,11 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 		fp = "chrome"
 	}
 
-	spx := strings.TrimSpace(r.SpiderX)
+	// spiderX: prefer settings.spiderX, fallback to flat
+	spx := strings.TrimSpace(r.Settings.SpiderX)
+	if spx == "" {
+		spx = strings.TrimSpace(r.SpiderX)
+	}
 	if spx == "" {
 		spx = "/"
 	}
