@@ -510,10 +510,10 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 				SpiderX     string `json:"spiderX"`
 			} `json:"settings"`
 			// Some older panel versions store them flat (fallback)
-			PublicKey   string   `json:"publicKey"`
-			Fingerprint string   `json:"fingerprint"`
+			PublicKey    string   `json:"publicKey"`
+			Fingerprint  string   `json:"fingerprint"`
 			Fingerprints []string `json:"fingerprints"`
-			SpiderX     string   `json:"spiderX"`
+			SpiderX      string   `json:"spiderX"`
 		} `json:"realitySettings"`
 	}
 
