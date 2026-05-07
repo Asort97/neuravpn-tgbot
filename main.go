@@ -2088,7 +2088,7 @@ func main() {
 			if err := mergedClient.LoginToServer(); err != nil {
 				log.Printf("⚠️ merged xray login failed: %v", err)
 			} else {
-				mergedXrayCfg = &xraySettings{
+				cfg := &xraySettings{
 					client:        mergedClient,
 					inboundID:     mergedInboundID,
 					inboundIDs:    mergedInboundIDs,
@@ -2100,6 +2100,10 @@ func main() {
 					spiderX:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SPIDER_X")),
 					fingerprint:   strings.TrimSpace(os.Getenv("MERGED_XRAY_FINGERPRINT")),
 				}
+				// Автоматически подтягиваем Reality-параметры прямо с панели,
+				// если они не заданы вручную в env.
+				autoFillRealityFromPanel(cfg, mergedInboundIDs)
+				mergedXrayCfg = cfg
 				log.Println("✅ Merged Xray server connected")
 			}
 		} else {
@@ -2378,6 +2382,45 @@ func buildSubscriptionURLForUser(cfg *xraySettings, userID string) (string, stri
 		}
 	}
 	return subURL, subID, info, nil
+}
+
+// autoFillRealityFromPanel заполняет поля xraySettings (serverName, publicKey,
+// shortID, spiderX, fingerprint, serverPort) данными прямо с панели,
+// если они не были заданы вручную через env-переменные.
+func autoFillRealityFromPanel(cfg *xraySettings, inboundIDs []int) {
+	if cfg == nil || cfg.client == nil {
+		return
+	}
+	// Если все ключевые поля уже заданы — ничего не делаем
+	if cfg.publicKey != "" && cfg.shortID != "" && cfg.serverName != "" {
+		log.Println("[merged] reality params set from env, skipping panel fetch")
+		return
+	}
+	p, err := cfg.client.ExtractRealityParamsFromFirstInbound(inboundIDs)
+	if err != nil {
+		log.Printf("[merged] ⚠️ could not fetch reality params from panel: %v", err)
+		return
+	}
+	if cfg.publicKey == "" {
+		cfg.publicKey = p.PublicKey
+	}
+	if cfg.shortID == "" {
+		cfg.shortID = p.ShortID
+	}
+	if cfg.serverName == "" {
+		cfg.serverName = p.ServerName
+	}
+	if cfg.spiderX == "" {
+		cfg.spiderX = p.SpiderX
+	}
+	if cfg.fingerprint == "" {
+		cfg.fingerprint = p.Fingerprint
+	}
+	if cfg.serverPort == 0 && p.ServerPort > 0 {
+		cfg.serverPort = p.ServerPort
+	}
+	log.Printf("[merged] ✅ reality params from panel: sni=%s pk=%s sid=%s spx=%s fp=%s port=%d",
+		cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX, cfg.fingerprint, cfg.serverPort)
 }
 
 func mergedInboundIDs(cfg *xraySettings) ([]int, error) {
