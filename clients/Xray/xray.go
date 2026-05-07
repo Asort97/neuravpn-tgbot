@@ -495,13 +495,13 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 	var outer struct {
 		Security        string `json:"security"`
 		RealitySettings struct {
-			Dest        string   `json:"dest"`
-			ServerNames []string `json:"serverNames"`
-			PublicKey   string   `json:"publicKey"`
-			ShortIds    []string `json:"shortIds"`
-			Fingerprint string   `json:"fingerprints"` // sometimes "fingerprints" array, sometimes "fingerprint"
+			Dest         string   `json:"dest"`
+			ServerNames  []string `json:"serverNames"`
+			PublicKey    string   `json:"publicKey"`
+			ShortIds     []string `json:"shortIds"`
+			Fingerprint  string   `json:"fingerprints"` // sometimes "fingerprints" array, sometimes "fingerprint"
 			Fingerprints []string `json:"fingerprints"`
-			SpiderX     string   `json:"spiderX"`
+			SpiderX      string   `json:"spiderX"`
 		} `json:"realitySettings"`
 	}
 
