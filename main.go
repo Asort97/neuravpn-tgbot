@@ -927,6 +927,41 @@ func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
 	return generateVLESSLinkForConfigWithInbound(cfg, client, 0)
 }
 
+// autoFillRealityFromPanel fetches Reality params from the panel inbound and fills
+// any empty fields in cfg. Fields already set via env are not overwritten.
+func autoFillRealityFromPanel(cfg *xraySettings, inboundIDs []int) {
+	if cfg == nil || cfg.client == nil {
+		return
+	}
+	// Skip if all required fields already provided
+	if cfg.publicKey != "" && cfg.shortID != "" && cfg.serverName != "" {
+		log.Println("[merged] ✅ reality params from env, skipping panel fetch")
+		return
+	}
+	p, err := cfg.client.ExtractRealityParamsFromFirstInbound(inboundIDs)
+	if err != nil || p == nil {
+		log.Printf("[merged] ⚠️ could not fetch reality params from panel: %v", err)
+		return
+	}
+	if cfg.publicKey == "" {
+		cfg.publicKey = p.PublicKey
+	}
+	if cfg.shortID == "" {
+		cfg.shortID = p.ShortID
+	}
+	if cfg.serverName == "" {
+		cfg.serverName = p.ServerName
+	}
+	if cfg.spiderX == "" {
+		cfg.spiderX = p.SpiderX
+	}
+	if cfg.fingerprint == "" {
+		cfg.fingerprint = p.Fingerprint
+	}
+	log.Printf("[merged] ✅ reality params from panel: sni=%s pk=%s sid=%s fp=%s spx=%s",
+		cfg.serverName, cfg.publicKey, cfg.shortID, cfg.fingerprint, cfg.spiderX)
+}
+
 func generateVLESSLinkForConfigWithInbound(cfg *xraySettings, client *xray.Client, inboundID int) string {
 	if cfg == nil || cfg.client == nil || client == nil {
 		return ""
@@ -3441,7 +3476,7 @@ func main() {
 			if err := mergedClient.LoginToServer(); err != nil {
 				log.Printf("⚠️ merged xray connection failed: %v", err)
 			} else {
-				mergedXrayCfg = &xraySettings{
+				cfg := &xraySettings{
 					client:        mergedClient,
 					inboundID:     mergedInboundID,
 					inboundIDs:    mergedInboundIDs,
@@ -3453,6 +3488,8 @@ func main() {
 					spiderX:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SPIDER_X")),
 					fingerprint:   strings.TrimSpace(os.Getenv("MERGED_XRAY_FINGERPRINT")),
 				}
+				autoFillRealityFromPanel(cfg, mergedInboundIDs)
+				mergedXrayCfg = cfg
 				log.Println("✅ Merged Xray server connected")
 			}
 		} else {

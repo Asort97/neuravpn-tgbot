@@ -432,6 +432,164 @@ func (x *XRayClient) GenerateVLESSLink(client *Client, serverAddress string, por
 	return link
 }
 
+// RealityParams holds the TLS/Reality params parsed from a panel inbound.
+type RealityParams struct {
+	ServerName  string
+	PublicKey   string
+	ShortID     string
+	SpiderX     string
+	Fingerprint string
+	ServerPort  int
+}
+
+// ExtractRealityParamsFromInbound reads streamSettings of the given inbound
+// and returns the Reality params. Returns nil if reality is not configured.
+func (x *XRayClient) ExtractRealityParamsFromInbound(inboundID int) (*RealityParams, error) {
+	inbounds, err := x.GetAllInbounds()
+	if err != nil {
+		return nil, err
+	}
+	for _, ib := range inbounds {
+		if ib.ID != inboundID {
+			continue
+		}
+		p := parseRealityParams(ib.StreamSettings, ib.Port)
+		return p, nil
+	}
+	return nil, fmt.Errorf("inbound %d not found", inboundID)
+}
+
+// ExtractRealityParamsFromFirstInbound tries all inboundIDs (or auto-detects
+// VLESS inbounds) and returns the first inbound that has realitySettings.
+func (x *XRayClient) ExtractRealityParamsFromFirstInbound(inboundIDs []int) (*RealityParams, error) {
+	inbounds, err := x.GetAllInbounds()
+	if err != nil {
+		return nil, err
+	}
+
+	allowed := map[int]bool{}
+	for _, id := range inboundIDs {
+		allowed[id] = true
+	}
+
+	for _, ib := range inbounds {
+		if len(allowed) > 0 && !allowed[ib.ID] {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(ib.Protocol), "vless") {
+			continue
+		}
+		if p := parseRealityParams(ib.StreamSettings, ib.Port); p != nil {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("no inbound with realitySettings found")
+}
+
+func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
+	raw := strings.TrimSpace(streamSettings)
+	if raw == "" {
+		return nil
+	}
+
+	// In 3x-ui the structure is:
+	// realitySettings.settings.publicKey / .fingerprint / .spiderX
+	// realitySettings.shortIds[]
+	// realitySettings.serverNames[]
+	// realitySettings.dest
+	var outer struct {
+		Security        string `json:"security"`
+		RealitySettings struct {
+			Dest        string   `json:"dest"`
+			ServerNames []string `json:"serverNames"`
+			ShortIds    []string `json:"shortIds"`
+			// Client-visible params nested inside "settings"
+			Settings struct {
+				PublicKey   string `json:"publicKey"`
+				Fingerprint string `json:"fingerprint"`
+				SpiderX     string `json:"spiderX"`
+			} `json:"settings"`
+			// Some older panel versions store them flat (fallback)
+			PublicKey    string   `json:"publicKey"`
+			Fingerprint  string   `json:"fingerprint"`
+			Fingerprints []string `json:"fingerprints"`
+			SpiderX      string   `json:"spiderX"`
+		} `json:"realitySettings"`
+	}
+
+	if err := json.Unmarshal([]byte(raw), &outer); err != nil {
+		return nil
+	}
+	if !strings.EqualFold(outer.Security, "reality") {
+		return nil
+	}
+
+	r := outer.RealitySettings
+
+	// publicKey: prefer settings.publicKey, fallback to flat
+	pk := strings.TrimSpace(r.Settings.PublicKey)
+	if pk == "" {
+		pk = strings.TrimSpace(r.PublicKey)
+	}
+	if pk == "" {
+		return nil
+	}
+
+	// shortID — first non-empty from shortIds list
+	shortID := ""
+	for _, s := range r.ShortIds {
+		if strings.TrimSpace(s) != "" {
+			shortID = strings.TrimSpace(s)
+			break
+		}
+	}
+
+	// serverName — first from serverNames, or parse from dest
+	serverName := ""
+	if len(r.ServerNames) > 0 {
+		serverName = strings.TrimSpace(r.ServerNames[0])
+	}
+	if serverName == "" && r.Dest != "" {
+		host := r.Dest
+		if idx := strings.LastIndex(host, ":"); idx >= 0 {
+			host = host[:idx]
+		}
+		serverName = strings.TrimSpace(host)
+	}
+
+	// fingerprint: prefer settings.fingerprint, then flat fingerprints[], then flat fingerprint
+	fp := strings.TrimSpace(r.Settings.Fingerprint)
+	if fp == "" && len(r.Fingerprints) > 0 {
+		fp = strings.TrimSpace(r.Fingerprints[0])
+	}
+	if fp == "" {
+		fp = strings.TrimSpace(r.Fingerprint)
+	}
+	if fp == "" {
+		fp = "chrome"
+	}
+
+	// spiderX: prefer settings.spiderX, fallback to flat
+	spx := strings.TrimSpace(r.Settings.SpiderX)
+	if spx == "" {
+		spx = strings.TrimSpace(r.SpiderX)
+	}
+	if spx == "" {
+		spx = "/"
+	}
+
+	port := inboundPort
+
+	return &RealityParams{
+		ServerName:  serverName,
+		PublicKey:   pk,
+		ShortID:     shortID,
+		SpiderX:     spx,
+		Fingerprint: fp,
+		ServerPort:  port,
+	}
+}
+
 // parseTransportParams reads streamSettings JSON from the panel and returns
 // the correct VLESS query params (type=xhttp, type=ws, type=tcp, etc.)
 func parseTransportParams(streamSettings string) string {
