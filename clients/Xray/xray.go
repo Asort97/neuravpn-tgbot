@@ -131,6 +131,7 @@ type XRayClient struct {
 	serverURL   string
 	httpClient  *http.Client
 	authMu      sync.Mutex
+	csrfToken   string
 }
 
 func New(username, password, host, port, webBasePath string) *XRayClient {
@@ -168,6 +169,26 @@ func (x *XRayClient) LoginToServer() error {
 	x.authMu.Lock()
 	defer x.authMu.Unlock()
 
+	// 1. Fetch CSRF token for 3x-ui v3.0.0+
+	csrfUrl := fmt.Sprintf("%s/csrf-token", x.serverURL)
+	csrfReq, err := http.NewRequest("GET", csrfUrl, nil)
+	if err == nil {
+		csrfResp, csrfErr := x.httpClient.Do(csrfReq)
+		if csrfErr == nil {
+			defer csrfResp.Body.Close()
+			if csrfResp.StatusCode >= 200 && csrfResp.StatusCode < 300 {
+				var result struct {
+					Success bool   `json:"success"`
+					Obj     string `json:"obj"`
+				}
+				body, _ := io.ReadAll(csrfResp.Body)
+				if err := json.Unmarshal(body, &result); err == nil && result.Success {
+					x.csrfToken = result.Obj
+				}
+			}
+		}
+	}
+
 	url := fmt.Sprintf("%s/login", x.serverURL)
 
 	payload := map[string]interface{}{
@@ -187,6 +208,9 @@ func (x *XRayClient) LoginToServer() error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if x.csrfToken != "" {
+		req.Header.Set("X-CSRF-Token", x.csrfToken)
+	}
 
 	resp, err := x.httpClient.Do(req)
 	if err != nil {
@@ -248,6 +272,9 @@ func (x *XRayClient) doAPIRequestOnce(method, url string, payload []byte, header
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
+	}
+	if x.csrfToken != "" {
+		req.Header.Set("X-CSRF-Token", x.csrfToken)
 	}
 
 	resp, err := x.httpClient.Do(req)
