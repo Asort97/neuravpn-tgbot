@@ -264,6 +264,9 @@ type DataStore interface {
 	GetLinkedTo(userID string) (string, error)
 	GetLinkedVKUsers(tgUserID string) ([]string, error)
 	GetDailyStats(start, end time.Time) (int, int, float64, float64, error)
+	GetDailyReportStats(start, end time.Time) (int, int, int, int, float64, float64, error)
+	GetCohortStats(cohortStart, reportEnd time.Time) (int, int, error)
+	GetAverageStats(end time.Time, days int) (float64, float64, float64, error)
 	SetAutopay(userID, methodID, planID string) error
 	DisableAutopay(userID string) error
 	ClearAutopay(userID string) error
@@ -1486,15 +1489,70 @@ func resolveYooKassaPaymentAmount(payment *yookassa.YooKassaPaymentResponse, fal
 	return amount, currency
 }
 
-func buildDailyStatsText(start time.Time, newUsers, payingUsers int, rubTotal, starsTotal float64) string {
+func formatRubAmount(value float64) string {
+	text := fmt.Sprintf("%.2f", value)
+	text = strings.TrimRight(text, "0")
+	text = strings.TrimRight(text, ".")
+	if text == "" {
+		return "0"
+	}
+	return text
+}
+
+func formatDeltaPercent(today, avg float64) string {
+	if avg <= 0 {
+		return "нет данных"
+	}
+	percent := (today - avg) / avg * 100
+	sign := ""
+	if percent > 0 {
+		sign = "+"
+	}
+	return fmt.Sprintf("%s%d%%", sign, int(math.Round(percent)))
+}
+
+func formatCohortLine(label string, cohortStart time.Time, cohortUsers, cohortPaying int) string {
+	dateStr := cohortStart.Format("02.01")
+	if cohortUsers <= 0 {
+		return fmt.Sprintf("%s: нет данных за %s", label, dateStr)
+	}
+	if cohortPaying > cohortUsers {
+		cohortPaying = cohortUsers
+	}
+	percent := int(math.Round(float64(cohortPaying) * 100 / float64(cohortUsers)))
+	return fmt.Sprintf("%s: %d%% — %d из %d, когорта %s", label, percent, cohortPaying, cohortUsers, dateStr)
+}
+
+func buildDailyStatsText(start time.Time, newUsers, channelSubs, payingUsers, firstPayments int, rubTotal, starsTotal float64, d3Users, d3Paying, d7Users, d7Paying int, avgNewUsers, avgRub, avgFirstPayments float64) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("📊 <b>Сводка за %s</b>\n\n", start.Format("02.01.2006")))
-	b.WriteString(fmt.Sprintf("новых пользователей: <b>%d</b>\n", newUsers))
-	b.WriteString(fmt.Sprintf("оплативших: <b>%d</b>\n", payingUsers))
-	b.WriteString(fmt.Sprintf("сумма: <b>%.2f ₽</b>", rubTotal))
+	b.WriteString(fmt.Sprintf("📊 <b>Сводка за %s</b>\n", start.Format("02.01.2006")))
+	b.WriteString(fmt.Sprintf("👥 Новых сегодня: <b>%d</b>\n", newUsers))
+	b.WriteString(fmt.Sprintf("✅ Подписались на канал: <b>%d</b>\n\n", channelSubs))
+
+	renewals := payingUsers - firstPayments
+	if renewals < 0 {
+		renewals = 0
+	}
+	b.WriteString(fmt.Sprintf("💳 Оплат сегодня: <b>%d</b>\n", payingUsers))
+	b.WriteString(fmt.Sprintf("├─ первые оплаты: <b>%d</b>\n", firstPayments))
+	b.WriteString(fmt.Sprintf("└─ продления: <b>%d</b>\n\n", renewals))
+
+	b.WriteString(fmt.Sprintf("💰 Выручка: <b>%s ₽</b>", formatRubAmount(rubTotal)))
 	if starsTotal > 0 {
 		b.WriteString(fmt.Sprintf("\nзвёздами: <b>%.0f ⭐</b>", starsTotal))
 	}
+	b.WriteString("\n\n")
+
+	b.WriteString("📈 Конверсия когорт:\n")
+	b.WriteString(formatCohortLine("D3", start.AddDate(0, 0, -3), d3Users, d3Paying))
+	b.WriteString("\n")
+	b.WriteString(formatCohortLine("D7", start.AddDate(0, 0, -7), d7Users, d7Paying))
+	b.WriteString("\n\n")
+
+	b.WriteString("📊 К среднему за 7 дней:\n")
+	b.WriteString(fmt.Sprintf("новые: %s\n", formatDeltaPercent(float64(newUsers), avgNewUsers)))
+	b.WriteString(fmt.Sprintf("выручка: %s\n", formatDeltaPercent(rubTotal, avgRub)))
+	b.WriteString(fmt.Sprintf("первые оплаты: %s", formatDeltaPercent(float64(firstPayments), avgFirstPayments)))
 	return b.String()
 }
 
@@ -1511,7 +1569,8 @@ func startDailyLogSummary(bot *tgbotapi.BotAPI) {
 			<-timer.C
 
 			start := nextMidnight.Add(-24 * time.Hour)
-			newUsers, payingUsers, rubTotal, starsTotal, err := userStore.GetDailyStats(start, nextMidnight)
+			reportEnd := nextMidnight
+			newUsers, channelSubs, payingUsers, firstPayments, rubTotal, starsTotal, err := userStore.GetDailyReportStats(start, reportEnd)
 			if err != nil {
 				log.Printf("daily stats error: %v", err)
 				if !testMode {
@@ -1523,7 +1582,29 @@ func startDailyLogSummary(bot *tgbotapi.BotAPI) {
 				continue
 			}
 
-			text := buildDailyStatsText(start, newUsers, payingUsers, rubTotal, starsTotal)
+			d3Users, d3Paying, err := userStore.GetCohortStats(start.AddDate(0, 0, -3), reportEnd)
+			if err != nil {
+				log.Printf("daily stats D3 cohort error: %v", err)
+				d3Users = 0
+				d3Paying = 0
+			}
+
+			d7Users, d7Paying, err := userStore.GetCohortStats(start.AddDate(0, 0, -7), reportEnd)
+			if err != nil {
+				log.Printf("daily stats D7 cohort error: %v", err)
+				d7Users = 0
+				d7Paying = 0
+			}
+
+			avgNewUsers, avgRub, avgFirstPayments, err := userStore.GetAverageStats(start, 7)
+			if err != nil {
+				log.Printf("daily stats average error: %v", err)
+				avgNewUsers = 0
+				avgRub = 0
+				avgFirstPayments = 0
+			}
+
+			text := buildDailyStatsText(start, newUsers, channelSubs, payingUsers, firstPayments, rubTotal, starsTotal, d3Users, d3Paying, d7Users, d7Paying, avgNewUsers, avgRub, avgFirstPayments)
 			if testMode {
 				log.Printf("[TEST MODE] daily stats: %s", text)
 				continue

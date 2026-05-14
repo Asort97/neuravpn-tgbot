@@ -604,6 +604,182 @@ func (s *Store) GetDailyStats(start, end time.Time) (int, int, float64, float64,
 	return newUsers, len(payingUsersSet), rubTotal, starsTotal, nil
 }
 
+func (s *Store) GetDailyReportStats(start, end time.Time) (int, int, int, int, float64, float64, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid stats range")
+	}
+
+	newUsers := 0
+	channelSubs := 0
+	payingUsersSet := make(map[string]bool)
+	firstPayments := 0
+	rubTotal := 0.0
+	starsTotal := 0.0
+
+	for userID, ud := range db {
+		if ts := strings.TrimSpace(ud.CreatedAt); ts != "" {
+			if createdAt, err := time.Parse(time.RFC3339, ts); err == nil {
+				if !createdAt.Before(start) && createdAt.Before(end) {
+					newUsers++
+				}
+			}
+		}
+
+		if strings.EqualFold(strings.TrimSpace(ud.StartBonusSource), "channel") {
+			if ts := strings.TrimSpace(ud.StartBonusClaimedAt); ts != "" {
+				if claimedAt, err := time.Parse(time.RFC3339, ts); err == nil {
+					if !claimedAt.Before(start) && claimedAt.Before(end) {
+						channelSubs++
+					}
+				}
+			}
+		}
+
+		var firstAt time.Time
+		for _, payment := range ud.AppliedPayments {
+			appliedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payment.AppliedAt))
+			if err != nil {
+				continue
+			}
+			if firstAt.IsZero() || appliedAt.Before(firstAt) {
+				firstAt = appliedAt
+			}
+			if appliedAt.Before(start) || !appliedAt.Before(end) {
+				continue
+			}
+			payingUsersSet[userID] = true
+			switch strings.ToUpper(strings.TrimSpace(payment.Currency)) {
+			case "XTR":
+				starsTotal += payment.Amount
+			default:
+				rubTotal += payment.Amount
+			}
+		}
+
+		if !firstAt.IsZero() && !firstAt.Before(start) && firstAt.Before(end) {
+			firstPayments++
+		}
+	}
+
+	return newUsers, channelSubs, len(payingUsersSet), firstPayments, rubTotal, starsTotal, nil
+}
+
+func (s *Store) GetCohortStats(cohortStart, reportEnd time.Time) (int, int, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if cohortStart.IsZero() || reportEnd.IsZero() || !reportEnd.After(cohortStart) {
+		return 0, 0, fmt.Errorf("invalid cohort range")
+	}
+	cohortEnd := cohortStart.Add(24 * time.Hour)
+
+	cohortUsers := 0
+	cohortPaying := 0
+
+	for _, ud := range db {
+		createdAtRaw := strings.TrimSpace(ud.CreatedAt)
+		if createdAtRaw == "" {
+			continue
+		}
+		createdAt, err := time.Parse(time.RFC3339, createdAtRaw)
+		if err != nil || createdAt.Before(cohortStart) || !createdAt.Before(cohortEnd) {
+			continue
+		}
+		cohortUsers++
+
+		paid := false
+		for _, payment := range ud.AppliedPayments {
+			appliedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payment.AppliedAt))
+			if err != nil {
+				continue
+			}
+			if appliedAt.Before(cohortStart) || !appliedAt.Before(reportEnd) {
+				continue
+			}
+			paid = true
+			break
+		}
+		if paid {
+			cohortPaying++
+		}
+	}
+
+	return cohortUsers, cohortPaying, nil
+}
+
+func (s *Store) GetAverageStats(end time.Time, days int) (float64, float64, float64, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if end.IsZero() || days <= 0 {
+		return 0, 0, 0, fmt.Errorf("invalid average range")
+	}
+
+	rangeStart := end.AddDate(0, 0, -days)
+	loc := rangeStart.Location()
+	dayIndex := make(map[string]int, days)
+	for i := 0; i < days; i++ {
+		dayStart := time.Date(rangeStart.Year(), rangeStart.Month(), rangeStart.Day()+i, 0, 0, 0, 0, loc)
+		dayIndex[dayStart.Format("2006-01-02")] = i
+	}
+
+	newUsers := make([]float64, days)
+	rubTotals := make([]float64, days)
+	firstPayments := make([]float64, days)
+
+	for _, ud := range db {
+		if ts := strings.TrimSpace(ud.CreatedAt); ts != "" {
+			if createdAt, err := time.Parse(time.RFC3339, ts); err == nil {
+				if idx, ok := dayIndex[createdAt.In(loc).Format("2006-01-02")]; ok {
+					newUsers[idx]++
+				}
+			}
+		}
+
+		var firstAt time.Time
+		for _, payment := range ud.AppliedPayments {
+			appliedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payment.AppliedAt))
+			if err != nil {
+				continue
+			}
+			if firstAt.IsZero() || appliedAt.Before(firstAt) {
+				firstAt = appliedAt
+			}
+			if idx, ok := dayIndex[appliedAt.In(loc).Format("2006-01-02")]; ok {
+				if strings.ToUpper(strings.TrimSpace(payment.Currency)) != "XTR" {
+					rubTotals[idx] += payment.Amount
+				}
+			}
+		}
+
+		if !firstAt.IsZero() {
+			if idx, ok := dayIndex[firstAt.In(loc).Format("2006-01-02")]; ok {
+				firstPayments[idx]++
+			}
+		}
+	}
+
+	avgNewUsers := 0.0
+	avgRub := 0.0
+	avgFirstPayments := 0.0
+	for i := 0; i < days; i++ {
+		avgNewUsers += newUsers[i]
+		avgRub += rubTotals[i]
+		avgFirstPayments += firstPayments[i]
+	}
+	avgNewUsers /= float64(days)
+	avgRub /= float64(days)
+	avgFirstPayments /= float64(days)
+
+	return avgNewUsers, avgRub, avgFirstPayments, nil
+}
+
 func (s *Store) SetLinkToken(userID, token string) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()

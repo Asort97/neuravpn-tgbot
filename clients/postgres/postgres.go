@@ -541,6 +541,111 @@ func (s *Store) GetDailyStats(start, end time.Time) (int, int, float64, float64,
 	return newUsers, payingUsers, rubTotal, starsTotal, nil
 }
 
+func (s *Store) GetDailyReportStats(start, end time.Time) (int, int, int, int, float64, float64, error) {
+	ctx := context.Background()
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid stats range")
+	}
+
+	var newUsers int
+	var channelSubs int
+	var payingUsers int
+	var firstPayments int
+	var rubTotal float64
+	var starsTotal float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM users WHERE created_at >= $1 AND created_at < $2),
+			(SELECT COUNT(*) FROM users WHERE start_bonus_source = 'channel' AND start_bonus_claimed_at >= $1 AND start_bonus_claimed_at < $2),
+			(SELECT COUNT(DISTINCT user_id) FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2),
+			(SELECT COUNT(*) FROM (
+				SELECT user_id, MIN(applied_at) AS first_at
+				FROM applied_payments
+				GROUP BY user_id
+			) t WHERE t.first_at >= $1 AND t.first_at < $2),
+			COALESCE((SELECT SUM(amount_value)::float8 FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'RUB'), 0),
+			COALESCE((SELECT SUM(amount_value)::float8 FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'XTR'), 0)
+	`, start.UTC(), end.UTC()).Scan(&newUsers, &channelSubs, &payingUsers, &firstPayments, &rubTotal, &starsTotal)
+	if err != nil {
+		return 0, 0, 0, 0, 0, 0, err
+	}
+	return newUsers, channelSubs, payingUsers, firstPayments, rubTotal, starsTotal, nil
+}
+
+func (s *Store) GetCohortStats(cohortStart, reportEnd time.Time) (int, int, error) {
+	ctx := context.Background()
+	if cohortStart.IsZero() || reportEnd.IsZero() || !reportEnd.After(cohortStart) {
+		return 0, 0, fmt.Errorf("invalid cohort range")
+	}
+	cohortEnd := cohortStart.Add(24 * time.Hour)
+
+	var cohortUsers int
+	var cohortPaying int
+	err := s.pool.QueryRow(ctx, `
+		WITH cohort AS (
+			SELECT id FROM users WHERE created_at >= $1 AND created_at < $2
+		), payers AS (
+			SELECT DISTINCT ap.user_id
+			FROM applied_payments ap
+			JOIN cohort c ON c.id = ap.user_id
+			WHERE ap.applied_at >= $1 AND ap.applied_at < $3
+		)
+		SELECT (SELECT COUNT(*) FROM cohort), (SELECT COUNT(*) FROM payers)
+	`, cohortStart.UTC(), cohortEnd.UTC(), reportEnd.UTC()).Scan(&cohortUsers, &cohortPaying)
+	if err != nil {
+		return 0, 0, err
+	}
+	return cohortUsers, cohortPaying, nil
+}
+
+func (s *Store) GetAverageStats(end time.Time, days int) (float64, float64, float64, error) {
+	ctx := context.Background()
+	if end.IsZero() || days <= 0 {
+		return 0, 0, 0, fmt.Errorf("invalid average range")
+	}
+	start := end.AddDate(0, 0, -days)
+
+	var avgNewUsers float64
+	var avgRub float64
+	var avgFirstPayments float64
+	err := s.pool.QueryRow(ctx, `
+		WITH day_series AS (
+			SELECT generate_series($1::timestamptz, $2::timestamptz - interval '1 day', interval '1 day') AS day_start
+		), daily_new AS (
+			SELECT date_trunc('day', created_at) AS day_start, COUNT(*)::float8 AS cnt
+			FROM users
+			WHERE created_at >= $1 AND created_at < $2
+			GROUP BY 1
+		), daily_rub AS (
+			SELECT date_trunc('day', applied_at) AS day_start, COALESCE(SUM(amount_value), 0)::float8 AS sum
+			FROM applied_payments
+			WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'RUB'
+			GROUP BY 1
+		), first_payments AS (
+			SELECT date_trunc('day', MIN(applied_at)) AS day_start
+			FROM applied_payments
+			GROUP BY user_id
+		), daily_first AS (
+			SELECT day_start, COUNT(*)::float8 AS cnt
+			FROM first_payments
+			WHERE day_start >= $1 AND day_start < $2
+			GROUP BY day_start
+		)
+		SELECT
+			COALESCE(AVG(COALESCE(n.cnt, 0)), 0),
+			COALESCE(AVG(COALESCE(r.sum, 0)), 0),
+			COALESCE(AVG(COALESCE(f.cnt, 0)), 0)
+		FROM day_series d
+		LEFT JOIN daily_new n ON n.day_start = d.day_start
+		LEFT JOIN daily_rub r ON r.day_start = d.day_start
+		LEFT JOIN daily_first f ON f.day_start = d.day_start
+	`, start.UTC(), end.UTC()).Scan(&avgNewUsers, &avgRub, &avgFirstPayments)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return avgNewUsers, avgRub, avgFirstPayments, nil
+}
+
 func (s *Store) SetLinkToken(userID, token string) error {
 	ctx := context.Background()
 	_ = s.ensureUser(ctx, userID)
