@@ -271,6 +271,7 @@ type DataStore interface {
 	SetLinkToken(userID, token string) error
 	GetUserByLinkToken(token string) (string, error)
 	ClearLinkToken(userID string) error
+	ConfirmWebLoginToken(token, userID string, at time.Time) (bool, error)
 	SetLinkedTo(userID, linkedTo string) error
 	GetLinkedTo(userID string) (string, error)
 	GetLinkedVKUsers(tgUserID string) ([]string, error)
@@ -4149,6 +4150,10 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	} else {
 		args = ""
 	}
+	if strings.HasPrefix(args, "web_login_") {
+		handleWebLoginStart(bot, msg, session, strings.TrimPrefix(args, "web_login_"))
+		return
+	}
 	referrerID := ""
 	if args != "" && strings.HasPrefix(args, "ref_") {
 		referrerID = strings.TrimPrefix(args, "ref_")
@@ -4201,6 +4206,49 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	if claimed, err := userStore.IsStartBonusClaimed(userID); err == nil && !claimed {
 		sendChannelBonusOffer(bot, chatID)
 	}
+}
+
+func handleWebLoginStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSession, token string) {
+	chatID := msg.Chat.ID
+	userID := strconv.FormatInt(msg.From.ID, 10)
+	token = strings.TrimSpace(token)
+	if token == "" {
+		sendWebLoginResult(bot, chatID, "Ссылка входа некорректная. Откройте личный кабинет и нажмите «войти через Telegram» ещё раз.")
+		return
+	}
+
+	if err := userStore.AcceptPrivacy(userID, time.Now()); err != nil {
+		log.Printf("web login ensure user failed: user=%s err=%v", userID, err)
+		sendWebLoginResult(bot, chatID, "Не удалось подготовить аккаунт для входа. Попробуйте ещё раз.")
+		return
+	}
+	ok, err := userStore.ConfirmWebLoginToken(token, userID, time.Now())
+	if err != nil {
+		log.Printf("web login confirm failed: user=%s err=%v", userID, err)
+		sendWebLoginResult(bot, chatID, "Не удалось подтвердить вход на сайте. Попробуйте ещё раз.")
+		return
+	}
+	if !ok {
+		sendWebLoginResult(bot, chatID, "Ссылка входа истекла или уже использована. Вернитесь на сайт и нажмите «войти через Telegram» ещё раз.")
+		return
+	}
+
+	session.State = stateMenu
+	logAction(bot, msg.From.ID, msg.From.UserName, "подтвердил вход на сайте", false)
+	sendWebLoginResult(bot, chatID, "Вход на сайте подтверждён. Вернитесь в личный кабинет.")
+}
+
+func sendWebLoginResult(bot *tgbotapi.BotAPI, chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("открыть личный кабинет", "https://neuravpn.ru/cabinet/"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("меню", "menu"),
+		),
+	)
+	_, _ = bot.Send(msg)
 }
 
 func handleAdLink(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {

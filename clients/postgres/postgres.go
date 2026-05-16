@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -115,6 +117,21 @@ CREATE TABLE IF NOT EXISTS users (
 		ALTER TABLE applied_payments
 			ADD COLUMN IF NOT EXISTS amount_value NUMERIC(12,2) NOT NULL DEFAULT 0,
 			ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'RUB';
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS web_login_tokens (
+			token_hash TEXT PRIMARY KEY,
+			user_id TEXT REFERENCES users(id),
+			expires_at TIMESTAMPTZ NOT NULL,
+			confirmed_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_web_login_tokens_expires_at ON web_login_tokens(expires_at);
+		DELETE FROM web_login_tokens WHERE expires_at < NOW() - INTERVAL '1 day';
 	`)
 	if err != nil {
 		return err
@@ -810,6 +827,28 @@ func (s *Store) ClearLinkToken(userID string) error {
 	ctx := context.Background()
 	_, err := s.pool.Exec(ctx, `UPDATE users SET link_token = NULL, updated_at = NOW() WHERE id = $1`, userID)
 	return err
+}
+
+func (s *Store) ConfirmWebLoginToken(token, userID string, at time.Time) (bool, error) {
+	ctx := context.Background()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if err := s.ensureUser(ctx, userID); err != nil {
+		return false, err
+	}
+	sum := sha256.Sum256([]byte(token))
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE web_login_tokens
+		SET user_id=$2, confirmed_at=$3
+		WHERE token_hash=$1
+			AND expires_at > NOW()
+			AND confirmed_at IS NULL`,
+		hex.EncodeToString(sum[:]), userID, at.UTC())
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func (s *Store) SetLinkedTo(userID, linkedTo string) error {

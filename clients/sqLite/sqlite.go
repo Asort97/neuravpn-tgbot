@@ -953,6 +953,12 @@ func (s *Store) ClearLinkToken(userID string) error {
 	return s.saveUsersLocked()
 }
 
+func (s *Store) ConfirmWebLoginToken(token, userID string, at time.Time) (bool, error) {
+	// Web login tokens are created by the Postgres-backed website API.
+	// JSON storage cannot confirm those tokens safely, so local JSON mode reports expired tokens.
+	return false, nil
+}
+
 func (s *Store) SetLinkedTo(userID, linkedTo string) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()
