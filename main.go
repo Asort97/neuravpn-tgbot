@@ -16,6 +16,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"mime"
 	"net/http"
 	"net/mail"
 	"net/smtp"
@@ -784,8 +785,8 @@ func sendVerificationEmail(to, code string) error {
 		auth = smtp.PlainAuth("", smtpUser, smtpPass, host)
 	}
 
-	subject := "Код подтверждения NeuraVPN"
-	body := fmt.Sprintf("Ваш код подтверждения: %s\n\nЕсли это были не вы, просто проигнорируйте письмо.\n\nПроверьте папку Спам, если письма нет во Входящих.", code)
+	subject := mime.QEncoding.Encode("UTF-8", "neuravpn код подтверждения email")
+	body := fmt.Sprintf("никому не сообщайте код подтверждения email!\nкод в neuravpn: %s\nОн действует 10 минут.\nПо вопросам поддержки пишите в телеграм -> https://t.me/neuravpn_support", code)
 	message := strings.Join([]string{
 		"From: " + from,
 		"To: " + to,
@@ -4001,9 +4002,6 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			return
 		}
 		_ = userStore.SetEmail(userID, addr.Address)
-		if verifiedEmail, _ := userStore.GetVerifiedEmail(userID); normalizeEmail(verifiedEmail) != normalizeEmail(addr.Address) {
-			_ = userStore.ClearVerifiedEmail(userID)
-		}
 		_ = userStore.ClearEmailVerification(userID)
 		_ = userStore.AcceptPrivacy(userID, time.Now())
 
@@ -4027,11 +4025,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			return
 		}
 		_ = userStore.SetEmail(userID, addr.Address)
-		if verifiedEmail, _ := userStore.GetVerifiedEmail(userID); normalizeEmail(verifiedEmail) != normalizeEmail(addr.Address) {
-			_ = userStore.ClearVerifiedEmail(userID)
-		}
 		_ = userStore.ClearEmailVerification(userID)
-		session.EmailVerifiedJustNow = true
 		handleStatus(bot, &tgbotapi.CallbackQuery{Message: msg}, session, xrCfg)
 		return
 	}
@@ -4108,6 +4102,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			return
 		}
 		_ = userStore.ClearEmailVerification(userID)
+		session.EmailVerifiedJustNow = true
 		handleStatus(bot, &tgbotapi.CallbackQuery{Message: msg}, session, xrCfg)
 		return
 	}
@@ -5402,9 +5397,6 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	if strings.TrimSpace(verifiedEmail) == "" {
 		verifiedEmail = "не подтверждена"
 	}
-	cleanEmail := normalizeEmail(email)
-	cleanVerified := normalizeEmail(verifiedEmail)
-	showConfirm := cleanEmail != "" && cleanEmail != cleanVerified
 	verifiedEmailEsc := html.EscapeString(verifiedEmail)
 	refCount := userStore.GetReferralsCount(userIDStr)
 	refBonus := refCount * referralBonusDays
@@ -5544,6 +5536,7 @@ func handleEmailMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *
 	if strings.TrimSpace(verifiedEmail) == "" {
 		verifiedEmail = "не подтверждена"
 	}
+	showConfirm := normalizeEmail(email) != "" && normalizeEmail(email) != normalizeEmail(verifiedEmail)
 
 	text := fmt.Sprintf(
 		"<tg-emoji emoji-id=\"5264870816671113060\">📧</tg-emoji> e-mail\n\n• для чеков: %s\n• подтверждённая почта: %s\n\nвыбери действие:",
@@ -5625,7 +5618,7 @@ func handleConfirmEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 	}
 
 	code := generateEmailCode()
-	expiresAt := time.Now().Add(15 * time.Minute)
+	expiresAt := time.Now().Add(10 * time.Minute)
 	if err := userStore.SetEmailVerification(userIDStr, normalized, code, expiresAt); err != nil {
 		log.Printf("set email verification error: %v", err)
 		ackCallback(bot, cq, "ошибка подготовки кода")
