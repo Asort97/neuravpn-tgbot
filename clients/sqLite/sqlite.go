@@ -328,6 +328,22 @@ func (s *Store) SetVerifiedEmail(userID, email string, at time.Time) error {
 	return s.saveUsersLocked()
 }
 
+func (s *Store) ClearVerifiedEmail(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return nil
+	}
+	ud.VerifiedEmail = ""
+	ud.VerifiedEmailAt = ""
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
 func (s *Store) SetEmailVerification(userID, email, code string, expiresAt time.Time) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()

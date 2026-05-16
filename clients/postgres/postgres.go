@@ -257,6 +257,18 @@ func (s *Store) SetVerifiedEmail(userID, email string, at time.Time) error {
 	return err
 }
 
+func (s *Store) ClearVerifiedEmail(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET verified_email = NULL,
+			verified_email_at = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID)
+	return err
+}
+
 func (s *Store) SetEmailVerification(userID, email, code string, expiresAt time.Time) error {
 	ctx := context.Background()
 	email = strings.TrimSpace(email)
