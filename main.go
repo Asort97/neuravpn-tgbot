@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/hmac"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/mail"
+	"net/smtp"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -136,6 +138,7 @@ const (
 	stateInstructions SessionState = "instructions"
 	stateCollectEmail SessionState = "collect_email"
 	stateEditEmail    SessionState = "edit_email"
+	stateVerifyEmail  SessionState = "verify_email"
 	stateEnterPromo   SessionState = "enter_promo"
 )
 
@@ -246,6 +249,12 @@ type DataStore interface {
 	SetDays(userID string, days int64) error
 	GetEmail(userID string) (string, error)
 	SetEmail(userID, email string) error
+	GetVerifiedEmail(userID string) (string, error)
+	SetVerifiedEmail(userID, email string, at time.Time) error
+	SetEmailVerification(userID, email, code string, expiresAt time.Time) error
+	GetEmailVerification(userID string) (string, string, time.Time, error)
+	ClearEmailVerification(userID string) error
+	IsVerifiedEmailInUse(email, excludeUserID string) (bool, error)
 	EnsureSubscriptionID(userID string) (string, error)
 	GetSubscriptionID(userID string) (string, error)
 	AcceptPrivacy(userID string, at time.Time) error
@@ -361,6 +370,11 @@ var (
 	logChatID              int64 = -1003334019708
 	userSessions                 = make(map[int64]*UserSession)
 	testMode               bool
+	smtpHost               string
+	smtpPort               string
+	smtpUser               string
+	smtpPass               string
+	smtpFrom               string
 	mergedSubSecret        string
 	mergedSubPublicBaseURL string
 )
@@ -731,6 +745,56 @@ func fallbackEmail(userID string) string {
 		return email
 	}
 	return fmt.Sprintf("%s@happycat", userID)
+}
+
+func normalizeEmail(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func generateEmailCode() string {
+	const digits = "0123456789"
+	const length = 6
+	b := make([]byte, length)
+	if _, err := crand.Read(b); err == nil {
+		for i := 0; i < length; i++ {
+			b[i] = digits[int(b[i])%len(digits)]
+		}
+		return string(b)
+	}
+	var fallback strings.Builder
+	for i := 0; i < length; i++ {
+		fallback.WriteByte(digits[rand.Intn(len(digits))])
+	}
+	return fallback.String()
+}
+
+func sendVerificationEmail(to, code string) error {
+	host := strings.TrimSpace(smtpHost)
+	port := strings.TrimSpace(smtpPort)
+	from := strings.TrimSpace(smtpFrom)
+	if host == "" || port == "" || from == "" {
+		return fmt.Errorf("smtp not configured")
+	}
+
+	addr := fmt.Sprintf("%s:%s", host, port)
+	var auth smtp.Auth
+	if strings.TrimSpace(smtpUser) != "" || strings.TrimSpace(smtpPass) != "" {
+		auth = smtp.PlainAuth("", smtpUser, smtpPass, host)
+	}
+
+	subject := "Код подтверждения NeuraVPN"
+	body := fmt.Sprintf("Ваш код подтверждения: %s\n\nЕсли это были не вы, просто проигнорируйте письмо.\n\nПроверьте папку Спам, если письма нет во Входящих.", code)
+	message := strings.Join([]string{
+		"From: " + from,
+		"To: " + to,
+		"Subject: " + subject,
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		body,
+	}, "\r\n")
+
+	return smtp.SendMail(addr, auth, from, []string{to}, []byte(message))
 }
 
 func formatExpiryUTC(t time.Time) string {
@@ -2042,6 +2106,12 @@ func main() {
 	if testMode {
 		log.Println("🧪 TEST MODE ENABLED - using mock data")
 	}
+
+	smtpHost = strings.TrimSpace(os.Getenv("SMTP_HOST"))
+	smtpPort = strings.TrimSpace(os.Getenv("SMTP_PORT"))
+	smtpUser = strings.TrimSpace(os.Getenv("SMTP_USER"))
+	smtpPass = os.Getenv("SMTP_PASS")
+	smtpFrom = strings.TrimSpace(os.Getenv("SMTP_FROM"))
 
 	// Optional: override channel settings without code changes
 	if v := strings.TrimSpace(os.Getenv("CHANNEL_USERNAME")); v != "" {
@@ -3929,6 +3999,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			return
 		}
 		_ = userStore.SetEmail(userID, addr.Address)
+		_ = userStore.ClearEmailVerification(userID)
 		_ = userStore.AcceptPrivacy(userID, time.Now())
 
 		plan, ok := ratePlanByID[session.PendingPlanID]
@@ -3951,6 +4022,83 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			return
 		}
 		_ = userStore.SetEmail(userID, addr.Address)
+		_ = userStore.ClearEmailVerification(userID)
+		handleStatus(bot, &tgbotapi.CallbackQuery{Message: msg}, session, xrCfg)
+		return
+	}
+
+	if session.State == stateVerifyEmail {
+		userID := strconv.FormatInt(msg.From.ID, 10)
+		code := strings.TrimSpace(msg.Text)
+		if code == "" {
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateVerifyEmail, "введи код из письма", "HTML", kbRaw)
+			return
+		}
+
+		verifyEmail, verifyCode, verifyExpires, err := userStore.GetEmailVerification(userID)
+		if err != nil {
+			log.Printf("get email verification error: %v", err)
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateVerifyEmail, "ошибка проверки кода", "HTML", kbRaw)
+			return
+		}
+		if strings.TrimSpace(verifyEmail) == "" || strings.TrimSpace(verifyCode) == "" || verifyExpires.IsZero() {
+			text := "код не найден. запроси подтверждение заново."
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("подтвердить почту", "confirm_email", "", "5264948349420739524")},
+				{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+			return
+		}
+		if time.Now().After(verifyExpires) {
+			_ = userStore.ClearEmailVerification(userID)
+			text := "код истёк. запроси новый."
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("подтвердить почту", "confirm_email", "", "5264948349420739524")},
+				{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+			return
+		}
+		if strings.TrimSpace(code) != strings.TrimSpace(verifyCode) {
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateVerifyEmail, "неверный код, попробуй ещё раз", "HTML", kbRaw)
+			return
+		}
+
+		if inUse, err := userStore.IsVerifiedEmailInUse(verifyEmail, userID); err != nil {
+			log.Printf("verified email check error: %v", err)
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateVerifyEmail, "ошибка проверки почты", "HTML", kbRaw)
+			return
+		} else if inUse {
+			text := "⚠️ эта почта уже подтверждена другим пользователем."
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+			return
+		}
+
+		if err := userStore.SetVerifiedEmail(userID, verifyEmail, time.Now()); err != nil {
+			log.Printf("set verified email error: %v", err)
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateVerifyEmail, "не удалось подтвердить почту", "HTML", kbRaw)
+			return
+		}
+		_ = userStore.ClearEmailVerification(userID)
 		handleStatus(bot, &tgbotapi.CallbackQuery{Message: msg}, session, xrCfg)
 		return
 	}
@@ -4213,8 +4361,12 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		handleReferral(bot, cq, session)
 	case data == "nav_support":
 		handleSupport(bot, cq, session)
+	case data == "email_menu":
+		handleEmailMenu(bot, cq, session)
 	case data == "edit_email":
 		handleEditEmail(bot, cq, session)
+	case data == "confirm_email":
+		handleConfirmEmail(bot, cq, session)
 	case data == "link_vk":
 		handleLinkVK(bot, cq, session)
 		return
@@ -5237,12 +5389,17 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		email = "не указан"
 	}
 	emailEsc := html.EscapeString(email)
+	verifiedEmail, _ := userStore.GetVerifiedEmail(userIDStr)
+	if strings.TrimSpace(verifiedEmail) == "" {
+		verifiedEmail = "не подтверждена"
+	}
+	verifiedEmailEsc := html.EscapeString(verifiedEmail)
 	refCount := userStore.GetReferralsCount(userIDStr)
 	refBonus := refCount * referralBonusDays
 
 	header := fmt.Sprintf(
-		"<tg-emoji emoji-id=\"5343693752999383705\">👤</tg-emoji> профиль\n• id: <code>%d</code>\n• mail: %s\n• рефералы: %d (дней: %d)",
-		userID, emailEsc, refCount, refBonus,
+		"<tg-emoji emoji-id=\"5343693752999383705\">👤</tg-emoji> профиль\n• id: <code>%d</code>\n• mail для чеков: %s\n• подтверждённая почта: %s\n• рефералы: %d (дней: %d)",
+		userID, emailEsc, verifiedEmailEsc, refCount, refBonus,
 	)
 
 	// Show linked VK account if any
@@ -5283,7 +5440,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
-			{rawCallbackButton("e-mail", "edit_email", "", "5264870816671113060")},
+			{rawCallbackButton("e-mail", "email_menu", "", "5264870816671113060")},
 		},
 	}
 	if len(linkedVK) == 0 {
@@ -5314,7 +5471,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	kbRows := [][]tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("💰 оплата", "nav_topup")),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("✏️ e-mail", "edit_email")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("e-mail", "email_menu")),
 	}
 	if len(linkedVK) == 0 {
 		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔗 связать с ВК", "link_vk")))
@@ -5359,9 +5516,114 @@ func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	return fmt.Sprintf("💳 <b>подписка</b>\n<b>├ %s статус:</b> %s\n<b>├ ⏱ остаток:</b> %d дн.\n<b>└ 📅 действует до:</b> %s%s", statusEmoji, statusText, days, exp, linkLine), nil
 }
 
+func handleEmailMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
+	chatID := cq.Message.Chat.ID
+	userIDStr := strconv.FormatInt(cq.From.ID, 10)
+
+	email, _ := userStore.GetEmail(userIDStr)
+	if strings.TrimSpace(email) == "" {
+		email = "не указан"
+	}
+	verifiedEmail, _ := userStore.GetVerifiedEmail(userIDStr)
+	if strings.TrimSpace(verifiedEmail) == "" {
+		verifiedEmail = "не подтверждена"
+	}
+
+	text := fmt.Sprintf(
+		"<tg-emoji emoji-id=\"5264870816671113060\">📧</tg-emoji> e-mail\n\n• для чеков: %s\n• подтверждённая почта: %s\n\nвыбери действие:",
+		html.EscapeString(email), html.EscapeString(verifiedEmail),
+	)
+
+	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton("изменить почту", "edit_email", "", "5264870816671113060")},
+		{rawCallbackButton("подтвердить почту", "confirm_email", "", "5264948349420739524")},
+		{rawCallbackButton("назад", "nav_status", "", "5264852846527941278")},
+	}}
+	_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+	ackCallback(bot, cq, "")
+}
+
+func handleConfirmEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
+	chatID := cq.Message.Chat.ID
+	userID := int64(cq.From.ID)
+	userIDStr := strconv.FormatInt(userID, 10)
+
+	if !canProceedKey(userID, "email_verify_send", 1*time.Minute) {
+		ackCallback(bot, cq, "подожди минуту перед повторной отправкой")
+		return
+	}
+
+	email, _ := userStore.GetEmail(userIDStr)
+	if strings.TrimSpace(email) == "" {
+		text := "📧 сначала укажи e-mail для чеков."
+		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("изменить почту", "edit_email", "", "5264870816671113060")},
+			{rawCallbackButton("назад", "nav_status", "", "5264852846527941278")},
+		}}
+		_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+		ackCallback(bot, cq, "укажи e-mail")
+		return
+	}
+
+	normalized := normalizeEmail(email)
+	verifiedEmail, _ := userStore.GetVerifiedEmail(userIDStr)
+	if strings.EqualFold(strings.TrimSpace(verifiedEmail), normalized) {
+		text := "✅ почта уже подтверждена."
+		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+		}}
+		_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+		ackCallback(bot, cq, "уже подтверждена")
+		return
+	}
+
+	if inUse, err := userStore.IsVerifiedEmailInUse(normalized, userIDStr); err != nil {
+		log.Printf("verified email check error: %v", err)
+		ackCallback(bot, cq, "ошибка проверки")
+		return
+	} else if inUse {
+		text := "⚠️ эта почта уже подтверждена другим пользователем."
+		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+		}}
+		_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+		ackCallback(bot, cq, "почта занята")
+		return
+	}
+
+	code := generateEmailCode()
+	expiresAt := time.Now().Add(15 * time.Minute)
+	if err := userStore.SetEmailVerification(userIDStr, normalized, code, expiresAt); err != nil {
+		log.Printf("set email verification error: %v", err)
+		ackCallback(bot, cq, "ошибка подготовки кода")
+		return
+	}
+
+	if testMode {
+		log.Printf("[TEST MODE] email verify user=%s email=%s code=%s", userIDStr, normalized, code)
+	} else if err := sendVerificationEmail(email, code); err != nil {
+		log.Printf("send verification email error: %v", err)
+		_ = userStore.ClearEmailVerification(userIDStr)
+		text := "⚠️ не удалось отправить код. попробуй позже."
+		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+		}}
+		_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+		ackCallback(bot, cq, "не удалось отправить")
+		return
+	}
+
+	text := fmt.Sprintf("📧 код отправлен на <b>%s</b>.\n\nвведите код из письма.\nесли письма нет — проверь папку спам.", html.EscapeString(email))
+	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton("назад", "email_menu", "", "5264852846527941278")},
+	}}
+	_ = updateSessionTextRaw(bot, chatID, session, stateVerifyEmail, text, "HTML", kbRaw)
+	ackCallback(bot, cq, "код отправлен")
+}
+
 func handleEditEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	text := "<tg-emoji emoji-id=\"5264870816671113060\">✏️</tg-emoji> отправь новый e-mail сообщением."
+	text := "<tg-emoji emoji-id=\"5264870816671113060\">✏️</tg-emoji> отправь новый e-mail для чеков сообщением."
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("назад", "nav_status"),
@@ -5786,7 +6048,9 @@ func getActionName(data string) string {
 		"nav_referral":     "🎁 +15 дней",
 		"nav_support":      "📞 поддержка",
 		"nav_instructions": "🛠 инструкции",
+		"email_menu":       "📧 e-mail",
 		"edit_email":       "✍️ e-mail",
+		"confirm_email":    "✅ подтвердить e-mail",
 		"windows":          "инструкция Windows",
 		"android":          "инструкция Android",
 		"ios":              "инструкция iOS",

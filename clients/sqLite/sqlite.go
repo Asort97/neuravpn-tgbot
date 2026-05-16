@@ -28,6 +28,11 @@ type UserData struct {
 	ReferralConfirmedAt string                        `json:"referral_confirmed_at"`
 	ReferrerRewardGiven bool                          `json:"referrer_reward_given"`
 	Email               string                        `json:"email"`
+	VerifiedEmail       string                        `json:"verified_email"`
+	VerifiedEmailAt     string                        `json:"verified_email_at"`
+	VerifyEmail         string                        `json:"verify_email"`
+	VerifyCode          string                        `json:"verify_code"`
+	VerifyExpires       string                        `json:"verify_expires"`
 	SubscriptionID      string                        `json:"subscription_id"`
 	StartBonusClaimed   bool                          `json:"start_bonus_claimed"`
 	StartBonusSource    string                        `json:"start_bonus_source"`
@@ -283,6 +288,126 @@ func (s *Store) GetEmail(userID string) (string, error) {
 		return "", fmt.Errorf("user %s not found", userID)
 	}
 	return ud.Email, nil
+}
+
+func (s *Store) GetVerifiedEmail(userID string) (string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return "", nil
+	}
+	return ud.VerifiedEmail, nil
+}
+
+func (s *Store) SetVerifiedEmail(userID, email string, at time.Time) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("email is empty")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	ud := db[userID]
+	ensureCreatedAt(&ud)
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.VerifiedEmail = email
+	ud.VerifiedEmailAt = at.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) SetEmailVerification(userID, email, code string, expiresAt time.Time) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	email = strings.TrimSpace(email)
+	code = strings.TrimSpace(code)
+	if email == "" || code == "" {
+		return fmt.Errorf("verification data is empty")
+	}
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(15 * time.Minute)
+	}
+
+	ud := db[userID]
+	ensureCreatedAt(&ud)
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.VerifyEmail = email
+	ud.VerifyCode = code
+	ud.VerifyExpires = expiresAt.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) GetEmailVerification(userID string) (string, string, time.Time, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return "", "", time.Time{}, nil
+	}
+	var expires time.Time
+	if ts := strings.TrimSpace(ud.VerifyExpires); ts != "" {
+		exp, err := time.Parse(time.RFC3339, ts)
+		if err == nil {
+			expires = exp
+		}
+	}
+	return ud.VerifyEmail, ud.VerifyCode, expires, nil
+}
+
+func (s *Store) ClearEmailVerification(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud := db[userID]
+	ud.VerifyEmail = ""
+	ud.VerifyCode = ""
+	ud.VerifyExpires = ""
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) IsVerifiedEmailInUse(email, excludeUserID string) (bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return false, nil
+	}
+	for id, ud := range db {
+		if excludeUserID != "" && id == excludeUserID {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(ud.VerifiedEmail)) == email {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // EnsureSubscriptionID returns existing subscription_id or creates UUIDv4 and stores it.

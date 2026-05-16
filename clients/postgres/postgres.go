@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS users (
 	referral_confirmed_at TIMESTAMPTZ,
 	referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE,
     email TEXT,
+	verified_email TEXT,
+	verified_email_at TIMESTAMPTZ,
+	verify_email TEXT,
+	verify_code TEXT,
+	verify_expires TIMESTAMPTZ,
 	subscription_id TEXT,
 	start_bonus_claimed BOOLEAN NOT NULL DEFAULT FALSE,
 	start_bonus_source TEXT,
@@ -65,11 +70,25 @@ CREATE TABLE IF NOT EXISTS users (
 			ADD COLUMN IF NOT EXISTS referral_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
 			ADD COLUMN IF NOT EXISTS referral_confirmed_at TIMESTAMPTZ,
 			ADD COLUMN IF NOT EXISTS referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE,
+			ADD COLUMN IF NOT EXISTS verified_email TEXT,
+			ADD COLUMN IF NOT EXISTS verified_email_at TIMESTAMPTZ,
+			ADD COLUMN IF NOT EXISTS verify_email TEXT,
+			ADD COLUMN IF NOT EXISTS verify_code TEXT,
+			ADD COLUMN IF NOT EXISTS verify_expires TIMESTAMPTZ,
 			ADD COLUMN IF NOT EXISTS link_token TEXT,
 			ADD COLUMN IF NOT EXISTS linked_to TEXT,
 			ADD COLUMN IF NOT EXISTS autopay_method_id TEXT,
 			ADD COLUMN IF NOT EXISTS autopay_plan_id TEXT,
 			ADD COLUMN IF NOT EXISTS autopay_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_users_verified_email
+			ON users (LOWER(verified_email))
+			WHERE verified_email IS NOT NULL AND verified_email <> '';
 	`)
 	if err != nil {
 		return err
@@ -202,6 +221,118 @@ func (s *Store) GetEmail(userID string) (string, error) {
 		return "", err
 	}
 	return email, nil
+}
+
+func (s *Store) GetVerifiedEmail(userID string) (string, error) {
+	ctx := context.Background()
+	var email string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(verified_email, '') FROM users WHERE id = $1`, userID).Scan(&email)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	return email, nil
+}
+
+func (s *Store) SetVerifiedEmail(userID, email string, at time.Time) error {
+	ctx := context.Background()
+	if strings.TrimSpace(email) == "" {
+		return fmt.Errorf("email is empty")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if err := s.ensureUser(ctx, userID); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET verified_email = $2,
+			verified_email_at = $3,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID, strings.TrimSpace(email), at.UTC())
+	return err
+}
+
+func (s *Store) SetEmailVerification(userID, email, code string, expiresAt time.Time) error {
+	ctx := context.Background()
+	email = strings.TrimSpace(email)
+	code = strings.TrimSpace(code)
+	if email == "" || code == "" {
+		return fmt.Errorf("verification data is empty")
+	}
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(15 * time.Minute)
+	}
+	if err := s.ensureUser(ctx, userID); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET verify_email = $2,
+			verify_code = $3,
+			verify_expires = $4,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID, email, code, expiresAt.UTC())
+	return err
+}
+
+func (s *Store) GetEmailVerification(userID string) (string, string, time.Time, error) {
+	ctx := context.Background()
+	var email string
+	var code string
+	var expires *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(verify_email, ''), COALESCE(verify_code, ''), verify_expires
+		FROM users WHERE id = $1
+	`, userID).Scan(&email, &code, &expires)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", "", time.Time{}, nil
+		}
+		return "", "", time.Time{}, err
+	}
+	if expires == nil {
+		return email, code, time.Time{}, nil
+	}
+	return email, code, *expires, nil
+}
+
+func (s *Store) ClearEmailVerification(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET verify_email = NULL,
+			verify_code = NULL,
+			verify_expires = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID)
+	return err
+}
+
+func (s *Store) IsVerifiedEmailInUse(email, excludeUserID string) (bool, error) {
+	ctx := context.Background()
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return false, nil
+	}
+
+	var exists bool
+	query := `SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(verified_email) = LOWER($1))`
+	args := []interface{}{email}
+	if strings.TrimSpace(excludeUserID) != "" {
+		query = `SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(verified_email) = LOWER($1) AND id <> $2)`
+		args = append(args, excludeUserID)
+	}
+	if err := s.pool.QueryRow(ctx, query, args...).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // EnsureSubscriptionID returns existing subscription_id or creates a new UUIDv4 and stores it.
