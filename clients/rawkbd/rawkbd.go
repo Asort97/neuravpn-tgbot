@@ -7,6 +7,11 @@ type Button struct {
 	URL               *string `json:"url,omitempty"`
 	Style             string  `json:"style,omitempty"`
 	IconCustomEmojiID string  `json:"icon_custom_emoji_id,omitempty"`
+	WebApp            *WebApp `json:"web_app,omitempty"`
+}
+
+type WebApp struct {
+	URL string `json:"url"`
 }
 
 // Markup is a raw Telegram inline keyboard payload.
@@ -31,6 +36,14 @@ func URLButton(text, url, iconCustomEmojiID string) Button {
 	return Button{
 		Text:              text,
 		URL:               &u,
+		IconCustomEmojiID: iconCustomEmojiID,
+	}
+}
+
+func WebAppButton(text, url, iconCustomEmojiID string) Button {
+	return Button{
+		Text:              text,
+		WebApp:            &WebApp{URL: url},
 		IconCustomEmojiID: iconCustomEmojiID,
 	}
 }

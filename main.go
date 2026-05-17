@@ -1329,6 +1329,18 @@ func rawURLButton(text, url, iconCustomEmojiID string) rawInlineKeyboardButton {
 	return rawkbd.URLButton(text, url, iconCustomEmojiID)
 }
 
+func rawWebAppButton(text, url, iconCustomEmojiID string) rawInlineKeyboardButton {
+	return rawkbd.WebAppButton(text, url, iconCustomEmojiID)
+}
+
+func miniAppURL() string {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("WEB_PUBLIC_BASE_URL")), "/")
+	if base == "" || strings.HasPrefix(base, "http://") {
+		base = "https://neuravpn.ru"
+	}
+	return base + "/cabinet/?mini_app=1"
+}
+
 func parseLeadingSlashCommand(text string) (string, string) {
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, "/") {
@@ -1828,6 +1840,9 @@ func mainMenuInlineKeyboardRaw() rawInlineKeyboardMarkup {
 			{
 				rawCallbackButton("+15 дней", "nav_referral", "", "5345823764720426390"),
 				rawCallbackButton("поддержка", "nav_support", "", "5346123042336573193"),
+			},
+			{
+				rawWebAppButton("личный кабинет", miniAppURL(), "5343693752999383705"),
 			},
 		},
 	}
