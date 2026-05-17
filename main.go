@@ -4213,36 +4213,40 @@ func handleWebLoginStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *U
 	userID := strconv.FormatInt(msg.From.ID, 10)
 	token = strings.TrimSpace(token)
 	if token == "" {
-		sendWebLoginResult(bot, chatID, "Ссылка входа некорректная. Откройте личный кабинет и нажмите «войти через Telegram» ещё раз.")
+		sendWebLoginResult(bot, chatID, "Ссылка входа некорректная. Откройте личный кабинет и нажмите «войти через Telegram» ещё раз.", "")
 		return
 	}
 
 	if err := userStore.AcceptPrivacy(userID, time.Now()); err != nil {
 		log.Printf("web login ensure user failed: user=%s err=%v", userID, err)
-		sendWebLoginResult(bot, chatID, "Не удалось подготовить аккаунт для входа. Попробуйте ещё раз.")
+		sendWebLoginResult(bot, chatID, "Не удалось подготовить аккаунт для входа. Попробуйте ещё раз.", "")
 		return
 	}
 	ok, err := userStore.ConfirmWebLoginToken(token, userID, time.Now())
 	if err != nil {
 		log.Printf("web login confirm failed: user=%s err=%v", userID, err)
-		sendWebLoginResult(bot, chatID, "Не удалось подтвердить вход на сайте. Попробуйте ещё раз.")
+		sendWebLoginResult(bot, chatID, "Не удалось подтвердить вход на сайте. Попробуйте ещё раз.", "")
 		return
 	}
 	if !ok {
-		sendWebLoginResult(bot, chatID, "Ссылка входа истекла или уже использована. Вернитесь на сайт и нажмите «войти через Telegram» ещё раз.")
+		sendWebLoginResult(bot, chatID, "Ссылка входа истекла или уже использована. Вернитесь на сайт и нажмите «войти через Telegram» ещё раз.", "")
 		return
 	}
 
 	session.State = stateMenu
 	logAction(bot, msg.From.ID, msg.From.UserName, "подтвердил вход на сайте", false)
-	sendWebLoginResult(bot, chatID, "Вход на сайте подтверждён. Вернитесь в личный кабинет.")
+	cabinetURL := "https://neuravpn.ru/cabinet/?telegram_login=" + url.QueryEscape(token)
+	sendWebLoginResult(bot, chatID, "Вход на сайте подтверждён. Вернитесь в личный кабинет.", cabinetURL)
 }
 
-func sendWebLoginResult(bot *tgbotapi.BotAPI, chatID int64, text string) {
+func sendWebLoginResult(bot *tgbotapi.BotAPI, chatID int64, text, cabinetURL string) {
+	if cabinetURL == "" {
+		cabinetURL = "https://neuravpn.ru/cabinet/"
+	}
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("открыть личный кабинет", "https://neuravpn.ru/cabinet/"),
+			tgbotapi.NewInlineKeyboardButtonURL("открыть личный кабинет", cabinetURL),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("меню", "menu"),
