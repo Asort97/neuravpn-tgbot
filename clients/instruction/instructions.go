@@ -223,7 +223,7 @@ func instructionURLButton(bot *tgbotapi.BotAPI, text, url, iconID, fallbackEmoji
 }
 
 func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, error) {
-	downloadURL := "https://asort97.github.io/neuravpn-site"
+	downloadURL := "https://neuravpn.ru/"
 	keyStep := 3
 
 	steps := []struct {
@@ -272,7 +272,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 
 	if step == keyStep {
 		if key := strings.TrimSpace(instructionKeys[chatID]); key != "" {
-			autoURL := "https://asort97.github.io/neuravpn-site/?open=1&auto=1&v=" + url.QueryEscape(key)
+			autoURL := "https://neuravpn.ru/?open=1&auto=1&v=" + url.QueryEscape(key)
 			rows = append(rows, []rawkbd.Button{
 				instructionURLButton(bot, "авто-подключение", autoURL, instructionIconAutoID, "🔗"),
 			})
