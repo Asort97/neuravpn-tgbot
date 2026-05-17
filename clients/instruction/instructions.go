@@ -230,7 +230,7 @@ func InstructionWindows(chatID int64, bot *tgbotapi.BotAPI, step int) (int, erro
 		photoPath string
 		caption   string
 	}{
-		{"InstructionPhotos/Windows/neuravpn_app/0.png", `скачайте последнюю версию neuravpn c <a href="https://asort97.github.io/neuravpn-site/">сайта</a>, нажав кнопку «скачать для windows»`},
+		{"InstructionPhotos/Windows/neuravpn_app/0.png", `скачайте последнюю версию neuravpn c <a href="https://neuravpn.ru/">сайта</a>, нажав кнопку «скачать для windows»`},
 		{"", "после завершения загрузки выполните следующие действия:\n\n1) найдите загруженный файл <code>neuravpn_windows_vX.X.X</code>.\n2) щелкните правой кнопкой мыши на файле и выберите «извлечь все»."},
 		{"", "откройте папку с распакованными файлами. найдите файл <code>neuravpn.exe</code>. щелкните по нему правой кнопкой мыши и запустите от имени администратора."},
 		{"InstructionPhotos/Windows/0.mp4", "предварительно скопировав ключ доступа, в программе нажмите на кнопку «вставить из буфера» или просто нажмите на кнопку ниже «авто-подключение»"},
