@@ -61,7 +61,7 @@ const startText = `<tg-emoji emoji-id="5346299917679757635">👋</tg-emoji> до
 
 <a href="https://t.me/neuravpn">наш новостной канал</a>
 
-чтобы не потерять доступ <a href="https://neuravpn.ru/cabinet/">сайт с личным кабинетом</a>`
+<a href="https://neuravpn.ru/cabinet/">сайт с личным кабинетом</a>`
 
 // Runtime-overridable channel settings (safer than hardcoded constants for production)
 var (
