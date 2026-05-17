@@ -4251,7 +4251,6 @@ func handleWebLoginStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *U
 	}
 
 	session.State = stateMenu
-	logAction(bot, msg.From.ID, msg.From.UserName, "подтвердил вход на сайте", false)
 	cabinetURL := "https://neuravpn.ru/cabinet/?telegram_login=" + url.QueryEscape(token)
 	sendWebLoginResult(bot, chatID, "вход на сайте подтверждён. вернитесь в личный кабинет.", cabinetURL)
 }
