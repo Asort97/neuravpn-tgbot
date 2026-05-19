@@ -2806,45 +2806,54 @@ func updateMergedTrafficLimitForUser(cfg *xraySettings, userID, subID string, re
 	var lastErr error
 
 	for _, inboundID := range inboundIDs {
-		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
+		clients, lookupErr := cfg.client.GetInboundById(inboundID)
 		if lookupErr != nil {
 			failed++
 			lastErr = lookupErr
 			continue
 		}
-		if existing == nil && strings.TrimSpace(subID) != "" {
-			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, subID)
-			if lookupErr != nil {
-				failed++
-				lastErr = lookupErr
+		for _, client := range clients {
+			if !mergedClientMatchesUser(client, userID, subID) {
 				continue
 			}
-		}
-		if existing == nil {
-			continue
-		}
-		existing.TotalGB = limitBytes
-		existing.Reset = 0
-		if err := cfg.client.UpdateClient(inboundID, *existing); err != nil {
-			failed++
-			lastErr = err
-			continue
-		}
-		if resetTraffic && strings.TrimSpace(existing.Email) != "" {
-			if err := cfg.client.ResetClientTraffic(inboundID, existing.Email); err != nil {
+			client.TotalGB = limitBytes
+			client.Reset = 0
+			if err := cfg.client.UpdateClient(inboundID, client); err != nil {
 				failed++
 				lastErr = err
 				continue
 			}
+			if resetTraffic && strings.TrimSpace(client.Email) != "" {
+				if err := cfg.client.ResetClientTraffic(inboundID, client.Email); err != nil {
+					failed++
+					lastErr = err
+					continue
+				}
+			}
+			updated++
+			time.Sleep(20 * time.Millisecond)
 		}
-		updated++
-		time.Sleep(20 * time.Millisecond)
 	}
 
 	if updated == 0 && lastErr != nil {
 		return updated, failed, lastErr
 	}
 	return updated, failed, nil
+}
+
+func mergedClientMatchesUser(client xray.Client, userID, subID string) bool {
+	userID = strings.TrimSpace(userID)
+	subID = strings.TrimSpace(subID)
+	if userID != "" && strings.TrimSpace(client.TgID) == userID {
+		return true
+	}
+	if userID != "" {
+		comment := strings.TrimSpace(client.Comment)
+		if strings.HasPrefix(comment, "tg:") && strings.TrimSpace(strings.TrimPrefix(comment, "tg:")) == userID {
+			return true
+		}
+	}
+	return subID != "" && strings.TrimSpace(client.SubID) == subID
 }
 
 type mergedTrafficStatus struct {
