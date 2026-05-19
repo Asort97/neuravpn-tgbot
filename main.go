@@ -2018,7 +2018,7 @@ func trafficPackKeyboardRaw() rawInlineKeyboardMarkup {
 	var rows [][]rawInlineKeyboardButton
 	for _, p := range trafficPacks {
 		rows = append(rows, []rawInlineKeyboardButton{
-			rawCallbackButton(fmt.Sprintf("%s — %.0f ₽", p.Title, p.Amount), "traffic_pack_"+p.ID, "", "5346325906526868503"),
+			rawCallbackButton(fmt.Sprintf("%s — %.0f ₽", p.Title, p.Amount), "traffic_pack_"+p.ID, "", ""),
 		})
 	}
 	rows = append(rows, []rawInlineKeyboardButton{
@@ -2042,7 +2042,7 @@ func handleBuyTraffic(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session 
 		return
 	}
 
-	text := "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> докупить трафик\n\nбазовые <b>10 ГБ</b> белых списков обновляются каждый месяц.\nкупленный трафик переносится дальше, если не был потрачен.\n\nвыберите пакет:"
+	text := "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> докупить трафик\n\nбазовые <b>10 ГБ</b> белых списков обновляются каждый месяц.\nкупленный трафик переносится дальше, если не был потрачен."
 	_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, text, "HTML", trafficPackKeyboardRaw())
 	ackCallback(bot, cq, "выберите пакет")
 }
@@ -6203,7 +6203,7 @@ func mergedTrafficProfileBlock(userID string) string {
 		remaining = 0
 	}
 	return fmt.Sprintf(
-		"\n\nтрафик белых списков\n├ остаток в этом месяце: <b>%s</b>\n└ перенесется в следующий месяц: <b>%s</b>",
+		"\n\n<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> трафик белых списков\n├ остаток в этом месяце: <b>%s</b>\n└ перенесется в следующий месяц: <b>%s</b>",
 		formatTrafficGB(remaining),
 		formatTrafficGB(status.CarryNextBytes),
 	)
