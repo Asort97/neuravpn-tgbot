@@ -143,6 +143,7 @@ const (
 	stateEditEmail    SessionState = "edit_email"
 	stateVerifyEmail  SessionState = "verify_email"
 	stateEnterPromo   SessionState = "enter_promo"
+	stateBuyTraffic   SessionState = "buy_traffic"
 )
 
 type RatePlan struct {
@@ -150,6 +151,13 @@ type RatePlan struct {
 	Title  string
 	Amount float64
 	Days   int
+}
+
+type TrafficPack struct {
+	ID     string
+	Title  string
+	GB     int64
+	Amount float64
 }
 
 type adStatsStore struct {
@@ -286,6 +294,9 @@ type DataStore interface {
 	ClearAutopay(userID string) error
 	GetAutopay(userID string) (methodID, planID string, enabled bool, err error)
 	GetUsersWithAutopay() ([]AutopayUser, error)
+	GetMergedTraffic(userID string) (month string, extraAllocatedBytes int64, lastSyncedUsedBytes int64, updatedAt time.Time, err error)
+	SetMergedTraffic(userID, month string, extraAllocatedBytes, lastSyncedUsedBytes int64, at time.Time) error
+	AddMergedTrafficExtra(userID, month string, bytesToAdd int64, at time.Time) (extraAllocatedBytes int64, err error)
 }
 
 type AutopayUser = struct {
@@ -312,11 +323,31 @@ var ratePlanByID = func() map[string]RatePlan {
 	return m
 }()
 
+var trafficPacks = []TrafficPack{
+	{ID: "traffic_50gb", Title: "50 ГБ", GB: 50, Amount: 119},
+	{ID: "traffic_150gb", Title: "150 ГБ", GB: 150, Amount: 349},
+	{ID: "traffic_250gb", Title: "250 ГБ", GB: 250, Amount: 549},
+}
+
+var trafficPackByID = func() map[string]TrafficPack {
+	m := make(map[string]TrafficPack)
+	for _, p := range trafficPacks {
+		m[p.ID] = p
+	}
+	return m
+}()
+
+const (
+	gibBytes               int64 = 1024 * 1024 * 1024
+	mergedBaseTrafficBytes int64 = 10 * gibBytes
+)
+
 type UserSession struct {
 	MessageID              int
 	State                  SessionState
 	ContentType            string
 	PendingPlanID          string
+	PendingTrafficPackID   string
 	PendingSaveCard        bool
 	PendingCallbackQueryID string
 	LastAccess             string
@@ -1983,6 +2014,39 @@ func rateKeyboardRaw(chatID int64) rawInlineKeyboardMarkup {
 	return rawInlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
+func trafficPackKeyboardRaw() rawInlineKeyboardMarkup {
+	var rows [][]rawInlineKeyboardButton
+	for _, p := range trafficPacks {
+		rows = append(rows, []rawInlineKeyboardButton{
+			rawCallbackButton(fmt.Sprintf("%s — %.0f ₽", p.Title, p.Amount), "traffic_pack_"+p.ID, "", "5346325906526868503"),
+		})
+	}
+	rows = append(rows, []rawInlineKeyboardButton{
+		rawCallbackButton("назад", "nav_status", "", "5264852846527941278"),
+	})
+	return rawInlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func handleBuyTraffic(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
+	chatID := cq.Message.Chat.ID
+	userID := strconv.FormatInt(cq.From.ID, 10)
+	days, _ := userStore.GetDays(userID)
+	if days <= 0 {
+		ackCallback(bot, cq, "сначала купите доступ")
+		text := "докупка трафика доступна только при активном доступе к neuravpn.\n\nсначала перейдите в раздел «оплата» и купите подписку."
+		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
+			{rawCallbackButton("назад", "nav_status", "", "5264852846527941278")},
+		}}
+		_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, text, "HTML", kbRaw)
+		return
+	}
+
+	text := "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> докупить трафик\n\nбазовые <b>10 ГБ</b> белых списков обновляются каждый месяц.\nкупленный трафик переносится дальше, если не был потрачен.\n\nвыберите пакет:"
+	_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, text, "HTML", trafficPackKeyboardRaw())
+	ackCallback(bot, cq, "выберите пакет")
+}
+
 const (
 	starsCurrency      = "XTR"
 	starsPayloadPrefix = "stars:"
@@ -2351,6 +2415,7 @@ func main() {
 	loadExpiryReminderState()
 	startExpiryReminder(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
+	startMergedTrafficLoop()
 	startDailyLogSummary(bot)
 
 	// Профилактический re-login к XRAY раз в час
@@ -2655,6 +2720,389 @@ func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Cl
 	return nil, 0, nil
 }
 
+func currentMergedTrafficMonth(now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return now.UTC().Format("2006-01")
+}
+
+func trafficBytesFromGB(gb int64) int64 {
+	if gb <= 0 {
+		return 0
+	}
+	return gb * gibBytes
+}
+
+func formatTrafficGB(bytes int64) string {
+	if bytes <= 0 {
+		return "0 ГБ"
+	}
+	gb := float64(bytes) / float64(gibBytes)
+	if math.Abs(gb-math.Round(gb)) < 0.01 {
+		return fmt.Sprintf("%.0f ГБ", gb)
+	}
+	return fmt.Sprintf("%.1f ГБ", gb)
+}
+
+func mergedTrafficUserIDFromClient(client xray.Client) string {
+	if tgID := strings.TrimSpace(client.TgID); tgID != "" {
+		return tgID
+	}
+	comment := strings.TrimSpace(client.Comment)
+	if strings.HasPrefix(comment, "tg:") {
+		return strings.TrimSpace(strings.TrimPrefix(comment, "tg:"))
+	}
+	return ""
+}
+
+func mergedTrafficExtraForUser(userID string) int64 {
+	if userStore == nil {
+		return 0
+	}
+	_, extraBytes, _, _, err := userStore.GetMergedTraffic(userID)
+	if err != nil || extraBytes < 0 {
+		return 0
+	}
+	return extraBytes
+}
+
+func mergedTrafficLimitForUser(userID string) int64 {
+	return mergedBaseTrafficBytes + mergedTrafficExtraForUser(userID)
+}
+
+func getMergedTrafficUsedBytes(cfg *xraySettings, client *xray.Client) (int64, error) {
+	if cfg == nil || cfg.client == nil || client == nil {
+		return 0, fmt.Errorf("merged xray not configured")
+	}
+	if strings.TrimSpace(client.Email) == "" {
+		return 0, fmt.Errorf("merged client email is empty")
+	}
+	traffic, err := cfg.client.GetClientTrafficByEmail(client.Email)
+	if err != nil {
+		return 0, err
+	}
+	if traffic == nil {
+		return 0, nil
+	}
+	used := traffic.Up + traffic.Down
+	if used < 0 {
+		return 0, nil
+	}
+	return used, nil
+}
+
+func updateMergedTrafficLimitForUser(cfg *xraySettings, userID, subID string, resetTraffic bool) (int, int, error) {
+	if cfg == nil || cfg.client == nil {
+		return 0, 0, fmt.Errorf("merged xray not configured")
+	}
+	inboundIDs, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return 0, 0, err
+	}
+	limitBytes := mergedTrafficLimitForUser(userID)
+	updated := 0
+	failed := 0
+	var lastErr error
+
+	for _, inboundID := range inboundIDs {
+		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
+		if lookupErr != nil {
+			failed++
+			lastErr = lookupErr
+			continue
+		}
+		if existing == nil && strings.TrimSpace(subID) != "" {
+			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, subID)
+			if lookupErr != nil {
+				failed++
+				lastErr = lookupErr
+				continue
+			}
+		}
+		if existing == nil {
+			continue
+		}
+		existing.TotalGB = limitBytes
+		existing.Reset = 0
+		if err := cfg.client.UpdateClient(inboundID, *existing); err != nil {
+			failed++
+			lastErr = err
+			continue
+		}
+		if resetTraffic && strings.TrimSpace(existing.Email) != "" {
+			if err := cfg.client.ResetClientTraffic(inboundID, existing.Email); err != nil {
+				failed++
+				lastErr = err
+				continue
+			}
+		}
+		updated++
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if updated == 0 && lastErr != nil {
+		return updated, failed, lastErr
+	}
+	return updated, failed, nil
+}
+
+type mergedTrafficStatus struct {
+	UserID         string
+	Month          string
+	UsedBytes      int64
+	LimitBytes     int64
+	ExtraBytes     int64
+	CarryNextBytes int64
+	ClientFound    bool
+	ResetDone      bool
+}
+
+func reconcileMergedTrafficForUser(userID string, forceReset bool) (*mergedTrafficStatus, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("userID is empty")
+	}
+	if userStore == nil {
+		return nil, fmt.Errorf("storage is not configured")
+	}
+	if mergedXrayCfg == nil || mergedXrayCfg.client == nil {
+		return nil, fmt.Errorf("merged xray not configured")
+	}
+
+	client, _, err := findMergedProviderClient(mergedXrayCfg, userID, "")
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return &mergedTrafficStatus{UserID: userID, Month: currentMergedTrafficMonth(time.Now())}, nil
+	}
+
+	usedBytes, err := getMergedTrafficUsedBytes(mergedXrayCfg, client)
+	if err != nil {
+		return nil, err
+	}
+
+	month, extraBytes, _, _, err := userStore.GetMergedTraffic(userID)
+	if err != nil {
+		return nil, err
+	}
+	if extraBytes < 0 {
+		extraBytes = 0
+	}
+	now := time.Now().UTC()
+	currentMonth := currentMergedTrafficMonth(now)
+	if month == "" && !forceReset {
+		carryNext := extraBytes
+		usedOverBase := usedBytes - mergedBaseTrafficBytes
+		if usedOverBase > 0 {
+			carryNext -= usedOverBase
+		}
+		if carryNext < 0 {
+			carryNext = 0
+		}
+		limitBytes := client.TotalGB
+		if limitBytes <= 0 {
+			limitBytes = mergedBaseTrafficBytes + extraBytes
+		}
+		return &mergedTrafficStatus{
+			UserID:         userID,
+			Month:          currentMonth,
+			UsedBytes:      usedBytes,
+			LimitBytes:     limitBytes,
+			ExtraBytes:     extraBytes,
+			CarryNextBytes: carryNext,
+			ClientFound:    true,
+		}, nil
+	}
+	shouldReset := forceReset || (month != "" && month != currentMonth)
+	nextExtraBytes := extraBytes
+	if shouldReset && !forceReset && month != "" && month != currentMonth {
+		usedOverBase := usedBytes - mergedBaseTrafficBytes
+		if usedOverBase < 0 {
+			usedOverBase = 0
+		}
+		nextExtraBytes = extraBytes - usedOverBase
+		if nextExtraBytes < 0 {
+			nextExtraBytes = 0
+		}
+	}
+	if month == "" {
+		if err := userStore.SetMergedTraffic(userID, currentMonth, extraBytes, usedBytes, now); err != nil {
+			return nil, err
+		}
+		month = currentMonth
+	}
+	if shouldReset {
+		if err := userStore.SetMergedTraffic(userID, currentMonth, nextExtraBytes, 0, now); err != nil {
+			return nil, err
+		}
+		if _, _, err := updateMergedTrafficLimitForUser(mergedXrayCfg, userID, strings.TrimSpace(client.SubID), true); err != nil {
+			return nil, err
+		}
+		usedBytes = 0
+		extraBytes = nextExtraBytes
+		month = currentMonth
+	} else {
+		_ = userStore.SetMergedTraffic(userID, currentMonth, extraBytes, usedBytes, now)
+		if _, _, err := updateMergedTrafficLimitForUser(mergedXrayCfg, userID, strings.TrimSpace(client.SubID), false); err != nil {
+			log.Printf("[merged-traffic] update limit failed user=%s: %v", userID, err)
+		}
+	}
+
+	carryNext := extraBytes
+	usedOverBase := usedBytes - mergedBaseTrafficBytes
+	if usedOverBase > 0 {
+		carryNext -= usedOverBase
+	}
+	if carryNext < 0 {
+		carryNext = 0
+	}
+	return &mergedTrafficStatus{
+		UserID:         userID,
+		Month:          month,
+		UsedBytes:      usedBytes,
+		LimitBytes:     mergedBaseTrafficBytes + extraBytes,
+		ExtraBytes:     extraBytes,
+		CarryNextBytes: carryNext,
+		ClientFound:    true,
+		ResetDone:      shouldReset,
+	}, nil
+}
+
+func collectMergedTrafficUsers(cfg *xraySettings) (map[string]string, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, fmt.Errorf("merged xray not configured")
+	}
+	inboundIDs, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return nil, err
+	}
+	users := make(map[string]string)
+	for _, inboundID := range inboundIDs {
+		clients, err := cfg.client.GetInboundById(inboundID)
+		if err != nil {
+			return nil, err
+		}
+		for _, client := range clients {
+			userID := mergedTrafficUserIDFromClient(client)
+			if userID == "" {
+				continue
+			}
+			if users[userID] == "" {
+				users[userID] = strings.TrimSpace(client.SubID)
+			}
+		}
+	}
+	return users, nil
+}
+
+func runMergedTrafficSync(forceReset bool) (int, int, int) {
+	users, err := collectMergedTrafficUsers(mergedXrayCfg)
+	if err != nil {
+		log.Printf("[merged-traffic] collect users failed: %v", err)
+		return 0, 0, 1
+	}
+	processed := 0
+	reset := 0
+	failed := 0
+	for userID := range users {
+		status, err := reconcileMergedTrafficForUser(userID, forceReset)
+		if err != nil {
+			failed++
+			log.Printf("[merged-traffic] sync failed user=%s: %v", userID, err)
+			continue
+		}
+		if status != nil && status.ClientFound {
+			processed++
+			if status.ResetDone {
+				reset++
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	return processed, reset, failed
+}
+
+func startMergedTrafficLoop() {
+	if mergedXrayCfg == nil || mergedXrayCfg.client == nil || userStore == nil {
+		return
+	}
+	go func() {
+		processed, reset, failed := runMergedTrafficSync(false)
+		log.Printf("[merged-traffic] startup sync processed=%d reset=%d failed=%d", processed, reset, failed)
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			processed, reset, failed := runMergedTrafficSync(false)
+			log.Printf("[merged-traffic] periodic sync processed=%d reset=%d failed=%d", processed, reset, failed)
+		}
+	}()
+}
+
+func handleMergedTrafficPreview(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	if !isAdmin(msg.From.ID) {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "⛔️ Только для админа"))
+		return
+	}
+	users, err := collectMergedTrafficUsers(mergedXrayCfg)
+	if err != nil {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "ошибка preview: "+err.Error()))
+		return
+	}
+	totalUsed := int64(0)
+	totalLimit := int64(0)
+	failed := 0
+	for userID, subID := range users {
+		client, _, err := findMergedProviderClient(mergedXrayCfg, userID, subID)
+		if err != nil || client == nil {
+			failed++
+			continue
+		}
+		used, err := getMergedTrafficUsedBytes(mergedXrayCfg, client)
+		if err != nil {
+			failed++
+			continue
+		}
+		totalUsed += used
+		totalLimit += client.TotalGB
+		time.Sleep(20 * time.Millisecond)
+	}
+	text := fmt.Sprintf(
+		"preview merged traffic\nклиентов: %d\nошибок чтения: %d\nсейчас использовано: %s\nтекущий лимит суммарно: %s\n\nдля применения: /merged_traffic_init_confirm",
+		len(users),
+		failed,
+		formatTrafficGB(totalUsed),
+		formatTrafficGB(totalLimit),
+	)
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
+}
+
+func handleMergedTrafficInitConfirm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	if !isAdmin(msg.From.ID) {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "⛔️ Только для админа"))
+		return
+	}
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, "запускаю init: ставлю лимит 10ГБ + остаток и сбрасываю трафик..."))
+	processed, reset, failed := runMergedTrafficSync(true)
+	text := fmt.Sprintf("merged traffic init завершён\nобработано: %d\nсброшено: %d\nошибок: %d", processed, reset, failed)
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
+}
+
+func handleMergedTrafficSyncCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	if !isAdmin(msg.From.ID) {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "⛔️ Только для админа"))
+		return
+	}
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, "запускаю merged traffic sync..."))
+	processed, reset, failed := runMergedTrafficSync(false)
+	text := fmt.Sprintf("merged traffic sync завершён\nобработано: %d\nмесячных сбросов: %d\nошибок: %d", processed, reset, failed)
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
+}
+
 func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
 	return generateVLESSLinkForConfigWithInbound(cfg, client, 0)
 }
@@ -2747,9 +3195,11 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 			Email:      fallbackEmail(userID),
 			Enable:     true,
 			ExpiryTime: expiryMillis,
+			TotalGB:    mergedTrafficLimitForUser(userID),
 			TgID:       userID,
 			SubID:      stableSubID,
 			Comment:    "tg:" + userID,
+			Reset:      0,
 		}
 		if existing == nil {
 			created, addErr := cfg.client.AddClientWithData(inboundID, clientData)
@@ -3994,6 +4444,12 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleMigrateExpiryFromOld(bot, msg)
 		case "mergedsub":
 			handleMergedSubCommand(bot, msg, xrCfg)
+		case "merged_traffic_preview":
+			handleMergedTrafficPreview(bot, msg)
+		case "merged_traffic_init_confirm":
+			handleMergedTrafficInitConfirm(bot, msg)
+		case "merged_traffic_sync":
+			handleMergedTrafficSyncCommand(bot, msg)
 		case "topup", "пополнить", "пополнить_баланс":
 			handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
 		case "getvpn", "vpn", "подключить", "получитьvpn":
@@ -4022,6 +4478,19 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		_ = userStore.SetEmail(userID, addr.Address)
 		_ = userStore.ClearEmailVerification(userID)
 		_ = userStore.AcceptPrivacy(userID, time.Now())
+
+		if session.PendingTrafficPackID != "" {
+			pack, ok := trafficPackByID[session.PendingTrafficPackID]
+			if !ok {
+				_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, "Пакет трафика не найден, выбери заново.", "HTML", trafficPackKeyboardRaw())
+				return
+			}
+			if err := startPaymentForTrafficPack(bot, chatID, session, pack); err != nil {
+				log.Printf("startPaymentForTrafficPack error: %v", err)
+				_ = updateSessionText(bot, chatID, session, stateBuyTraffic, "Не удалось создать платёж.", "", mainMenuInlineKeyboard())
+			}
+			return
+		}
 
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
@@ -4408,6 +4877,8 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		handleGetVPN(bot, cq, session, xrCfg)
 	case data == "nav_topup":
 		handleTopUp(bot, cq, session)
+	case data == "nav_buy_traffic":
+		handleBuyTraffic(bot, cq, session)
 	case data == "enter_promo":
 		session.PendingCallbackQueryID = cq.ID
 		promoKb := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
@@ -4706,6 +5177,43 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		}
 		ackCallback(bot, cq, "счёт создан")
 		return
+	case strings.HasPrefix(data, "traffic_pack_"):
+		id := strings.TrimPrefix(data, "traffic_pack_")
+		pack, ok := trafficPackByID[id]
+		if !ok {
+			ackCallback(bot, cq, "пакет не найден")
+			return
+		}
+		session.PendingTrafficPackID = pack.ID
+		session.PendingPlanID = ""
+
+		userID := strconv.FormatInt(cq.From.ID, 10)
+		days, _ := userStore.GetDays(userID)
+		if days <= 0 {
+			ackCallback(bot, cq, "сначала купите доступ")
+			return
+		}
+		if email, _ := userStore.GetEmail(userID); strings.TrimSpace(email) == "" {
+			text := "📧 Для оплаты нужен e-mail для чека.\nОтправь e-mail следующим сообщением (пример: name@example.com).\n\n" +
+				"<b>Продолжи, введя e-mail.</b>"
+			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+				{
+					rawCallbackButton("назад", "nav_buy_traffic", "", "5264852846527941278"),
+					rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+				},
+			}}
+			_ = updateSessionTextRaw(bot, chatID, session, stateCollectEmail, text, "HTML", kbRaw)
+			ackCallback(bot, cq, "пришли e-mail")
+			return
+		}
+		if err := startPaymentForTrafficPack(bot, chatID, session, pack); err != nil {
+			log.Printf("startPaymentForTrafficPack error: %v", err)
+			_ = updateSessionText(bot, chatID, session, stateBuyTraffic, "Не удалось создать платёж.", "", mainMenuInlineKeyboard())
+			ackCallback(bot, cq, "ошибка оплаты")
+			return
+		}
+		ackCallback(bot, cq, "счёт создан")
+		return
 	case strings.HasPrefix(data, "rate_"):
 		id := strings.TrimPrefix(data, "rate_")
 		if p, ok := ratePlanByID[id]; ok {
@@ -4717,6 +5225,20 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		handleCheckPayment(bot, cq, session, xrCfg)
 
 	case data == "retry_payment":
+		if session.PendingTrafficPackID != "" {
+			pack, ok := trafficPackByID[session.PendingTrafficPackID]
+			if !ok {
+				ackCallback(bot, cq, "пакет не найден")
+				return
+			}
+			if err := startPaymentForTrafficPack(bot, chatID, session, pack); err != nil {
+				log.Printf("retry traffic payment error user=%d: %v", chatID, err)
+				ackCallback(bot, cq, "ошибка создания платежа")
+				return
+			}
+			ackCallback(bot, cq, "")
+			return
+		}
 		plan, ok := ratePlanByID[session.PendingPlanID]
 		if !ok {
 			ackCallback(bot, cq, "тариф не найден")
@@ -5036,6 +5558,7 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 	chatID := cq.Message.Chat.ID
 	userID := strconv.FormatInt(chatID, 10)
 	session.PendingPlanID = ""
+	session.PendingTrafficPackID = ""
 	discountPct, hasDiscount := getActivePromoDiscount(userID)
 	var builder strings.Builder
 	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nоплата ⭐ звездами - <b>скидка 10%.</b>\n\nтарифы:\n")
@@ -5058,6 +5581,7 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 	chatID := cq.Message.Chat.ID
 	userID := strconv.FormatInt(chatID, 10)
 	session.PendingPlanID = plan.ID
+	session.PendingTrafficPackID = ""
 
 	stars := starsAmountForPlan(plan)
 	discountPct, hasDiscount := getActivePromoDiscount(userID)
@@ -5185,6 +5709,54 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	return nil
 }
 
+func startPaymentForTrafficPack(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, pack TrafficPack) error {
+	userID := strconv.FormatInt(chatID, 10)
+	metadata := map[string]interface{}{
+		"product_type":    "traffic",
+		"traffic_pack_id": pack.ID,
+		"traffic_gb":      pack.GB,
+		"traffic_amount":  pack.Amount,
+	}
+
+	email, _ := userStore.GetEmail(userID)
+	confirmationURL, err := yookassaClient.CreatePaymentAndGetURL(pack.Amount, "Докупка трафика "+pack.Title, chatID, metadata, email, false)
+	if err != nil {
+		return err
+	}
+
+	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> <b>докупка трафика %s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.0f ₽</b>\n\nпосле оплаты пакет добавится к лимиту белых списков и будет переноситься дальше, пока не потратите.",
+		pack.Title, pack.Amount)
+	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawURLButton("оплатить", confirmationURL, "5344015205531686528")},
+		{rawCallbackButton("я оплатил", "check_payment", "", "5345823764720426390")},
+		{
+			rawCallbackButton("назад", "nav_buy_traffic", "", "5264852846527941278"),
+			rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
+		},
+	}}
+
+	newID := 0
+	if session.MessageID > 0 {
+		if err := editMessageTextRaw(bot, chatID, session.MessageID, text, "HTML", kbRaw); err == nil {
+			newID = session.MessageID
+		}
+	}
+	if newID == 0 {
+		if msgID, err := sendMessageRaw(bot, chatID, text, "HTML", kbRaw); err == nil {
+			newID = msgID
+		} else {
+			return err
+		}
+	}
+	session.MessageID = newID
+	session.State = stateBuyTraffic
+	session.PendingTrafficPackID = pack.ID
+	session.PendingPlanID = ""
+	instruct.ResetState(chatID)
+	logAction(bot, chatID, "", fmt.Sprintf("📶 счёт на трафик: %s", pack.Title), false)
+	return nil
+}
+
 func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, xrCfg *xraySettings) {
 	chatID := cq.Message.Chat.ID
 	userID := int64(cq.From.ID)
@@ -5202,6 +5774,54 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 	}
 
 	meta := payment.Metadata
+	if isTrafficPaymentMetadata(meta) {
+		pack := resolveTrafficPackFromMetadata(meta, session)
+		if pack.ID == "" {
+			ackCallback(bot, cq, "Пакет трафика не найден")
+			return
+		}
+		paymentKey := buildAppliedPaymentKey("yookassa", strings.TrimSpace(payment.ID))
+		if paymentKey == "" {
+			ackCallback(bot, cq, "Ошибка проверки платежа, попробуй ещё раз")
+			return
+		}
+		alreadyApplied, err := userStore.IsPaymentApplied(userIDStr, paymentKey)
+		if err != nil {
+			log.Printf("traffic IsPaymentApplied error: %v", err)
+			sendPaymentAlert(bot, "traffic payment apply check failed", userID, cq.From.UserName, paymentKey, pack.ID, err.Error())
+			ackCallback(bot, cq, "Ошибка проверки платежа")
+			return
+		}
+		if alreadyApplied {
+			yookassaClient.ClearPayments(chatID)
+			ackCallback(bot, cq, "Платёж уже обработан")
+			return
+		}
+		fake := &tgbotapi.Message{Chat: cq.Message.Chat, From: cq.From}
+		if err := handleSuccessfulTrafficPayment(bot, fake, pack, session); err != nil {
+			log.Printf("handleSuccessfulTrafficPayment error: %v", err)
+			sendPaymentAlert(bot, "traffic payment succeeded but apply failed", userID, cq.From.UserName, paymentKey, pack.ID, err.Error())
+			ackCallback(bot, cq, "Оплата получена, но трафик пока не добавился. Нажми «Я оплатил» ещё раз через минуту или напиши в поддержку.")
+			return
+		}
+		amountValue, amountCurrency := resolveYooKassaPaymentAmount(payment, pack.Amount)
+		marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", pack.ID, amountValue, amountCurrency, time.Now())
+		if err != nil {
+			log.Printf("traffic MarkPaymentApplied error: %v", err)
+			sendPaymentAlert(bot, "traffic issued but mark applied failed", userID, cq.From.UserName, paymentKey, pack.ID, err.Error())
+			ackCallback(bot, cq, "Трафик добавлен, но возникла ошибка фиксации платежа. Мы уже разбираемся.")
+			return
+		}
+		if !marked {
+			yookassaClient.ClearPayments(chatID)
+			ackCallback(bot, cq, "Платёж уже обработан")
+			return
+		}
+		yookassaClient.ClearPayments(chatID)
+		ackCallback(bot, cq, fmt.Sprintf("Добавлено %s", pack.Title))
+		return
+	}
+
 	plan := resolvePlanFromMetadata(meta, session)
 	if plan.Title == "" {
 		ackCallback(bot, cq, "Тариф в платеже не найден")
@@ -5474,6 +6094,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	var accessBlock string
 	if days > 0 {
+		trafficBlock := mergedTrafficProfileBlock(userIDStr)
 		expTime := time.Time{}
 		if info != nil && !info.expireAt.IsZero() {
 			expTime = info.expireAt
@@ -5482,8 +6103,8 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		}
 		expStr := formatExpiryUTC(expTime)
 		accessBlock = fmt.Sprintf(
-			"\n\nу вас есть доступ к neuravpn 🟢\nон активен ещё <b>%d</b> дней\nдо <code>%s</code>\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!",
-			days, expStr,
+			"\n\nу вас есть доступ к neuravpn 🟢\nон активен ещё <b>%d</b> дней\nдо <code>%s</code>%s\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!",
+			days, expStr, trafficBlock,
 		)
 	} else {
 		accessBlock = "\n\nу вас нет доступа к neuravpn 🔴\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!"
@@ -5504,6 +6125,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
+			{rawCallbackButton("докупить трафик", "nav_buy_traffic", "", "5346325906526868503")},
 			{rawCallbackButton("e-mail", "email_menu", "", "5264870816671113060")},
 		},
 	}
@@ -5535,6 +6157,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	kbRows := [][]tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("💰 оплата", "nav_topup")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("📶 докупить трафик", "nav_buy_traffic")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("e-mail", "email_menu")),
 	}
 	if len(linkedVK) == 0 {
@@ -5553,6 +6176,30 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	_ = updateSessionText(bot, chatID, session, stateStatus, profileText, "HTML", kb)
 }
+
+func mergedTrafficProfileBlock(userID string) string {
+	if mergedXrayCfg == nil || mergedXrayCfg.client == nil || userStore == nil {
+		return ""
+	}
+	status, err := reconcileMergedTrafficForUser(userID, false)
+	if err != nil {
+		log.Printf("[merged-traffic] profile block failed user=%s: %v", userID, err)
+		return "\n\nтрафик белых списков\n└ временно недоступен"
+	}
+	if status == nil || !status.ClientFound {
+		return "\n\nтрафик белых списков\n└ временно недоступен"
+	}
+	remaining := status.LimitBytes - status.UsedBytes
+	if remaining < 0 {
+		remaining = 0
+	}
+	return fmt.Sprintf(
+		"\n\nтрафик белых списков\n├ остаток в этом месяце: <b>%s</b>\n└ перенесется в следующий месяц: <b>%s</b>",
+		formatTrafficGB(remaining),
+		formatTrafficGB(status.CarryNextBytes),
+	)
+}
+
 func buildStatusText(cfg *xraySettings, userID int) (string, error) {
 	telegramUser := fmt.Sprint(userID)
 	// Не создаём запись и клиента при простом просмотре статуса
@@ -5847,6 +6494,7 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg 
 	}
 
 	session.PendingPlanID = ""
+	session.PendingTrafficPackID = ""
 
 	// Уведомление пригласившему, если он есть, и начисление уже выполнено в handleStart
 	// Здесь отправим информативное сообщение о покупке пригласившему (если переход был по реферальной ссылке)
@@ -5858,6 +6506,51 @@ func handleSuccessfulPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg 
 		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, msg.From.UserName, msg.From.UserName, userID)
 	}
 	payText := fmt.Sprintf("💰 %s оплатил %s за %.0f ₽ 🎉", userLink, plan.Title, plan.Amount)
+	m := tgbotapi.NewMessage(logChatID, payText)
+	m.ParseMode = "HTML"
+	m.DisableWebPagePreview = true
+	_, _ = bot.Send(m)
+	return nil
+}
+
+func handleSuccessfulTrafficPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, pack TrafficPack, session *UserSession) error {
+	chatID := msg.Chat.ID
+	userID := int64(msg.From.ID)
+	userIDStr := strconv.FormatInt(userID, 10)
+
+	days, _ := userStore.GetDays(userIDStr)
+	if days <= 0 {
+		return fmt.Errorf("traffic purchase requires active access")
+	}
+
+	if err := syncMergedAccessForUser(userIDStr); err != nil {
+		return err
+	}
+	if _, err := reconcileMergedTrafficForUser(userIDStr, false); err != nil {
+		return err
+	}
+
+	addBytes := trafficBytesFromGB(pack.GB)
+	extraBytes, err := userStore.AddMergedTrafficExtra(userIDStr, currentMergedTrafficMonth(time.Now()), addBytes, time.Now())
+	if err != nil {
+		return err
+	}
+	if _, _, err := updateMergedTrafficLimitForUser(mergedXrayCfg, userIDStr, "", false); err != nil {
+		return err
+	}
+
+	session.PendingTrafficPackID = ""
+	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> трафик добавлен\n\nпакет: <b>%s</b>\nпереносимый остаток: <b>%s</b>", pack.Title, formatTrafficGB(extraBytes))
+	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton("профиль", "nav_status", "", "5343693752999383705")},
+	}}
+	_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+
+	userLink := fmt.Sprintf(`<a href="tg://user?id=%d">ID:%d</a>`, userID, userID)
+	if msg.From.UserName != "" {
+		userLink = fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:%d)`, msg.From.UserName, msg.From.UserName, userID)
+	}
+	payText := fmt.Sprintf("📶 %s докупил трафик %s за %.0f ₽", userLink, pack.Title, pack.Amount)
 	m := tgbotapi.NewMessage(logChatID, payText)
 	m.ParseMode = "HTML"
 	m.DisableWebPagePreview = true
@@ -5916,6 +6609,29 @@ func resolvePlanFromMetadata(meta map[string]interface{}, session *UserSession) 
 		}
 	}
 	return plan
+}
+
+func isTrafficPaymentMetadata(meta map[string]interface{}) bool {
+	if meta == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(fmt.Sprint(meta["product_type"])), "traffic")
+}
+
+func resolveTrafficPackFromMetadata(meta map[string]interface{}, session *UserSession) TrafficPack {
+	packID := ""
+	if meta != nil {
+		if v, ok := meta["traffic_pack_id"]; ok {
+			packID = fmt.Sprint(v)
+		}
+	}
+	if packID == "" && session != nil {
+		packID = session.PendingTrafficPackID
+	}
+	if pack, ok := trafficPackByID[packID]; ok {
+		return pack
+	}
+	return TrafficPack{}
 }
 
 // handleYooKassaWebhook processes incoming YooKassa webhook notifications.
@@ -5977,6 +6693,47 @@ func handleYooKassaWebhook(bot *tgbotapi.BotAPI, xrCfg *xraySettings, w http.Res
 
 	userIDStr := strconv.FormatInt(chatID, 10)
 	session := getSession(chatID)
+
+	if isTrafficPaymentMetadata(payment.Metadata) {
+		pack := resolveTrafficPackFromMetadata(payment.Metadata, session)
+		if pack.ID == "" {
+			log.Printf("[webhook] traffic payment %s: cannot resolve pack", payment.ID)
+			return
+		}
+		paymentKey := buildAppliedPaymentKey("yookassa", payment.ID)
+		if paymentKey == "" {
+			return
+		}
+		alreadyApplied, err := userStore.IsPaymentApplied(userIDStr, paymentKey)
+		if err != nil {
+			log.Printf("[webhook] traffic IsPaymentApplied error: %v", err)
+			sendPaymentAlert(bot, "webhook: traffic payment apply check failed", chatID, "", paymentKey, pack.ID, err.Error())
+			return
+		}
+		if alreadyApplied {
+			return
+		}
+		fake := &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: chatID},
+			From: &tgbotapi.User{ID: chatID},
+		}
+		if err := handleSuccessfulTrafficPayment(bot, fake, pack, session); err != nil {
+			log.Printf("[webhook] handleSuccessfulTrafficPayment error: %v", err)
+			sendPaymentAlert(bot, "webhook: traffic payment succeeded but apply failed", chatID, "", paymentKey, pack.ID, err.Error())
+			return
+		}
+		amountValue, amountCurrency := resolveYooKassaPaymentAmount(payment, pack.Amount)
+		marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", pack.ID, amountValue, amountCurrency, time.Now())
+		if err != nil {
+			log.Printf("[webhook] traffic MarkPaymentApplied error: %v", err)
+			sendPaymentAlert(bot, "webhook: traffic issued but mark applied failed", chatID, "", paymentKey, pack.ID, err.Error())
+			return
+		}
+		if marked {
+			yookassaClient.ClearPayments(chatID)
+		}
+		return
+	}
 
 	plan := resolvePlanFromMetadata(payment.Metadata, session)
 	if plan.Title == "" {
@@ -6130,6 +6887,7 @@ func getActionName(data string) string {
 		"nav_menu":         "🏠 меню",
 		"nav_get_vpn":      "🔌 подключить VPN",
 		"nav_topup":        "💰 покупка доступа",
+		"nav_buy_traffic":  "📶 докупить трафик",
 		"nav_status":       "👤 профиль",
 		"nav_referral":     "🎁 +15 дней",
 		"nav_support":      "📞 поддержка",
@@ -6167,6 +6925,13 @@ func getActionName(data string) string {
 			return fmt.Sprintf("💲 любым: %s", p.Title)
 		}
 		return "💲 любым"
+	}
+	if strings.HasPrefix(data, "traffic_pack_") {
+		id := strings.TrimPrefix(data, "traffic_pack_")
+		if p, ok := trafficPackByID[id]; ok {
+			return fmt.Sprintf("📶 пакет трафика: %s", p.Title)
+		}
+		return "📶 пакет трафика"
 	}
 	if strings.HasPrefix(data, "win_prev_") || strings.HasPrefix(data, "android_prev_") || strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "chregion_prev_") {
 		return "инструкция: назад"

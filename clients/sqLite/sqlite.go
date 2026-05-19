@@ -44,6 +44,10 @@ type UserData struct {
 	AutopayMethodID     string                        `json:"autopay_method_id,omitempty"`
 	AutopayPlanID       string                        `json:"autopay_plan_id,omitempty"`
 	AutopayEnabled      bool                          `json:"autopay_enabled,omitempty"`
+	MergedTrafficMonth  string                        `json:"merged_traffic_month,omitempty"`
+	MergedTrafficExtra  int64                         `json:"merged_traffic_extra_allocated_bytes,omitempty"`
+	MergedTrafficUsed   int64                         `json:"merged_traffic_last_synced_used_bytes,omitempty"`
+	MergedTrafficAt     string                        `json:"merged_traffic_updated_at,omitempty"`
 }
 
 type AppliedPaymentMeta struct {
@@ -703,6 +707,104 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *Store) GetMergedTraffic(userID string) (string, int64, int64, time.Time, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return "", 0, 0, time.Time{}, nil
+	}
+	var updatedAt time.Time
+	if strings.TrimSpace(ud.MergedTrafficAt) != "" {
+		if ts, err := time.Parse(time.RFC3339, ud.MergedTrafficAt); err == nil {
+			updatedAt = ts
+		}
+	}
+	if ud.MergedTrafficExtra < 0 {
+		ud.MergedTrafficExtra = 0
+	}
+	if ud.MergedTrafficUsed < 0 {
+		ud.MergedTrafficUsed = 0
+	}
+	return ud.MergedTrafficMonth, ud.MergedTrafficExtra, ud.MergedTrafficUsed, updatedAt, nil
+}
+
+func (s *Store) SetMergedTraffic(userID, month string, extraAllocatedBytes, lastSyncedUsedBytes int64, at time.Time) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	userID = strings.TrimSpace(userID)
+	month = strings.TrimSpace(month)
+	if userID == "" {
+		return fmt.Errorf("userID is empty")
+	}
+	if month == "" {
+		return fmt.Errorf("month is empty")
+	}
+	if extraAllocatedBytes < 0 {
+		extraAllocatedBytes = 0
+	}
+	if lastSyncedUsedBytes < 0 {
+		lastSyncedUsedBytes = 0
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	ud := db[userID]
+	ensureCreatedAt(&ud)
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.MergedTrafficMonth = month
+	ud.MergedTrafficExtra = extraAllocatedBytes
+	ud.MergedTrafficUsed = lastSyncedUsedBytes
+	ud.MergedTrafficAt = at.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) AddMergedTrafficExtra(userID, month string, bytesToAdd int64, at time.Time) (int64, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	userID = strings.TrimSpace(userID)
+	month = strings.TrimSpace(month)
+	if userID == "" {
+		return 0, fmt.Errorf("userID is empty")
+	}
+	if month == "" {
+		return 0, fmt.Errorf("month is empty")
+	}
+	if bytesToAdd <= 0 {
+		return 0, fmt.Errorf("bytesToAdd must be positive")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	ud := db[userID]
+	ensureCreatedAt(&ud)
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.MergedTrafficMonth = month
+	ud.MergedTrafficExtra += bytesToAdd
+	if ud.MergedTrafficExtra < 0 {
+		ud.MergedTrafficExtra = 0
+	}
+	ud.MergedTrafficAt = at.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return ud.MergedTrafficExtra, s.saveUsersLocked()
 }
 
 func (s *Store) GetDailyStats(start, end time.Time) (int, int, float64, float64, error) {

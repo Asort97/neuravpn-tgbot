@@ -122,6 +122,19 @@ type InboundResponse struct {
 	Obj     InboundData `json:"obj"`
 }
 
+// ClientTraffic describes 3X-UI traffic counters for a client email.
+type ClientTraffic struct {
+	ID         int    `json:"id"`
+	InboundID  int    `json:"inboundId"`
+	Enable     bool   `json:"enable"`
+	Email      string `json:"email"`
+	Up         int64  `json:"up"`
+	Down       int64  `json:"down"`
+	ExpiryTime int64  `json:"expiryTime"`
+	Total      int64  `json:"total"`
+	Reset      int    `json:"reset"`
+}
+
 type XRayClient struct {
 	username    string
 	password    string
@@ -430,6 +443,82 @@ func (x *XRayClient) GetClientBySubID(inboundID int, subID string) (*Client, err
 	}
 
 	return nil, nil
+}
+
+func (x *XRayClient) GetClientTrafficByEmail(email string) (*ClientTraffic, error) {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil, fmt.Errorf("client email is empty")
+	}
+	url := fmt.Sprintf("%s/panel/api/inbounds/getClientTraffics/%s", x.serverURL, url.PathEscape(email))
+
+	statusCode, body, err := x.doAPIRequest("GET", url, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return nil, err
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return nil, fmt.Errorf("get client traffic returned status=%d body=%s", statusCode, responseSnippet(body))
+	}
+
+	var raw struct {
+		Success bool            `json:"success"`
+		Msg     string          `json:"msg"`
+		Obj     json.RawMessage `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("%w; body=%s", err, responseSnippet(body))
+	}
+	if !raw.Success {
+		return nil, fmt.Errorf("API returned success=false: %s", raw.Msg)
+	}
+	if len(raw.Obj) == 0 || string(raw.Obj) == "null" {
+		return nil, nil
+	}
+
+	var traffic ClientTraffic
+	if err := json.Unmarshal(raw.Obj, &traffic); err == nil {
+		return &traffic, nil
+	}
+
+	var trafficList []ClientTraffic
+	if err := json.Unmarshal(raw.Obj, &trafficList); err != nil {
+		return nil, fmt.Errorf("unexpected traffic payload: %s", responseSnippet(raw.Obj))
+	}
+	if len(trafficList) == 0 {
+		return nil, nil
+	}
+	return &trafficList[0], nil
+}
+
+func (x *XRayClient) ResetClientTraffic(inboundID int, email string) error {
+	email = strings.TrimSpace(email)
+	if inboundID <= 0 {
+		return fmt.Errorf("inboundID is invalid")
+	}
+	if email == "" {
+		return fmt.Errorf("client email is empty")
+	}
+	url := fmt.Sprintf("%s/panel/api/inbounds/%d/resetClientTraffic/%s", x.serverURL, inboundID, url.PathEscape(email))
+
+	statusCode, body, err := x.doAPIRequest("POST", url, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return err
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return fmt.Errorf("reset client traffic returned status=%d body=%s", statusCode, responseSnippet(body))
+	}
+
+	var raw struct {
+		Success bool   `json:"success"`
+		Msg     string `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return fmt.Errorf("%w; body=%s", err, responseSnippet(body))
+	}
+	if !raw.Success {
+		return fmt.Errorf("API returned success=false: %s", raw.Msg)
+	}
+	return nil
 }
 
 func (x *XRayClient) GenerateVLESSLink(client *Client, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string) string {

@@ -123,6 +123,19 @@ CREATE TABLE IF NOT EXISTS users (
 	}
 
 	_, err = s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS merged_traffic (
+			user_id TEXT PRIMARY KEY,
+			month TEXT NOT NULL,
+			extra_allocated_bytes BIGINT NOT NULL DEFAULT 0,
+			last_synced_used_bytes BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS web_login_tokens (
 			token_hash TEXT PRIMARY KEY,
 			user_id TEXT REFERENCES users(id),
@@ -676,6 +689,93 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	}
 
 	return tag.RowsAffected() > 0, nil
+}
+
+func (s *Store) GetMergedTraffic(userID string) (string, int64, int64, time.Time, error) {
+	ctx := context.Background()
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "", 0, 0, time.Time{}, fmt.Errorf("userID is empty")
+	}
+
+	var month string
+	var extraAllocatedBytes int64
+	var lastSyncedUsedBytes int64
+	var updatedAt time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT month, extra_allocated_bytes, last_synced_used_bytes, updated_at
+		FROM merged_traffic
+		WHERE user_id = $1
+	`, userID).Scan(&month, &extraAllocatedBytes, &lastSyncedUsedBytes, &updatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", 0, 0, time.Time{}, nil
+		}
+		return "", 0, 0, time.Time{}, err
+	}
+	return month, extraAllocatedBytes, lastSyncedUsedBytes, updatedAt, nil
+}
+
+func (s *Store) SetMergedTraffic(userID, month string, extraAllocatedBytes, lastSyncedUsedBytes int64, at time.Time) error {
+	ctx := context.Background()
+	userID = strings.TrimSpace(userID)
+	month = strings.TrimSpace(month)
+	if userID == "" {
+		return fmt.Errorf("userID is empty")
+	}
+	if month == "" {
+		return fmt.Errorf("month is empty")
+	}
+	if extraAllocatedBytes < 0 {
+		extraAllocatedBytes = 0
+	}
+	if lastSyncedUsedBytes < 0 {
+		lastSyncedUsedBytes = 0
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO merged_traffic (user_id, month, extra_allocated_bytes, last_synced_used_bytes, updated_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id) DO UPDATE SET
+			month = EXCLUDED.month,
+			extra_allocated_bytes = EXCLUDED.extra_allocated_bytes,
+			last_synced_used_bytes = EXCLUDED.last_synced_used_bytes,
+			updated_at = EXCLUDED.updated_at
+	`, userID, month, extraAllocatedBytes, lastSyncedUsedBytes, at.UTC())
+	return err
+}
+
+func (s *Store) AddMergedTrafficExtra(userID, month string, bytesToAdd int64, at time.Time) (int64, error) {
+	ctx := context.Background()
+	userID = strings.TrimSpace(userID)
+	month = strings.TrimSpace(month)
+	if userID == "" {
+		return 0, fmt.Errorf("userID is empty")
+	}
+	if month == "" {
+		return 0, fmt.Errorf("month is empty")
+	}
+	if bytesToAdd <= 0 {
+		return 0, fmt.Errorf("bytesToAdd must be positive")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	var extraAllocatedBytes int64
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO merged_traffic (user_id, month, extra_allocated_bytes, last_synced_used_bytes, updated_at)
+		VALUES ($1, $2, $3, 0, $4)
+		ON CONFLICT (user_id) DO UPDATE SET
+			month = EXCLUDED.month,
+			extra_allocated_bytes = merged_traffic.extra_allocated_bytes + EXCLUDED.extra_allocated_bytes,
+			updated_at = EXCLUDED.updated_at
+		RETURNING extra_allocated_bytes
+	`, userID, month, bytesToAdd, at.UTC()).Scan(&extraAllocatedBytes)
+	return extraAllocatedBytes, err
 }
 
 func (s *Store) GetDailyStats(start, end time.Time) (int, int, float64, float64, error) {
