@@ -329,11 +329,14 @@ var trafficPacks = []TrafficPack{
 	{ID: "traffic_250gb", Title: "250 ГБ", GB: 250, Amount: 549},
 }
 
+var testTrafficPack = TrafficPack{ID: "traffic_test_5gb", Title: "Тест 5 ГБ", GB: 5, Amount: 1}
+
 var trafficPackByID = func() map[string]TrafficPack {
 	m := make(map[string]TrafficPack)
 	for _, p := range trafficPacks {
 		m[p.ID] = p
 	}
+	m[testTrafficPack.ID] = testTrafficPack
 	return m
 }()
 
@@ -2014,9 +2017,25 @@ func rateKeyboardRaw(chatID int64) rawInlineKeyboardMarkup {
 	return rawInlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-func trafficPackKeyboardRaw() rawInlineKeyboardMarkup {
+func visibleTrafficPacks(chatID int64) []TrafficPack {
+	packs := append([]TrafficPack(nil), trafficPacks...)
+	if isAdmin(chatID) {
+		packs = append([]TrafficPack{testTrafficPack}, packs...)
+	}
+	return packs
+}
+
+func findTrafficPackForUser(chatID int64, id string) (TrafficPack, bool) {
+	if id == testTrafficPack.ID && !isAdmin(chatID) {
+		return TrafficPack{}, false
+	}
+	pack, ok := trafficPackByID[id]
+	return pack, ok
+}
+
+func trafficPackKeyboardRaw(chatID int64) rawInlineKeyboardMarkup {
 	var rows [][]rawInlineKeyboardButton
-	for _, p := range trafficPacks {
+	for _, p := range visibleTrafficPacks(chatID) {
 		rows = append(rows, []rawInlineKeyboardButton{
 			rawCallbackButton(fmt.Sprintf("%s — %.0f ₽", p.Title, p.Amount), "traffic_pack_"+p.ID, "", ""),
 		})
@@ -2043,7 +2062,7 @@ func handleBuyTraffic(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session 
 	}
 
 	text := "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> докупить трафик\n\nбазовые <b>10 ГБ</b> белых списков обновляются каждый месяц.\nкупленный трафик переносится дальше, если не был потрачен."
-	_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, text, "HTML", trafficPackKeyboardRaw())
+	_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, text, "HTML", trafficPackKeyboardRaw(chatID))
 	ackCallback(bot, cq, "выберите пакет")
 }
 
@@ -4489,9 +4508,9 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		_ = userStore.AcceptPrivacy(userID, time.Now())
 
 		if session.PendingTrafficPackID != "" {
-			pack, ok := trafficPackByID[session.PendingTrafficPackID]
+			pack, ok := findTrafficPackForUser(chatID, session.PendingTrafficPackID)
 			if !ok {
-				_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, "Пакет трафика не найден, выбери заново.", "HTML", trafficPackKeyboardRaw())
+				_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, "Пакет трафика не найден, выбери заново.", "HTML", trafficPackKeyboardRaw(chatID))
 				return
 			}
 			if err := startPaymentForTrafficPack(bot, chatID, session, pack); err != nil {
@@ -5188,7 +5207,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		return
 	case strings.HasPrefix(data, "traffic_pack_"):
 		id := strings.TrimPrefix(data, "traffic_pack_")
-		pack, ok := trafficPackByID[id]
+		pack, ok := findTrafficPackForUser(chatID, id)
 		if !ok {
 			ackCallback(bot, cq, "пакет не найден")
 			return
@@ -5235,7 +5254,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 
 	case data == "retry_payment":
 		if session.PendingTrafficPackID != "" {
-			pack, ok := trafficPackByID[session.PendingTrafficPackID]
+			pack, ok := findTrafficPackForUser(chatID, session.PendingTrafficPackID)
 			if !ok {
 				ackCallback(bot, cq, "пакет не найден")
 				return
@@ -6530,6 +6549,9 @@ func handleSuccessfulTrafficPayment(bot *tgbotapi.BotAPI, msg *tgbotapi.Message,
 	days, _ := userStore.GetDays(userIDStr)
 	if days <= 0 {
 		return fmt.Errorf("traffic purchase requires active access")
+	}
+	if pack.ID == testTrafficPack.ID && !isAdmin(chatID) {
+		return fmt.Errorf("test traffic pack is admin-only")
 	}
 
 	if err := syncMergedAccessForUser(userIDStr); err != nil {
