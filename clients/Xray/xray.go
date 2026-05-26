@@ -1106,79 +1106,10 @@ func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, e
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
-	jsonBody, err := buildClientCreatePayload(inboundID, client)
-	if err != nil {
-		colorfulprint.PrintError("Failed marshal client create payload", err)
-		return nil, err
-	}
-	requestURL := fmt.Sprintf("%s/panel/api/clients/add", x.serverURL)
-	statusCode, body, err := x.doAPIRequest("POST", requestURL, jsonBody, map[string]string{
-		"Content-Type": "application/json",
-		"Accept":       "application/json",
-	})
-	if err != nil {
-		colorfulprint.PrintError("Failed response", err)
-		return nil, err
-	}
-	colorfulprint.PrintState(fmt.Sprintf("add client status=%d\n%s", statusCode, string(body)))
-	if !isEndpointUnsupported(statusCode) {
-		if err := checkAPISuccess("add client", statusCode, body); err != nil {
-			return nil, err
-		}
-		return &client, nil
-	}
-
-	if err := x.addClientWithLegacyAPI(inboundID, client); err != nil {
+	if err := x.upsertClientViaInboundUpdate(inboundID, client, false); err != nil {
 		return nil, err
 	}
 	return &client, nil
-}
-
-func buildClientCreatePayload(inboundID int, client Client) ([]byte, error) {
-	payload := map[string]interface{}{
-		"client":     client,
-		"inboundIds": []int{inboundID},
-	}
-	return json.Marshal(payload)
-}
-
-func (x *XRayClient) addClientWithLegacyAPI(inboundID int, client Client) error {
-	requestURL := fmt.Sprintf("%s/panel/api/inbounds/addClient", x.serverURL)
-
-	jsonBody, err := buildClientPayload(inboundID, client)
-	if err != nil {
-		colorfulprint.PrintError("Failed marshal settings", err)
-		return err
-	}
-
-	statusCode, body, err := x.doAPIRequest("POST", requestURL, jsonBody, map[string]string{
-		"Content-Type": "application/json",
-		"Accept":       "application/json",
-	})
-	if err != nil {
-		colorfulprint.PrintError("Failed response", err)
-		return err
-	}
-	colorfulprint.PrintState(fmt.Sprintf("add client status=%d\n%s", statusCode, string(body)))
-	return checkAPISuccess("add client", statusCode, body)
-}
-
-func buildClientPayload(inboundID int, client Client) ([]byte, error) {
-	settings := map[string]interface{}{
-		"clients": []Client{client},
-	}
-
-	settingsJSON, err := json.Marshal(settings)
-	if err != nil {
-		return nil, err
-	}
-
-	payload := map[string]interface{}{
-		"id":       inboundID,
-		"settings": string(settingsJSON), // raw JSON string expected by API
-	}
-
-	return json.Marshal(payload)
 }
 
 func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
@@ -1193,43 +1124,10 @@ func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
-	if err := x.updateClientViaInboundUpdate(inboundID, client); err == nil {
-		return nil
-	} else {
-		log.Printf("[XRAY] inbound-scoped update failed inbound=%d email=%s err=%v", inboundID, client.Email, err)
-	}
-
-	updateEmail := strings.TrimSpace(client.Email)
-	if current, err := x.GetClientByUUID(inboundID, client.ID); err == nil && current != nil && strings.TrimSpace(current.Email) != "" {
-		updateEmail = strings.TrimSpace(current.Email)
-	}
-	if updateEmail == "" {
-		return fmt.Errorf("client email is empty")
-	}
-
-	jsonBody, err := json.Marshal(client)
-	if err != nil {
-		colorfulprint.PrintError("Failed marshal json", err)
-		return err
-	}
-	requestURL := fmt.Sprintf("%s/panel/api/clients/update/%s", x.serverURL, url.PathEscape(updateEmail))
-	statusCode, body, err := x.doAPIRequest("POST", requestURL, jsonBody, map[string]string{
-		"Content-Type": "application/json",
-		"Accept":       "application/json",
-	})
-	if err != nil {
-		colorfulprint.PrintError("Failed response", err)
-		return err
-	}
-	colorfulprint.PrintState(fmt.Sprintf("update client status=%d\n%s", statusCode, string(body)))
-	if !isEndpointUnsupported(statusCode) {
-		return checkAPISuccess("update client", statusCode, body)
-	}
-
-	return x.updateClientWithLegacyAPI(inboundID, client)
+	return x.upsertClientViaInboundUpdate(inboundID, client, true)
 }
 
-func (x *XRayClient) updateClientViaInboundUpdate(inboundID int, client Client) error {
+func (x *XRayClient) upsertClientViaInboundUpdate(inboundID int, client Client, requireExisting bool) error {
 	inbound, err := x.getInboundData(inboundID)
 	if err != nil {
 		return err
@@ -1261,10 +1159,14 @@ func (x *XRayClient) updateClientViaInboundUpdate(inboundID int, client Client) 
 		}
 	}
 	if targetIndex < 0 {
-		return fmt.Errorf("client %s not found in inbound %d", client.ID, inboundID)
+		if requireExisting {
+			return fmt.Errorf("client %s not found in inbound %d", client.ID, inboundID)
+		}
+		rawClients = append(rawClients, replacement)
+	} else {
+		rawClients[targetIndex] = mergeClientMap(rawClients[targetIndex], replacement)
 	}
 
-	rawClients[targetIndex] = mergeClientMap(rawClients[targetIndex], replacement)
 	settings["clients"] = dedupeClientMaps(rawClients)
 
 	settingsJSON, err := json.Marshal(settings)
@@ -1369,27 +1271,6 @@ func dedupeClientMaps(clients []interface{}) []interface{} {
 		out = append(out, rawClient)
 	}
 	return out
-}
-
-func (x *XRayClient) updateClientWithLegacyAPI(inboundID int, client Client) error {
-	requestURL := fmt.Sprintf("%s/panel/api/inbounds/updateClient/%s", x.serverURL, url.PathEscape(client.ID))
-
-	jsonBody, err := buildClientPayload(inboundID, client)
-	if err != nil {
-		colorfulprint.PrintError("Failed marshal json", err)
-		return err
-	}
-
-	statusCode, body, err := x.doAPIRequest("POST", requestURL, jsonBody, map[string]string{
-		"Content-Type": "application/json",
-		"Accept":       "application/json",
-	})
-	if err != nil {
-		colorfulprint.PrintError("Failed response", err)
-		return err
-	}
-	colorfulprint.PrintState(fmt.Sprintf("update client status=%d\n%s", statusCode, string(body)))
-	return checkAPISuccess("update client", statusCode, body)
 }
 
 // EnsureExpiry updates expiryTime for client by adding given days (from now or existing expiry).
