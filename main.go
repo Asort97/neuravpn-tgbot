@@ -258,6 +258,7 @@ type DataStore interface {
 	AddDays(userID string, days int64) error
 	GetDays(userID string) (int64, error)
 	SetDays(userID string, days int64) error
+	DeleteUser(userID string) error
 	GetEmail(userID string) (string, error)
 	SetEmail(userID, email string) error
 	GetVerifiedEmail(userID string) (string, error)
@@ -3683,6 +3684,126 @@ func handleRemoveDays(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySe
 	logAction(bot, msg.From.ID, msg.From.UserName, fmt.Sprintf("/remove %s %d дн.", targetUserID, days), false)
 }
 
+func handleWipeUser(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	chatID := msg.Chat.ID
+
+	isAdmin := false
+	for _, id := range adminIDs {
+		if id == msg.From.ID {
+			isAdmin = true
+			break
+		}
+	}
+	if !isAdmin {
+		m := tgbotapi.NewMessage(chatID, "⛔️ Только для админа")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) != 2 || strings.ToLower(strings.TrimSpace(args[1])) != "confirm" {
+		m := tgbotapi.NewMessage(chatID, "Использование: <code>/wipeuser userID confirm</code>\nПример: <code>/wipeuser 123456789 confirm</code>")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	targetUserID := strings.TrimSpace(args[0])
+	if _, err := strconv.ParseInt(targetUserID, 10, 64); err != nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Неверный userID: "+html.EscapeString(targetUserID))
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	var report []string
+	if err := userStore.DeleteUser(targetUserID); err != nil {
+		report = append(report, "БД бота: ❌ "+err.Error())
+	} else {
+		report = append(report, "БД бота: ✅ удалён")
+	}
+
+	if xrCfg == nil || xrCfg.client == nil {
+		report = append(report, "панель: ⚠️ основной Xray не настроен")
+	} else {
+		report = append(report, wipeUserFromXray("основная панель", xrCfg, targetUserID)...)
+	}
+	if mergedXrayCfg != nil && mergedXrayCfg.client != nil {
+		report = append(report, wipeUserFromXray("merged панель", mergedXrayCfg, targetUserID)...)
+	}
+
+	text := fmt.Sprintf("<b>wipe user <code>%s</code></b>\n\n%s", html.EscapeString(targetUserID), strings.Join(report, "\n"))
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = "HTML"
+	_, _ = bot.Send(m)
+	logAction(bot, msg.From.ID, msg.From.UserName, "/wipeuser "+targetUserID, false)
+}
+
+func wipeUserFromXray(label string, cfg *xraySettings, targetUserID string) []string {
+	inboundIDs := cfg.inboundIDs
+	if len(inboundIDs) == 0 && cfg.inboundID > 0 {
+		inboundIDs = []int{cfg.inboundID}
+	}
+	if len(inboundIDs) == 0 {
+		ids, err := mergedInboundIDs(cfg)
+		if err == nil {
+			inboundIDs = ids
+		}
+	}
+	if len(inboundIDs) == 0 {
+		return []string{label + ": ⚠️ нет inbound IDs"}
+	}
+
+	emails := make(map[string]struct{})
+	subID := "sub" + strings.TrimSpace(targetUserID)
+	for _, inboundID := range inboundIDs {
+		clients, err := cfg.client.GetInboundById(inboundID)
+		if err != nil {
+			log.Printf("[wipeuser] scan failed label=%s inbound=%d user=%s err=%v", label, inboundID, targetUserID, err)
+			continue
+		}
+		for _, client := range clients {
+			if clientMatchesWipeTarget(client, targetUserID, subID) && strings.TrimSpace(client.Email) != "" {
+				emails[strings.TrimSpace(client.Email)] = struct{}{}
+			}
+		}
+	}
+
+	if len(emails) == 0 {
+		return []string{label + ": ⚠️ клиент не найден"}
+	}
+
+	deleted := 0
+	failed := 0
+	for email := range emails {
+		if err := cfg.client.DeleteClientByEmail(email, false); err != nil {
+			failed++
+			log.Printf("[wipeuser] delete failed label=%s email=%s user=%s err=%v", label, email, targetUserID, err)
+			continue
+		}
+		deleted++
+	}
+	return []string{fmt.Sprintf("%s: ✅ удалено email=%d, ошибок=%d", label, deleted, failed)}
+}
+
+func clientMatchesWipeTarget(client xray.Client, targetUserID string, subID string) bool {
+	targetUserID = strings.TrimSpace(targetUserID)
+	subID = strings.TrimSpace(subID)
+	if targetUserID != "" && strings.TrimSpace(client.TgID) == targetUserID {
+		return true
+	}
+	if subID != "" && strings.TrimSpace(client.SubID) == subID {
+		return true
+	}
+	if targetUserID != "" && strings.TrimSpace(client.Comment) == "tg:"+targetUserID {
+		return true
+	}
+	email := strings.ToLower(strings.TrimSpace(client.Email))
+	tg := strings.ToLower(targetUserID)
+	return tg != "" && (strings.Contains(email, "tg"+tg) || strings.HasPrefix(email, tg+"@") || strings.HasPrefix(email, "tg"+tg+"@"))
+}
+
 func handleSyncInbounds(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
 	handleSyncInboundsInternal(bot, msg, xrCfg, false)
 }
@@ -4466,6 +4587,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleAddDays(bot, msg, xrCfg)
 		case "remove":
 			handleRemoveDays(bot, msg, xrCfg)
+		case "wipeuser":
+			handleWipeUser(bot, msg, xrCfg)
 		case "sync_inbounds":
 			handleSyncInbounds(bot, msg, xrCfg)
 		case "sync_active_inbounds":

@@ -177,6 +177,15 @@ func (s *Store) SetDays(userID string, days int64) error {
 	return s.saveUsersLocked()
 }
 
+func (s *Store) DeleteUser(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	delete(db, userID)
+	return s.saveUsersLocked()
+}
+
 func (s *Store) GetCertRef(userID string) (string, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()

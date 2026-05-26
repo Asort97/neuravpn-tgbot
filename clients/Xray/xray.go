@@ -1296,6 +1296,23 @@ func (x *XRayClient) AttachClientToInbounds(email string, inboundIDs []int) erro
 	return checkAPISuccess("attach client", statusCode, body)
 }
 
+func (x *XRayClient) DeleteClientByEmail(email string, keepTraffic bool) error {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("client email is empty")
+	}
+	suffix := ""
+	if keepTraffic {
+		suffix = "?keepTraffic=1"
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/clients/del/%s%s", x.serverURL, url.PathEscape(email), suffix)
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("delete client", statusCode, body)
+}
+
 func (x *XRayClient) UpdateClientByEmail(routeEmail string, client Client) error {
 	routeEmail = strings.TrimSpace(routeEmail)
 	if routeEmail == "" {

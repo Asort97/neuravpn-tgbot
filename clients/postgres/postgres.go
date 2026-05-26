@@ -227,6 +227,29 @@ func (s *Store) SetDays(userID string, days int64) error {
 	return err
 }
 
+func (s *Store) DeleteUser(userID string) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	statements := []string{
+		`DELETE FROM applied_payments WHERE user_id = $1`,
+		`DELETE FROM merged_traffic WHERE user_id = $1`,
+		`DELETE FROM web_login_tokens WHERE user_id = $1`,
+		`DELETE FROM user_promocodes WHERE user_id = $1`,
+		`DELETE FROM users WHERE id = $1`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.Exec(ctx, stmt, userID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) SetEmail(userID, email string) error {
 	ctx := context.Background()
 	email = strings.TrimSpace(email)
