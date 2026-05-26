@@ -147,6 +147,53 @@ type InboundData struct {
 	Sniffing       string `json:"sniffing"`
 }
 
+func (i *InboundData) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID             int             `json:"id"`
+		Remark         string          `json:"remark"`
+		Enable         bool            `json:"enable"`
+		Port           int             `json:"port"`
+		Protocol       string          `json:"protocol"`
+		Settings       json.RawMessage `json:"settings"`
+		StreamSettings json.RawMessage `json:"streamSettings"`
+		Tag            string          `json:"tag"`
+		Sniffing       json.RawMessage `json:"sniffing"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*i = InboundData{
+		ID:             raw.ID,
+		Remark:         raw.Remark,
+		Enable:         raw.Enable,
+		Port:           raw.Port,
+		Protocol:       raw.Protocol,
+		Settings:       rawJSONString(raw.Settings),
+		StreamSettings: rawJSONString(raw.StreamSettings),
+		Tag:            raw.Tag,
+		Sniffing:       rawJSONString(raw.Sniffing),
+	}
+	return nil
+}
+
+func rawJSONString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s
+		}
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err == nil {
+		return buf.String()
+	}
+	return string(raw)
+}
+
 type InboundResponse struct {
 	Success bool        `json:"success"`
 	Msg     string      `json:"msg"`
