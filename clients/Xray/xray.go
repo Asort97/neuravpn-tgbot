@@ -136,42 +136,66 @@ type InboundSettings struct {
 
 // InboundData mirrors inbound API response object.
 type InboundData struct {
-	ID             int    `json:"id"`
-	Remark         string `json:"remark"`
-	Enable         bool   `json:"enable"`
-	Port           int    `json:"port"`
-	Protocol       string `json:"protocol"`
-	Settings       string `json:"settings"`
-	StreamSettings string `json:"streamSettings"`
-	Tag            string `json:"tag"`
-	Sniffing       string `json:"sniffing"`
+	ID                   int    `json:"id"`
+	Up                   int64  `json:"up"`
+	Down                 int64  `json:"down"`
+	Total                int64  `json:"total"`
+	Remark               string `json:"remark"`
+	Enable               bool   `json:"enable"`
+	ExpiryTime           int64  `json:"expiryTime"`
+	TrafficReset         string `json:"trafficReset"`
+	LastTrafficResetTime int64  `json:"lastTrafficResetTime"`
+	Listen               string `json:"listen"`
+	Port                 int    `json:"port"`
+	Protocol             string `json:"protocol"`
+	Settings             string `json:"settings"`
+	StreamSettings       string `json:"streamSettings"`
+	Tag                  string `json:"tag"`
+	Sniffing             string `json:"sniffing"`
+	NodeID               *int   `json:"nodeId,omitempty"`
 }
 
 func (i *InboundData) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		ID             int             `json:"id"`
-		Remark         string          `json:"remark"`
-		Enable         bool            `json:"enable"`
-		Port           int             `json:"port"`
-		Protocol       string          `json:"protocol"`
-		Settings       json.RawMessage `json:"settings"`
-		StreamSettings json.RawMessage `json:"streamSettings"`
-		Tag            string          `json:"tag"`
-		Sniffing       json.RawMessage `json:"sniffing"`
+		ID                   int             `json:"id"`
+		Up                   int64           `json:"up"`
+		Down                 int64           `json:"down"`
+		Total                int64           `json:"total"`
+		Remark               string          `json:"remark"`
+		Enable               bool            `json:"enable"`
+		ExpiryTime           int64           `json:"expiryTime"`
+		TrafficReset         string          `json:"trafficReset"`
+		LastTrafficResetTime int64           `json:"lastTrafficResetTime"`
+		Listen               string          `json:"listen"`
+		Port                 int             `json:"port"`
+		Protocol             string          `json:"protocol"`
+		Settings             json.RawMessage `json:"settings"`
+		StreamSettings       json.RawMessage `json:"streamSettings"`
+		Tag                  string          `json:"tag"`
+		Sniffing             json.RawMessage `json:"sniffing"`
+		NodeID               *int            `json:"nodeId"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	*i = InboundData{
-		ID:             raw.ID,
-		Remark:         raw.Remark,
-		Enable:         raw.Enable,
-		Port:           raw.Port,
-		Protocol:       raw.Protocol,
-		Settings:       rawJSONString(raw.Settings),
-		StreamSettings: rawJSONString(raw.StreamSettings),
-		Tag:            raw.Tag,
-		Sniffing:       rawJSONString(raw.Sniffing),
+		ID:                   raw.ID,
+		Up:                   raw.Up,
+		Down:                 raw.Down,
+		Total:                raw.Total,
+		Remark:               raw.Remark,
+		Enable:               raw.Enable,
+		ExpiryTime:           raw.ExpiryTime,
+		TrafficReset:         raw.TrafficReset,
+		LastTrafficResetTime: raw.LastTrafficResetTime,
+		Listen:               raw.Listen,
+		Port:                 raw.Port,
+		Protocol:             raw.Protocol,
+		Settings:             rawJSONString(raw.Settings),
+		StreamSettings:       rawJSONString(raw.StreamSettings),
+		Tag:                  raw.Tag,
+		Sniffing:             rawJSONString(raw.Sniffing),
+		NodeID:               raw.NodeID,
 	}
 	return nil
 }
@@ -1169,6 +1193,12 @@ func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
+	if err := x.updateClientViaInboundUpdate(inboundID, client); err == nil {
+		return nil
+	} else {
+		log.Printf("[XRAY] inbound-scoped update failed inbound=%d email=%s err=%v", inboundID, client.Email, err)
+	}
+
 	updateEmail := strings.TrimSpace(client.Email)
 	if current, err := x.GetClientByUUID(inboundID, client.ID); err == nil && current != nil && strings.TrimSpace(current.Email) != "" {
 		updateEmail = strings.TrimSpace(current.Email)
@@ -1197,6 +1227,148 @@ func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 	}
 
 	return x.updateClientWithLegacyAPI(inboundID, client)
+}
+
+func (x *XRayClient) updateClientViaInboundUpdate(inboundID int, client Client) error {
+	inbound, err := x.getInboundData(inboundID)
+	if err != nil {
+		return err
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+		return fmt.Errorf("parse inbound settings: %w", err)
+	}
+	rawClients, ok := settings["clients"].([]interface{})
+	if !ok {
+		return fmt.Errorf("inbound settings.clients is missing or invalid")
+	}
+
+	replacement, err := clientToMap(client)
+	if err != nil {
+		return err
+	}
+
+	targetIndex := -1
+	for idx, rawClient := range rawClients {
+		clientMap, ok := rawClient.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if clientMapMatches(clientMap, client.ID, client.Email) {
+			targetIndex = idx
+			break
+		}
+	}
+	if targetIndex < 0 {
+		return fmt.Errorf("client %s not found in inbound %d", client.ID, inboundID)
+	}
+
+	rawClients[targetIndex] = mergeClientMap(rawClients[targetIndex], replacement)
+	settings["clients"] = dedupeClientMaps(rawClients)
+
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	inbound.Settings = string(settingsJSON)
+
+	payload, err := json.Marshal(inbound)
+	if err != nil {
+		return err
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/inbounds/update/%d", x.serverURL, inboundID)
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, payload, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("update inbound client", statusCode, body)
+}
+
+func (x *XRayClient) getInboundData(inboundID int) (*InboundData, error) {
+	requestURL := fmt.Sprintf("%s/panel/api/inbounds/get/%d", x.serverURL, inboundID)
+	statusCode, body, err := x.doAPIRequest("GET", requestURL, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return nil, err
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return nil, fmt.Errorf("get inbound returned status=%d body=%s", statusCode, responseSnippet(body))
+	}
+
+	var inboundResp InboundResponse
+	if err := json.Unmarshal(body, &inboundResp); err != nil {
+		return nil, fmt.Errorf("%w; body=%s", err, responseSnippet(body))
+	}
+	if !inboundResp.Success {
+		return nil, fmt.Errorf("API returned success=false: %s", inboundResp.Msg)
+	}
+	return &inboundResp.Obj, nil
+}
+
+func clientToMap(client Client) (map[string]interface{}, error) {
+	body, err := json.Marshal(client)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func clientMapMatches(clientMap map[string]interface{}, clientID, email string) bool {
+	clientID = strings.TrimSpace(clientID)
+	email = strings.TrimSpace(email)
+	if clientID != "" {
+		if strings.TrimSpace(fmt.Sprint(clientMap["id"])) == clientID {
+			return true
+		}
+	}
+	if email != "" && strings.EqualFold(strings.TrimSpace(fmt.Sprint(clientMap["email"])), email) {
+		return true
+	}
+	return false
+}
+
+func mergeClientMap(oldRaw interface{}, replacement map[string]interface{}) map[string]interface{} {
+	merged := map[string]interface{}{}
+	if oldMap, ok := oldRaw.(map[string]interface{}); ok {
+		for key, value := range oldMap {
+			merged[key] = value
+		}
+	}
+	for key, value := range replacement {
+		merged[key] = value
+	}
+	return merged
+}
+
+func dedupeClientMaps(clients []interface{}) []interface{} {
+	seenEmail := make(map[string]int, len(clients))
+	out := make([]interface{}, 0, len(clients))
+	for _, rawClient := range clients {
+		clientMap, ok := rawClient.(map[string]interface{})
+		if !ok {
+			out = append(out, rawClient)
+			continue
+		}
+		email := strings.ToLower(strings.TrimSpace(fmt.Sprint(clientMap["email"])))
+		if email == "" {
+			out = append(out, rawClient)
+			continue
+		}
+		if existingIndex, ok := seenEmail[email]; ok {
+			out[existingIndex] = rawClient
+			continue
+		}
+		seenEmail[email] = len(out)
+		out = append(out, rawClient)
+	}
+	return out
 }
 
 func (x *XRayClient) updateClientWithLegacyAPI(inboundID int, client Client) error {
