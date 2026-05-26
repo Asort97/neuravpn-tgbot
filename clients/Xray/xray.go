@@ -77,6 +77,25 @@ func (c *Client) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (c Client) MarshalJSON() ([]byte, error) {
+	dto := clientDTO{
+		ID:         c.ID,
+		Email:      c.Email,
+		Enable:     c.Enable,
+		Flow:       c.Flow,
+		LimitIP:    c.LimitIP,
+		TotalGB:    c.TotalGB,
+		ExpiryTime: c.ExpiryTime,
+		SubID:      c.SubID,
+		TgID:       tgIDAsNumber(c.TgID),
+		Comment:    c.Comment,
+		Reset:      c.Reset,
+		CreatedAt:  c.CreatedAt,
+		UpdatedAt:  c.UpdatedAt,
+	}
+	return json.Marshal(dto)
+}
+
 func normalizeTgID(value interface{}) string {
 	switch v := value.(type) {
 	case nil:
@@ -94,6 +113,18 @@ func normalizeTgID(value interface{}) string {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func tgIDAsNumber(value string) int64 {
+	value = strings.ReplaceAll(strings.TrimSpace(value), " ", "")
+	if value == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // InboundSettings describes inbound settings payload with embedded clients.
@@ -142,6 +173,7 @@ type XRayClient struct {
 	port        string
 	webBasePath string
 	serverURL   string
+	apiToken    string
 	httpClient  *http.Client
 	authMu      sync.Mutex
 	csrfToken   string
@@ -177,29 +209,52 @@ func New(username, password, host, port, webBasePath string) *XRayClient {
 	}
 }
 
+func (x *XRayClient) SetAPIToken(token string) {
+	x.apiToken = strings.TrimSpace(token)
+}
+
+func (x *XRayClient) hasAPIToken() bool {
+	return strings.TrimSpace(x.apiToken) != ""
+}
+
 // LoginToServer must be called before any other API calls.
 func (x *XRayClient) LoginToServer() error {
 	x.authMu.Lock()
 	defer x.authMu.Unlock()
 
+	if x.hasAPIToken() {
+		return nil
+	}
+
 	// 1. Fetch CSRF token for 3x-ui v3.0.0+
 	csrfUrl := fmt.Sprintf("%s/csrf-token", x.serverURL)
 	csrfReq, err := http.NewRequest("GET", csrfUrl, nil)
-	if err == nil {
-		csrfResp, csrfErr := x.httpClient.Do(csrfReq)
-		if csrfErr == nil {
-			defer csrfResp.Body.Close()
-			if csrfResp.StatusCode >= 200 && csrfResp.StatusCode < 300 {
-				var result struct {
-					Success bool   `json:"success"`
-					Obj     string `json:"obj"`
-				}
-				body, _ := io.ReadAll(csrfResp.Body)
-				if err := json.Unmarshal(body, &result); err == nil && result.Success {
-					x.csrfToken = result.Obj
-				}
-			}
+	if err != nil {
+		return err
+	}
+	csrfResp, csrfErr := x.httpClient.Do(csrfReq)
+	if csrfErr != nil {
+		return fmt.Errorf("xray csrf request failed: %w", csrfErr)
+	}
+	defer csrfResp.Body.Close()
+	csrfBody, _ := io.ReadAll(csrfResp.Body)
+	if csrfResp.StatusCode < 200 || csrfResp.StatusCode >= 300 {
+		if !isEndpointUnsupported(csrfResp.StatusCode) {
+			return fmt.Errorf("xray csrf returned status=%d body=%s", csrfResp.StatusCode, responseSnippet(csrfBody))
 		}
+	} else {
+		var csrfResult struct {
+			Success bool   `json:"success"`
+			Msg     string `json:"msg"`
+			Obj     string `json:"obj"`
+		}
+		if err := json.Unmarshal(csrfBody, &csrfResult); err != nil {
+			return fmt.Errorf("xray csrf invalid response: %w; body=%s", err, responseSnippet(csrfBody))
+		}
+		if !csrfResult.Success || strings.TrimSpace(csrfResult.Obj) == "" {
+			return fmt.Errorf("xray csrf failed: %s", strings.TrimSpace(csrfResult.Msg))
+		}
+		x.csrfToken = csrfResult.Obj
 	}
 
 	url := fmt.Sprintf("%s/login", x.serverURL)
@@ -240,6 +295,16 @@ func (x *XRayClient) LoginToServer() error {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return fmt.Errorf("xray login returned empty body")
 	}
+	var loginResult struct {
+		Success bool   `json:"success"`
+		Msg     string `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &loginResult); err != nil {
+		return fmt.Errorf("xray login invalid response: %w; body=%s", err, responseSnippet(body))
+	}
+	if !loginResult.Success {
+		return fmt.Errorf("xray login failed: %s", strings.TrimSpace(loginResult.Msg))
+	}
 
 	return nil
 }
@@ -260,6 +325,9 @@ func shouldRetryAfterRelogin(statusCode int, body []byte) bool {
 	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
 		return true
 	}
+	if statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed {
+		return false
+	}
 	if len(trimmed) == 0 {
 		return true
 	}
@@ -267,6 +335,27 @@ func shouldRetryAfterRelogin(statusCode int, body []byte) bool {
 		return true
 	}
 	return false
+}
+
+func isEndpointUnsupported(statusCode int) bool {
+	return statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed
+}
+
+func checkAPISuccess(action string, statusCode int, body []byte) error {
+	if statusCode < 200 || statusCode >= 300 {
+		return fmt.Errorf("%s returned status=%d body=%s", action, statusCode, responseSnippet(body))
+	}
+	var raw struct {
+		Success *bool  `json:"success"`
+		Msg     string `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return fmt.Errorf("%s invalid response: %w; body=%s", action, err, responseSnippet(body))
+	}
+	if raw.Success != nil && !*raw.Success {
+		return fmt.Errorf("%s returned success=false: %s", action, strings.TrimSpace(raw.Msg))
+	}
+	return nil
 }
 
 func (x *XRayClient) doAPIRequest(method, url string, payload []byte, headers map[string]string) (int, []byte, error) {
@@ -285,6 +374,9 @@ func (x *XRayClient) doAPIRequestOnce(method, url string, payload []byte, header
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
+	}
+	if x.hasAPIToken() {
+		req.Header.Set("Authorization", "Bearer "+x.apiToken)
 	}
 	if x.csrfToken != "" {
 		req.Header.Set("X-CSRF-Token", x.csrfToken)
@@ -450,11 +542,18 @@ func (x *XRayClient) GetClientTrafficByEmail(email string) (*ClientTraffic, erro
 	if email == "" {
 		return nil, fmt.Errorf("client email is empty")
 	}
-	url := fmt.Sprintf("%s/panel/api/inbounds/getClientTraffics/%s", x.serverURL, url.PathEscape(email))
+	requestURL := fmt.Sprintf("%s/panel/api/clients/traffic/%s", x.serverURL, url.PathEscape(email))
 
-	statusCode, body, err := x.doAPIRequest("GET", url, nil, map[string]string{"Accept": "application/json"})
+	statusCode, body, err := x.doAPIRequest("GET", requestURL, nil, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		return nil, err
+	}
+	if isEndpointUnsupported(statusCode) {
+		requestURL = fmt.Sprintf("%s/panel/api/inbounds/getClientTraffics/%s", x.serverURL, url.PathEscape(email))
+		statusCode, body, err = x.doAPIRequest("GET", requestURL, nil, map[string]string{"Accept": "application/json"})
+		if err != nil {
+			return nil, err
+		}
 	}
 	if statusCode < 200 || statusCode >= 300 {
 		return nil, fmt.Errorf("get client traffic returned status=%d body=%s", statusCode, responseSnippet(body))
@@ -498,27 +597,20 @@ func (x *XRayClient) ResetClientTraffic(inboundID int, email string) error {
 	if email == "" {
 		return fmt.Errorf("client email is empty")
 	}
-	url := fmt.Sprintf("%s/panel/api/inbounds/%d/resetClientTraffic/%s", x.serverURL, inboundID, url.PathEscape(email))
+	requestURL := fmt.Sprintf("%s/panel/api/clients/resetTraffic/%s", x.serverURL, url.PathEscape(email))
 
-	statusCode, body, err := x.doAPIRequest("POST", url, nil, map[string]string{"Accept": "application/json"})
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, nil, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		return err
 	}
-	if statusCode < 200 || statusCode >= 300 {
-		return fmt.Errorf("reset client traffic returned status=%d body=%s", statusCode, responseSnippet(body))
+	if isEndpointUnsupported(statusCode) {
+		requestURL = fmt.Sprintf("%s/panel/api/inbounds/%d/resetClientTraffic/%s", x.serverURL, inboundID, url.PathEscape(email))
+		statusCode, body, err = x.doAPIRequest("POST", requestURL, nil, map[string]string{"Accept": "application/json"})
+		if err != nil {
+			return err
+		}
 	}
-
-	var raw struct {
-		Success bool   `json:"success"`
-		Msg     string `json:"msg"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return fmt.Errorf("%w; body=%s", err, responseSnippet(body))
-	}
-	if !raw.Success {
-		return fmt.Errorf("API returned success=false: %s", raw.Msg)
-	}
-	return nil
+	return checkAPISuccess("reset client traffic", statusCode, body)
 }
 
 func (x *XRayClient) GenerateVLESSLink(client *Client, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string) string {
@@ -932,8 +1024,9 @@ func (x *XRayClient) AddClient(inboundID int, tgUserId string) (string, error) {
 
 // AddClientWithData sends full client struct to add a new entry.
 func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, error) {
-	url := fmt.Sprintf("%s/panel/api/inbounds/addClient", x.serverURL)
-
+	if inboundID <= 0 {
+		return nil, fmt.Errorf("inboundID is invalid")
+	}
 	if client.ID == "" {
 		client.ID = uuid.New().String()
 	}
@@ -942,13 +1035,13 @@ func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, e
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
-	jsonBody, err := buildClientPayload(inboundID, client)
+	jsonBody, err := buildClientCreatePayload(inboundID, client)
 	if err != nil {
-		colorfulprint.PrintError("Failed marshal settings", err)
+		colorfulprint.PrintError("Failed marshal client create payload", err)
 		return nil, err
 	}
-
-	statusCode, body, err := x.doAPIRequest("POST", url, jsonBody, map[string]string{
+	requestURL := fmt.Sprintf("%s/panel/api/clients/add", x.serverURL)
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, jsonBody, map[string]string{
 		"Content-Type": "application/json",
 		"Accept":       "application/json",
 	})
@@ -957,11 +1050,46 @@ func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, e
 		return nil, err
 	}
 	colorfulprint.PrintState(fmt.Sprintf("add client status=%d\n%s", statusCode, string(body)))
-	if statusCode < 200 || statusCode >= 300 {
-		return nil, fmt.Errorf("add client returned status=%d body=%s", statusCode, responseSnippet(body))
+	if !isEndpointUnsupported(statusCode) {
+		if err := checkAPISuccess("add client", statusCode, body); err != nil {
+			return nil, err
+		}
+		return &client, nil
 	}
 
+	if err := x.addClientWithLegacyAPI(inboundID, client); err != nil {
+		return nil, err
+	}
 	return &client, nil
+}
+
+func buildClientCreatePayload(inboundID int, client Client) ([]byte, error) {
+	payload := map[string]interface{}{
+		"client":     client,
+		"inboundIds": []int{inboundID},
+	}
+	return json.Marshal(payload)
+}
+
+func (x *XRayClient) addClientWithLegacyAPI(inboundID int, client Client) error {
+	requestURL := fmt.Sprintf("%s/panel/api/inbounds/addClient", x.serverURL)
+
+	jsonBody, err := buildClientPayload(inboundID, client)
+	if err != nil {
+		colorfulprint.PrintError("Failed marshal settings", err)
+		return err
+	}
+
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, jsonBody, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		colorfulprint.PrintError("Failed response", err)
+		return err
+	}
+	colorfulprint.PrintState(fmt.Sprintf("add client status=%d\n%s", statusCode, string(body)))
+	return checkAPISuccess("add client", statusCode, body)
 }
 
 func buildClientPayload(inboundID int, client Client) ([]byte, error) {
@@ -986,20 +1114,29 @@ func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 	if client.ID == "" {
 		return fmt.Errorf("client uuid is empty")
 	}
+	if inboundID <= 0 {
+		return fmt.Errorf("inboundID is invalid")
+	}
 	client.Flow = strings.TrimSpace(client.Flow)
 	if client.Flow == "" {
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
-	url := fmt.Sprintf("%s/panel/api/inbounds/updateClient/%s", x.serverURL, client.ID)
+	updateEmail := strings.TrimSpace(client.Email)
+	if current, err := x.GetClientByUUID(inboundID, client.ID); err == nil && current != nil && strings.TrimSpace(current.Email) != "" {
+		updateEmail = strings.TrimSpace(current.Email)
+	}
+	if updateEmail == "" {
+		return fmt.Errorf("client email is empty")
+	}
 
-	jsonBody, err := buildClientPayload(inboundID, client)
+	jsonBody, err := json.Marshal(client)
 	if err != nil {
 		colorfulprint.PrintError("Failed marshal json", err)
 		return err
 	}
-
-	statusCode, body, err := x.doAPIRequest("POST", url, jsonBody, map[string]string{
+	requestURL := fmt.Sprintf("%s/panel/api/clients/update/%s", x.serverURL, url.PathEscape(updateEmail))
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, jsonBody, map[string]string{
 		"Content-Type": "application/json",
 		"Accept":       "application/json",
 	})
@@ -1008,11 +1145,32 @@ func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 		return err
 	}
 	colorfulprint.PrintState(fmt.Sprintf("update client status=%d\n%s", statusCode, string(body)))
-	if statusCode < 200 || statusCode >= 300 {
-		return fmt.Errorf("update client returned status=%d body=%s", statusCode, responseSnippet(body))
+	if !isEndpointUnsupported(statusCode) {
+		return checkAPISuccess("update client", statusCode, body)
 	}
 
-	return nil
+	return x.updateClientWithLegacyAPI(inboundID, client)
+}
+
+func (x *XRayClient) updateClientWithLegacyAPI(inboundID int, client Client) error {
+	requestURL := fmt.Sprintf("%s/panel/api/inbounds/updateClient/%s", x.serverURL, url.PathEscape(client.ID))
+
+	jsonBody, err := buildClientPayload(inboundID, client)
+	if err != nil {
+		colorfulprint.PrintError("Failed marshal json", err)
+		return err
+	}
+
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, jsonBody, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		colorfulprint.PrintError("Failed response", err)
+		return err
+	}
+	colorfulprint.PrintState(fmt.Sprintf("update client status=%d\n%s", statusCode, string(body)))
+	return checkAPISuccess("update client", statusCode, body)
 }
 
 // EnsureExpiry updates expiryTime for client by adding given days (from now or existing expiry).

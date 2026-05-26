@@ -2274,6 +2274,7 @@ func main() {
 	serverPort, _ := strconv.Atoi(os.Getenv("XRAY_SERVER_PORT"))
 
 	xClient := xray.New(xrayUser, xrayPass, xrayHost, xrayPort, xrayBasePath)
+	xClient.SetAPIToken(os.Getenv("XRAY_API_TOKEN"))
 	if !testMode {
 		if err := xClient.LoginToServer(); err != nil {
 			log.Fatalf("login to xray failed: %v", err)
@@ -2320,6 +2321,7 @@ func main() {
 	}
 	mergedXrayUser := strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME"))
 	mergedXrayPass := strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD"))
+	mergedXrayToken := strings.TrimSpace(os.Getenv("MERGED_XRAY_API_TOKEN"))
 	mergedInboundID, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_ID")))
 	mergedInboundIDsStr := strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_IDS"))
 	var mergedInboundIDs []int
@@ -2337,8 +2339,9 @@ func main() {
 		mergedInboundIDs = append(mergedInboundIDs, mergedInboundID)
 	}
 	mergedServerPort, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_PORT")))
-	if mergedXrayHost != "" && mergedXrayUser != "" && mergedXrayPass != "" {
+	if mergedXrayHost != "" && ((mergedXrayUser != "" && mergedXrayPass != "") || mergedXrayToken != "") {
 		mergedClient := xray.New(mergedXrayUser, mergedXrayPass, mergedXrayHost, mergedXrayPort, mergedXrayBasePath)
+		mergedClient.SetAPIToken(mergedXrayToken)
 		if !testMode {
 			if err := mergedClient.LoginToServer(); err != nil {
 				log.Printf("⚠️ merged xray login failed: %v", err)
@@ -2389,6 +2392,7 @@ func main() {
 		}
 
 		oldXClient := xray.New(oldXrayUser, oldXrayPass, oldXrayHost, oldXrayPort, oldXrayBasePath)
+		oldXClient.SetAPIToken(os.Getenv("OLD_XRAY_API_TOKEN"))
 		if err := oldXClient.LoginToServer(); err != nil {
 			log.Printf("⚠️  old xray connection failed (migration unavailable): %v", err)
 		} else {
