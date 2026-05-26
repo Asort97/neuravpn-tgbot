@@ -1106,7 +1106,7 @@ func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, e
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
-	if err := x.AddClientToInbounds(client, []int{inboundID}); err != nil {
+	if err := x.addClientWithLegacyAPI(inboundID, client); err != nil {
 		return nil, err
 	}
 	return &client, nil
@@ -1124,7 +1124,60 @@ func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
+	if err := x.updateClientWithLegacyAPI(inboundID, client); err == nil {
+		return nil
+	} else {
+		log.Printf("[XRAY] legacy inbound-scoped update failed inbound=%d email=%s uuid=%s err=%v", inboundID, client.Email, client.ID, err)
+	}
+
 	return x.UpdateClientByEmail(client.Email, client)
+}
+
+func (x *XRayClient) addClientWithLegacyAPI(inboundID int, client Client) error {
+	requestURL := fmt.Sprintf("%s/panel/api/inbounds/addClient", x.serverURL)
+	bodyPayload, err := buildLegacyClientPayload(inboundID, client)
+	if err != nil {
+		return err
+	}
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, bodyPayload, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("add client", statusCode, body)
+}
+
+func (x *XRayClient) updateClientWithLegacyAPI(inboundID int, client Client) error {
+	requestURL := fmt.Sprintf("%s/panel/api/inbounds/updateClient/%s", x.serverURL, url.PathEscape(client.ID))
+	bodyPayload, err := buildLegacyClientPayload(inboundID, client)
+	if err != nil {
+		return err
+	}
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, bodyPayload, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("update client", statusCode, body)
+}
+
+func buildLegacyClientPayload(inboundID int, client Client) ([]byte, error) {
+	settings := map[string]interface{}{
+		"clients": []Client{client},
+	}
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]interface{}{
+		"id":       inboundID,
+		"settings": string(settingsJSON),
+	}
+	return json.Marshal(payload)
 }
 
 func (x *XRayClient) GetClientRecordByEmail(email string) (*Client, []int, error) {
@@ -1297,22 +1350,41 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 	}
 	log.Printf("[XRAY] ensure across inbounds=%v tg=%s daysToAdd=%d", inboundIDs, tgID, daysToAdd)
 
-	stableEmail := buildStableXrayClientEmail(email, tgID)
 	stableSubID := strings.TrimSpace(subID)
 	if stableSubID == "" {
 		stableSubID = "sub" + strings.TrimSpace(tgID)
 	}
 
-	client, attachedInboundIDs, err := x.GetClientRecordByEmail(stableEmail)
-	if err != nil {
-		return nil, time.Time{}, err
+	type inboundClient struct {
+		inboundID int
+		client    Client
 	}
-	clientExists := client != nil
+	var matches []inboundClient
+	var lastErr error
+	for _, inboundID := range inboundIDs {
+		clients, err := x.GetInboundById(inboundID)
+		if err != nil {
+			lastErr = err
+			log.Printf("[XRAY] scan inbound failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
+			continue
+		}
+		for _, candidate := range clients {
+			if clientMatchesTelegram(candidate, tgID, stableSubID) {
+				matches = append(matches, inboundClient{inboundID: inboundID, client: candidate})
+			}
+		}
+	}
 
 	now := time.Now()
 	expireAt := now
-	if client != nil && client.ExpiryTime > 0 {
-		expireAt = time.UnixMilli(client.ExpiryTime)
+	for _, item := range matches {
+		if item.client.ExpiryTime <= 0 {
+			continue
+		}
+		candidateExpire := time.UnixMilli(item.client.ExpiryTime)
+		if candidateExpire.After(expireAt) {
+			expireAt = candidateExpire
+		}
 	}
 	if expireAt.Before(now) {
 		expireAt = now
@@ -1324,73 +1396,94 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		}
 	}
 
-	if client == nil {
-		client = &Client{ID: uuid.New().String()}
-	}
-	client.Email = stableEmail
-	client.Enable = true
-	client.Flow = x.defaultFlowForInbound(inboundIDs[0])
-	client.LimitIP = 0
-	client.TotalGB = 0
-	client.ExpiryTime = expireAt.UnixMilli()
-	client.TgID = strings.TrimSpace(tgID)
-	client.SubID = stableSubID
-	if strings.TrimSpace(client.Comment) == "" || strings.HasPrefix(strings.TrimSpace(client.Comment), "tg:") {
-		client.Comment = "tg:" + strings.TrimSpace(tgID)
-	}
-
-	if clientExists {
-		missingInboundIDs := missingInts(inboundIDs, attachedInboundIDs)
-		if len(missingInboundIDs) > 0 {
-			if err := x.AttachClientToInbounds(stableEmail, missingInboundIDs); err != nil {
-				return nil, time.Time{}, err
+	if len(matches) > 0 {
+		var primary *Client
+		updated := 0
+		for _, item := range matches {
+			client := item.client
+			client.Enable = true
+			client.ExpiryTime = expireAt.UnixMilli()
+			client.TgID = strings.TrimSpace(tgID)
+			client.SubID = stableSubID
+			if strings.TrimSpace(client.Comment) == "" || strings.HasPrefix(strings.TrimSpace(client.Comment), "tg:") {
+				client.Comment = "tg:" + strings.TrimSpace(tgID)
+			}
+			if strings.TrimSpace(client.Flow) == "" {
+				client.Flow = x.defaultFlowForInbound(item.inboundID)
+			}
+			if err := x.UpdateClient(item.inboundID, client); err != nil {
+				lastErr = err
+				log.Printf("[XRAY] update duplicate failed inbound=%d email=%s tg=%s err=%v", item.inboundID, client.Email, tgID, err)
+				continue
+			}
+			updated++
+			if primary == nil {
+				copyClient := client
+				primary = &copyClient
 			}
 		}
-		if err := x.UpdateClientByEmail(stableEmail, *client); err != nil {
-			return nil, time.Time{}, err
+		if updated > 0 && primary != nil {
+			return primary, expireAt, nil
 		}
-		return client, expireAt, nil
+		if lastErr != nil {
+			return nil, time.Time{}, lastErr
+		}
+		return nil, time.Time{}, fmt.Errorf("no xray duplicate clients updated for tg=%s", tgID)
 	}
 
-	if err := x.AddClientToInbounds(*client, inboundIDs); err != nil {
-		return nil, time.Time{}, err
-	}
-	return client, expireAt, nil
-}
-
-func missingInts(want []int, have []int) []int {
-	if len(want) == 0 {
-		return nil
-	}
-	haveSet := make(map[int]struct{}, len(have))
-	for _, id := range have {
-		haveSet[id] = struct{}{}
-	}
-	missing := make([]int, 0, len(want))
-	for _, id := range want {
-		if id <= 0 {
+	sharedUUID := uuid.New().String()
+	var primary *Client
+	created := 0
+	for _, inboundID := range inboundIDs {
+		client := Client{
+			ID:         sharedUUID,
+			Email:      buildXrayClientEmail(email, tgID, inboundID),
+			Enable:     true,
+			Flow:       x.defaultFlowForInbound(inboundID),
+			LimitIP:    0,
+			TotalGB:    0,
+			ExpiryTime: expireAt.UnixMilli(),
+			TgID:       strings.TrimSpace(tgID),
+			SubID:      stableSubID,
+			Comment:    "tg:" + strings.TrimSpace(tgID),
+		}
+		createdClient, err := x.AddClientWithData(inboundID, client)
+		if err != nil {
+			lastErr = err
+			log.Printf("[XRAY] create duplicate failed inbound=%d email=%s tg=%s err=%v", inboundID, client.Email, tgID, err)
 			continue
 		}
-		if _, ok := haveSet[id]; ok {
-			continue
+		created++
+		if primary == nil {
+			primary = createdClient
 		}
-		missing = append(missing, id)
 	}
-	return missing
+	if created > 0 && primary != nil {
+		return primary, expireAt, nil
+	}
+	if lastErr != nil {
+		return nil, time.Time{}, lastErr
+	}
+	return nil, time.Time{}, fmt.Errorf("no xray duplicate clients created for tg=%s", tgID)
 }
 
-// buildStableXrayClientEmail returns one 3x-ui v3.1 client identity for all inbounds.
-func buildStableXrayClientEmail(billingEmail, tgID string) string {
-	tgID = sanitizeEmailToken(tgID)
-	if tgID == "" {
-		tgID = "unknown"
+func clientMatchesTelegram(client Client, tgID string, subID string) bool {
+	tgID = strings.TrimSpace(tgID)
+	subID = strings.TrimSpace(subID)
+	if tgID != "" && strings.TrimSpace(client.TgID) == tgID {
+		return true
 	}
-	billingEmail = strings.TrimSpace(billingEmail)
-	parts := strings.SplitN(billingEmail, "@", 2)
-	if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
-		return fmt.Sprintf("tg%s@%s", tgID, strings.TrimSpace(parts[1]))
+	if subID != "" && strings.TrimSpace(client.SubID) == subID {
+		return true
 	}
-	return fmt.Sprintf("tg%s@happycat", tgID)
+	if tgID != "" && strings.TrimSpace(client.Comment) == "tg:"+tgID {
+		return true
+	}
+	email := strings.ToLower(strings.TrimSpace(client.Email))
+	if tgID != "" && (strings.Contains(email, "tg"+strings.ToLower(tgID)) || strings.HasPrefix(email, strings.ToLower(tgID)+"@")) {
+		return true
+	}
+	return false
 }
 
 // buildXrayClientEmail returns a deterministic technical email for Xray client identity.
