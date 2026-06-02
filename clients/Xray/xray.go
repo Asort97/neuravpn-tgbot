@@ -446,6 +446,7 @@ func (x *XRayClient) doAPIRequestOnce(method, url string, payload []byte, header
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	if x.hasAPIToken() {
 		req.Header.Set("Authorization", "Bearer "+x.apiToken)
 	}

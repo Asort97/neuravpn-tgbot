@@ -3081,11 +3081,12 @@ func reconcileMergedTrafficForUser(userID string, forceReset bool) (*mergedTraff
 		month = currentMonth
 	} else {
 		_ = userStore.SetMergedTraffic(userID, currentMonth, extraBytes, usedBytes, now)
-		if _, _, err := updateMergedTrafficLimitForUser(mergedXrayCfg, userID, strings.TrimSpace(client.SubID), false); err != nil {
-			log.Printf("[merged-traffic] update limit failed user=%s: %v", userID, err)
-		}
 	}
 
+	limitBytes := client.TotalGB
+	if limitBytes <= 0 {
+		limitBytes = mergedBaseTrafficBytes + extraBytes
+	}
 	carryNext := extraBytes
 	usedOverBase := usedBytes - mergedBaseTrafficBytes
 	if usedOverBase > 0 {
@@ -3098,7 +3099,7 @@ func reconcileMergedTrafficForUser(userID string, forceReset bool) (*mergedTraff
 		UserID:         userID,
 		Month:          month,
 		UsedBytes:      usedBytes,
-		LimitBytes:     mergedBaseTrafficBytes + extraBytes,
+		LimitBytes:     limitBytes,
 		ExtraBytes:     extraBytes,
 		CarryNextBytes: carryNext,
 		ClientFound:    true,
