@@ -5113,6 +5113,7 @@ func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xraySettings) {
 	chatID := cq.Message.Chat.ID
 	session := getSession(chatID)
+	bindSessionToCallbackMessage(session, cq)
 	data := cq.Data
 	ackText := ""
 
@@ -5574,6 +5575,13 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 }
 
 // small helper for callback answers
+func bindSessionToCallbackMessage(session *UserSession, cq *tgbotapi.CallbackQuery) {
+	if session == nil || cq == nil || cq.Message == nil || cq.Message.MessageID == 0 {
+		return
+	}
+	session.MessageID = cq.Message.MessageID
+}
+
 func ackCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, text string) {
 	cfg := tgbotapi.CallbackConfig{CallbackQueryID: cq.ID}
 	if strings.TrimSpace(text) != "" {
