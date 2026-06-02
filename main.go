@@ -440,6 +440,8 @@ var (
 
 const expiryReminderStatePath = "database/reminder_state.json"
 
+var trafficReminderThresholds = []int64{0, 1, 2, 3}
+
 func canProceedKey(userID int64, key string, interval time.Duration) bool {
 	now := time.Now()
 	if lastActionKey[userID] == nil {
@@ -965,6 +967,107 @@ func saveExpiryReminderState() error {
 		return err
 	}
 	return os.WriteFile(expiryReminderStatePath, data, 0o644)
+}
+
+func trafficReminderStage(remainingBytes int64) string {
+	for _, gb := range trafficReminderThresholds {
+		threshold := trafficBytesFromGB(gb)
+		if gb == 0 {
+			if remainingBytes <= 0 {
+				return "traffic_gb0"
+			}
+			continue
+		}
+		if remainingBytes > 0 && remainingBytes <= threshold {
+			return fmt.Sprintf("traffic_gb%d", gb)
+		}
+	}
+	return ""
+}
+
+func trafficReminderStateValue(status *mergedTrafficStatus) string {
+	if status == nil {
+		return ""
+	}
+	month := strings.TrimSpace(status.Month)
+	if month == "" {
+		month = currentMergedTrafficMonth(time.Now())
+	}
+	return fmt.Sprintf("%s:%d", month, status.LimitBytes)
+}
+
+func shouldSendTrafficReminder(userID int64, stage string, status *mergedTrafficStatus) bool {
+	if stage == "" || status == nil {
+		return false
+	}
+	expiryReminderMu.Lock()
+	defer expiryReminderMu.Unlock()
+	if expiryReminderState[userID] == nil {
+		expiryReminderState[userID] = make(map[string]string)
+	}
+	stateValue := trafficReminderStateValue(status)
+	if stateValue == "" || expiryReminderState[userID][stage] == stateValue {
+		return false
+	}
+	expiryReminderState[userID][stage] = stateValue
+	_ = saveExpiryReminderState()
+	return true
+}
+
+func trafficReminderText(stage string, remainingBytes int64) string {
+	remaining := formatTrafficGB(remainingBytes)
+	switch stage {
+	case "traffic_gb3":
+		return fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> трафик белых списков почти закончился\n\nосталось: <b>%s</b>\nпора докупить трафик, чтобы обход продолжил работать без пауз.", remaining)
+	case "traffic_gb2":
+		return fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> трафика белых списков осталось мало\n\nостаток: <b>%s</b>\nможно заранее пополнить пакет: купленный трафик переносится дальше.", remaining)
+	case "traffic_gb1":
+		return fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> остался последний гигабайт трафика\n\nостаток: <b>%s</b>\nдокупите трафик, чтобы белые списки не закончились внезапно.", remaining)
+	case "traffic_gb0":
+		return "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> трафик белых списков закончился\n\nобход белых списков может перестать работать.\nпополните трафик, чтобы снова пользоваться им без ограничений."
+	default:
+		return ""
+	}
+}
+
+func trafficReminderKeyboardRaw() rawInlineKeyboardMarkup {
+	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton("докупить трафик", "nav_buy_traffic", "", "5346325906526868503")},
+		{rawCallbackButton("профиль", "nav_status", "", "5343693752999383705")},
+	}}
+}
+
+func maybeSendTrafficReminder(bot *tgbotapi.BotAPI, status *mergedTrafficStatus) {
+	if bot == nil || status == nil || !status.ClientFound || status.LimitBytes <= 0 {
+		return
+	}
+	userIDStr := strings.TrimSpace(status.UserID)
+	if userIDStr == "" {
+		return
+	}
+	days, err := userStore.GetDays(userIDStr)
+	if err != nil || days <= 0 {
+		return
+	}
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil || userID <= 0 {
+		return
+	}
+	remainingBytes := status.LimitBytes - status.UsedBytes
+	if remainingBytes < 0 {
+		remainingBytes = 0
+	}
+	stage := trafficReminderStage(remainingBytes)
+	if stage == "" || !shouldSendTrafficReminder(userID, stage, status) {
+		return
+	}
+	text := trafficReminderText(stage, remainingBytes)
+	if text == "" {
+		return
+	}
+	if _, err := sendMessageRaw(bot, userID, text, "HTML", trafficReminderKeyboardRaw()); err != nil {
+		log.Printf("[merged-traffic] reminder send failed user=%s stage=%s err=%v", userIDStr, stage, err)
+	}
 }
 
 func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
@@ -2439,7 +2542,7 @@ func main() {
 	loadExpiryReminderState()
 	startExpiryReminder(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
-	startMergedTrafficLoop()
+	startMergedTrafficLoop(bot)
 	startDailyLogSummary(bot)
 
 	// Профилактический re-login к XRAY раз в час
@@ -3030,7 +3133,7 @@ func collectMergedTrafficUsers(cfg *xraySettings) (map[string]string, error) {
 	return users, nil
 }
 
-func runMergedTrafficSync(forceReset bool) (int, int, int) {
+func runMergedTrafficSync(bot *tgbotapi.BotAPI, forceReset bool) (int, int, int) {
 	users, err := collectMergedTrafficUsers(mergedXrayCfg)
 	if err != nil {
 		log.Printf("[merged-traffic] collect users failed: %v", err)
@@ -3051,23 +3154,24 @@ func runMergedTrafficSync(forceReset bool) (int, int, int) {
 			if status.ResetDone {
 				reset++
 			}
+			maybeSendTrafficReminder(bot, status)
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
 	return processed, reset, failed
 }
 
-func startMergedTrafficLoop() {
+func startMergedTrafficLoop(bot *tgbotapi.BotAPI) {
 	if mergedXrayCfg == nil || mergedXrayCfg.client == nil || userStore == nil {
 		return
 	}
 	go func() {
-		processed, reset, failed := runMergedTrafficSync(false)
+		processed, reset, failed := runMergedTrafficSync(bot, false)
 		log.Printf("[merged-traffic] startup sync processed=%d reset=%d failed=%d", processed, reset, failed)
 		ticker := time.NewTicker(6 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			processed, reset, failed := runMergedTrafficSync(false)
+			processed, reset, failed := runMergedTrafficSync(bot, false)
 			log.Printf("[merged-traffic] periodic sync processed=%d reset=%d failed=%d", processed, reset, failed)
 		}
 	}()
@@ -3119,7 +3223,7 @@ func handleMergedTrafficInitConfirm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message)
 		return
 	}
 	_, _ = bot.Send(tgbotapi.NewMessage(chatID, "запускаю init: ставлю лимит 10ГБ + остаток и сбрасываю трафик..."))
-	processed, reset, failed := runMergedTrafficSync(true)
+	processed, reset, failed := runMergedTrafficSync(bot, true)
 	text := fmt.Sprintf("merged traffic init завершён\nобработано: %d\nсброшено: %d\nошибок: %d", processed, reset, failed)
 	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
 }
@@ -3131,7 +3235,7 @@ func handleMergedTrafficSyncCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message)
 		return
 	}
 	_, _ = bot.Send(tgbotapi.NewMessage(chatID, "запускаю merged traffic sync..."))
-	processed, reset, failed := runMergedTrafficSync(false)
+	processed, reset, failed := runMergedTrafficSync(bot, false)
 	text := fmt.Sprintf("merged traffic sync завершён\nобработано: %d\nмесячных сбросов: %d\nошибок: %d", processed, reset, failed)
 	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
 }
