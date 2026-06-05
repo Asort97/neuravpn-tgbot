@@ -781,6 +781,7 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 		Security        string `json:"security"`
 		RealitySettings struct {
 			Dest        string   `json:"dest"`
+			Target      string   `json:"target"`
 			ServerNames []string `json:"serverNames"`
 			ShortIds    []string `json:"shortIds"`
 			// Client-visible params nested inside "settings"
@@ -829,9 +830,12 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 	if len(r.ServerNames) > 0 {
 		serverName = strings.TrimSpace(r.ServerNames[0])
 	}
-	if serverName == "" && r.Dest != "" {
-		// dest can be "hostname:port" or just "hostname"
-		host := r.Dest
+	if serverName == "" {
+		// target/dest can be "hostname:port" or just "hostname"
+		host := strings.TrimSpace(r.Target)
+		if host == "" {
+			host = strings.TrimSpace(r.Dest)
+		}
 		if idx := strings.LastIndex(host, ":"); idx >= 0 {
 			host = host[:idx]
 		}

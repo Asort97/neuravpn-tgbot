@@ -3324,10 +3324,43 @@ func generateVLESSLinkForConfigWithInbound(cfg *xraySettings, client *xray.Clien
 	if cfg == nil || cfg.client == nil || client == nil {
 		return ""
 	}
-	if strings.TrimSpace(cfg.serverAddress) == "" || strings.TrimSpace(cfg.serverName) == "" || strings.TrimSpace(cfg.publicKey) == "" || strings.TrimSpace(cfg.shortID) == "" || cfg.serverPort <= 0 {
+	serverAddress := strings.TrimSpace(cfg.serverAddress)
+	serverName := strings.TrimSpace(cfg.serverName)
+	publicKey := strings.TrimSpace(cfg.publicKey)
+	shortID := strings.TrimSpace(cfg.shortID)
+	spiderX := strings.TrimSpace(cfg.spiderX)
+	fingerprint := strings.TrimSpace(cfg.fingerprint)
+	serverPort := cfg.serverPort
+
+	if inboundID > 0 {
+		if reality, err := cfg.client.ExtractRealityParamsFromInbound(inboundID); err == nil && reality != nil {
+			if strings.TrimSpace(reality.ServerName) != "" {
+				serverName = strings.TrimSpace(reality.ServerName)
+			}
+			if strings.TrimSpace(reality.PublicKey) != "" {
+				publicKey = strings.TrimSpace(reality.PublicKey)
+			}
+			if strings.TrimSpace(reality.ShortID) != "" {
+				shortID = strings.TrimSpace(reality.ShortID)
+			}
+			if strings.TrimSpace(reality.SpiderX) != "" {
+				spiderX = strings.TrimSpace(reality.SpiderX)
+			}
+			if strings.TrimSpace(reality.Fingerprint) != "" {
+				fingerprint = strings.TrimSpace(reality.Fingerprint)
+			}
+			if reality.ServerPort > 0 {
+				serverPort = reality.ServerPort
+			}
+		} else if err != nil {
+			log.Printf("[GenerateVLESSLinkForConfig] inbound reality params unavailable inbound=%d err=%v", inboundID, err)
+		}
+	}
+
+	if serverAddress == "" || serverName == "" || publicKey == "" || shortID == "" || serverPort <= 0 {
 		return ""
 	}
-	link := cfg.client.GenerateVLESSLinkForInbound(client, inboundID, cfg.serverAddress, cfg.serverPort, cfg.serverName, cfg.publicKey, cfg.shortID, cfg.spiderX, cfg.fingerprint)
+	link := cfg.client.GenerateVLESSLinkForInbound(client, inboundID, serverAddress, serverPort, serverName, publicKey, shortID, spiderX, fingerprint)
 	return link
 }
 
