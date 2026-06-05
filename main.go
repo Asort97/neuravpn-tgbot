@@ -2813,6 +2813,28 @@ func mergedInboundIDs(cfg *xraySettings) ([]int, error) {
 	return ids, nil
 }
 
+func missingInboundIDs(current []int, required []int) []int {
+	if len(required) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(current))
+	for _, id := range current {
+		if id > 0 {
+			seen[id] = struct{}{}
+		}
+	}
+	var missing []int
+	for _, id := range required {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	return missing
+}
+
 func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Client, int, error) {
 	inboundIDs, err := mergedInboundIDs(cfg)
 	if err != nil {
@@ -2931,6 +2953,7 @@ func updateMergedTrafficLimitForUser(cfg *xraySettings, userID, subID string, re
 	updated := 0
 	failed := 0
 	var lastErr error
+	seenEmails := make(map[string]struct{})
 
 	for _, inboundID := range inboundIDs {
 		clients, lookupErr := cfg.client.GetInboundById(inboundID)
@@ -2943,6 +2966,25 @@ func updateMergedTrafficLimitForUser(cfg *xraySettings, userID, subID string, re
 			if !mergedClientMatchesUser(client, userID, subID) {
 				continue
 			}
+			email := strings.TrimSpace(client.Email)
+			if email != "" {
+				if _, seen := seenEmails[email]; seen {
+					continue
+				}
+				seenEmails[email] = struct{}{}
+			}
+			if email != "" {
+				if record, linkedInboundIDs, recordErr := cfg.client.GetClientRecordByEmail(email); recordErr == nil && record != nil {
+					client = *record
+					if missing := missingInboundIDs(linkedInboundIDs, inboundIDs); len(missing) > 0 {
+						if err := cfg.client.AttachClientToInbounds(email, missing); err != nil {
+							failed++
+							lastErr = err
+							continue
+						}
+					}
+				}
+			}
 			client.TotalGB = limitBytes
 			client.Reset = 0
 			if err := cfg.client.UpdateClient(inboundID, client); err != nil {
@@ -2950,8 +2992,8 @@ func updateMergedTrafficLimitForUser(cfg *xraySettings, userID, subID string, re
 				lastErr = err
 				continue
 			}
-			if resetTraffic && strings.TrimSpace(client.Email) != "" {
-				if err := cfg.client.ResetClientTraffic(inboundID, client.Email); err != nil {
+			if resetTraffic && email != "" {
+				if err := cfg.client.ResetClientTraffic(inboundID, email); err != nil {
 					failed++
 					lastErr = err
 					continue
@@ -3143,7 +3185,12 @@ func runMergedTrafficSync(bot *tgbotapi.BotAPI, forceReset bool) (int, int, int)
 	processed := 0
 	reset := 0
 	failed := 0
-	for userID := range users {
+	for userID, subID := range users {
+		if _, _, err := ensureMergedProviderClient(mergedXrayCfg, userID, subID, nil); err != nil {
+			failed++
+			log.Printf("[merged-traffic] attach failed user=%s: %v", userID, err)
+			continue
+		}
 		status, err := reconcileMergedTrafficForUser(userID, forceReset)
 		if err != nil {
 			failed++
@@ -3241,6 +3288,34 @@ func handleMergedTrafficSyncCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message)
 	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
 }
 
+func handleMergedAttachInboundsCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	if !isAdmin(msg.From.ID) {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "⛔️ Только для админа"))
+		return
+	}
+	users, err := collectMergedTrafficUsers(mergedXrayCfg)
+	if err != nil {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "ошибка сбора merged клиентов: "+err.Error()))
+		return
+	}
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("запускаю привязку merged inbound'ов, клиентов: %d...", len(users))))
+
+	processed := 0
+	failed := 0
+	for userID, subID := range users {
+		if _, _, err := ensureMergedProviderClient(mergedXrayCfg, userID, subID, nil); err != nil {
+			failed++
+			log.Printf("[merged-attach] failed user=%s: %v", userID, err)
+			continue
+		}
+		processed++
+		time.Sleep(30 * time.Millisecond)
+	}
+	text := fmt.Sprintf("merged inbound attach завершён\nобработано: %d\nошибок: %d", processed, failed)
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
+}
+
 func generateVLESSLinkForConfig(cfg *xraySettings, client *xray.Client) string {
 	return generateVLESSLinkForConfigWithInbound(cfg, client, 0)
 }
@@ -3311,70 +3386,79 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		stableUUID = uuid.New().String()
 	}
 	primaryInboundID := inboundIDs[0]
-	var lastErr error
-	updatedAny := false
-	for _, inboundID := range inboundIDs {
-		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
-		if lookupErr != nil {
-			lastErr = lookupErr
-			log.Printf("[merged] skip inbound=%d user=%s lookup err=%v", inboundID, userID, lookupErr)
-			continue
-		}
-		if existing == nil && stableSubID != "" {
-			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, stableSubID)
-			if lookupErr != nil {
-				lastErr = lookupErr
-				log.Printf("[merged] skip inbound=%d user=%s lookup by sub err=%v", inboundID, userID, lookupErr)
-				continue
+
+	if client != nil {
+		linkedInboundIDs := []int{foundInboundID}
+		if strings.TrimSpace(client.Email) != "" {
+			if record, recordInboundIDs, recordErr := cfg.client.GetClientRecordByEmail(client.Email); recordErr == nil && record != nil {
+				client = record
+				linkedInboundIDs = recordInboundIDs
+			} else if recordErr != nil {
+				log.Printf("[merged] client record lookup failed user=%s email=%s err=%v", userID, client.Email, recordErr)
 			}
 		}
-		clientData := xray.Client{
-			ID:         stableUUID,
-			Email:      fallbackEmail(userID),
-			Enable:     true,
-			ExpiryTime: expiryMillis,
-			TotalGB:    mergedTrafficLimitForUser(userID),
-			TgID:       userID,
-			SubID:      stableSubID,
-			Comment:    "tg:" + userID,
-			Reset:      0,
+		if strings.TrimSpace(client.Email) == "" {
+			return nil, 0, fmt.Errorf("merged client email is empty")
 		}
-		if existing == nil {
-			created, addErr := cfg.client.AddClientWithData(inboundID, clientData)
-			if addErr != nil {
-				lastErr = addErr
-				log.Printf("[merged] skip inbound=%d user=%s add err=%v", inboundID, userID, addErr)
-				continue
+		if missing := missingInboundIDs(linkedInboundIDs, inboundIDs); len(missing) > 0 {
+			if err := cfg.client.AttachClientToInbounds(client.Email, missing); err != nil {
+				return nil, 0, err
 			}
-			updatedAny = true
-			if inboundID == primaryInboundID {
-				client = created
-				foundInboundID = inboundID
-			}
-			if client == nil {
-				client = created
-				foundInboundID = inboundID
-			}
-			continue
+			log.Printf("[merged] attached email=%s user=%s inbounds=%v", client.Email, userID, missing)
 		}
-		clientData.ID = existing.ID
-		clientData.CreatedAt = existing.CreatedAt
-		clientData.UpdatedAt = existing.UpdatedAt
-		if err := cfg.client.UpdateClient(inboundID, clientData); err != nil {
-			lastErr = err
-			log.Printf("[merged] skip inbound=%d user=%s update err=%v", inboundID, userID, err)
-			continue
+		updated := *client
+		updated.Enable = true
+		if expiryMillis > 0 {
+			updated.ExpiryTime = expiryMillis
 		}
-		updatedAny = true
-		if inboundID == foundInboundID || (client == nil && inboundID == primaryInboundID) {
-			updated := clientData
-			client = &updated
-			foundInboundID = inboundID
+		if updated.TotalGB <= 0 {
+			updated.TotalGB = mergedTrafficLimitForUser(userID)
+		}
+		updated.TgID = userID
+		updated.SubID = stableSubID
+		if strings.TrimSpace(updated.Comment) == "" || strings.HasPrefix(strings.TrimSpace(updated.Comment), "tg:") {
+			updated.Comment = "tg:" + userID
+		}
+		updated.Reset = 0
+		if err := cfg.client.UpdateClient(foundInboundID, updated); err != nil {
+			return nil, 0, err
+		}
+		client = &updated
+		if foundInboundID == 0 {
+			foundInboundID = primaryInboundID
+		}
+		return client, foundInboundID, nil
+	}
+
+	clientData := xray.Client{
+		ID:         stableUUID,
+		Email:      fallbackEmail(userID),
+		Enable:     true,
+		ExpiryTime: expiryMillis,
+		TotalGB:    mergedTrafficLimitForUser(userID),
+		TgID:       userID,
+		SubID:      stableSubID,
+		Comment:    "tg:" + userID,
+		Reset:      0,
+	}
+	if err := cfg.client.AddClientToInbounds(clientData, inboundIDs); err != nil {
+		if strings.TrimSpace(clientData.Email) != "" {
+			if record, linkedInboundIDs, recordErr := cfg.client.GetClientRecordByEmail(clientData.Email); recordErr == nil && record != nil {
+				if missing := missingInboundIDs(linkedInboundIDs, inboundIDs); len(missing) > 0 {
+					if attachErr := cfg.client.AttachClientToInbounds(record.Email, missing); attachErr != nil {
+						return nil, 0, fmt.Errorf("add merged client failed: %v; attach existing failed: %v", err, attachErr)
+					}
+				}
+				clientData = *record
+			} else {
+				return nil, 0, err
+			}
+		} else {
+			return nil, 0, err
 		}
 	}
-	if !updatedAny && lastErr != nil {
-		return nil, 0, lastErr
-	}
+	client = &clientData
+	foundInboundID = primaryInboundID
 	if client == nil {
 		return nil, 0, fmt.Errorf("не удалось создать ноду второго сервера")
 	}
@@ -4710,6 +4794,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleMergedTrafficInitConfirm(bot, msg)
 		case "merged_traffic_sync":
 			handleMergedTrafficSyncCommand(bot, msg)
+		case "merged_attach_inbounds":
+			handleMergedAttachInboundsCommand(bot, msg)
 		case "topup", "пополнить", "пополнить_баланс":
 			handleTopUp(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
 		case "getvpn", "vpn", "подключить", "получитьvpn":
