@@ -3525,43 +3525,107 @@ func syncMergedAccessForUser(userID string) error {
 }
 
 func buildMergedProviderLinkWithPrimaryInfo(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (string, error) {
+	links, err := buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, primaryInfo)
+	if err != nil {
+		return "", err
+	}
+	if len(links) == 0 {
+		return "", fmt.Errorf("link config for merged xray is incomplete")
+	}
+	return links[0], nil
+}
+
+func buildMergedProviderLinksWithPrimaryInfo(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) ([]string, error) {
 	userID = strings.TrimSpace(userID)
 	subID = strings.TrimSpace(subID)
 	client, inboundID, err := findMergedProviderClient(cfg, userID, subID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if client == nil {
 		if primaryInfo == nil && xrayCfg != nil {
 			primaryInfo, err = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 0, false)
 			if err != nil {
-				return "", err
+				return nil, err
 			}
 		}
 		if primaryInfo == nil || primaryInfo.client == nil {
-			return "", fmt.Errorf("основная нода пользователя не найдена")
+			return nil, fmt.Errorf("основная нода пользователя не найдена")
 		}
 		if subID == "" {
 			subID = strings.TrimSpace(primaryInfo.client.SubID)
 		}
 		client, inboundID, err = ensureMergedProviderClient(cfg, userID, subID, primaryInfo)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		log.Printf("[merged-sync] auto-created merged client user=%s inbound=%d", userID, inboundID)
+	} else {
+		client, inboundID, err = ensureMergedProviderClient(cfg, userID, subID, primaryInfo)
+		if err != nil {
+			return nil, err
+		}
 	}
-	link := generateVLESSLinkForConfigWithInbound(cfg, client, inboundID)
-	if strings.TrimSpace(link) == "" {
-		return "", fmt.Errorf("link config for merged xray is incomplete")
+	configuredInboundIDs, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return nil, err
 	}
-	if remark := mergedInboundRemark(cfg, inboundID); remark != "" {
-		link = setVLESSLinkDisplayName(link, remark)
+	linkedInboundIDs := []int{inboundID}
+	if email := strings.TrimSpace(client.Email); email != "" {
+		if record, recordInboundIDs, recordErr := cfg.client.GetClientRecordByEmail(email); recordErr == nil && record != nil {
+			client = record
+			linkedInboundIDs = recordInboundIDs
+		} else if recordErr != nil {
+			log.Printf("[merged-sub] linked inbound lookup failed user=%s email=%s err=%v", userID, email, recordErr)
+		}
 	}
-	return link, nil
+	linked := make(map[int]struct{}, len(linkedInboundIDs))
+	for _, id := range linkedInboundIDs {
+		if id > 0 {
+			linked[id] = struct{}{}
+		}
+	}
+	var linkInboundIDs []int
+	for _, id := range configuredInboundIDs {
+		if _, ok := linked[id]; ok {
+			linkInboundIDs = append(linkInboundIDs, id)
+		}
+	}
+	if len(linkInboundIDs) == 0 {
+		linkInboundIDs = linkedInboundIDs
+	}
+	if len(linkInboundIDs) == 0 && inboundID > 0 {
+		linkInboundIDs = []int{inboundID}
+	}
+
+	seenLinks := make(map[string]struct{})
+	var links []string
+	for _, id := range linkInboundIDs {
+		link := generateVLESSLinkForConfigWithInbound(cfg, client, id)
+		if strings.TrimSpace(link) == "" {
+			continue
+		}
+		if remark := mergedInboundRemark(cfg, id); remark != "" {
+			link = setVLESSLinkDisplayName(link, remark)
+		}
+		if _, seen := seenLinks[link]; seen {
+			continue
+		}
+		seenLinks[link] = struct{}{}
+		links = append(links, link)
+	}
+	if len(links) == 0 {
+		return nil, fmt.Errorf("link config for merged xray is incomplete")
+	}
+	return links, nil
 }
 
 func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, error) {
 	return buildMergedProviderLinkWithPrimaryInfo(cfg, userID, subID, nil)
+}
+
+func buildMergedProviderLinks(cfg *xraySettings, userID, subID string) ([]string, error) {
+	return buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, nil)
 }
 
 func looksLikeSubscriptionText(s string) bool {
@@ -3588,29 +3652,60 @@ func decodeSubscriptionPayload(payload string) (string, func([]byte) string, err
 	return "", nil, fmt.Errorf("unsupported subscription payload format")
 }
 
-func mergeSubscriptionBody(body []byte, extraLink string) ([]byte, error) {
+func mergeSubscriptionBody(body []byte, extraLinks []string) ([]byte, error) {
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty upstream subscription body")
 	}
-	if strings.TrimSpace(extraLink) == "" {
-		return body, nil
+	var links []string
+	seenLinks := make(map[string]struct{})
+	for _, link := range extraLinks {
+		link = strings.TrimSpace(link)
+		if link == "" {
+			continue
+		}
+		if _, seen := seenLinks[link]; seen {
+			continue
+		}
+		seenLinks[link] = struct{}{}
+		links = append(links, link)
 	}
-	if strings.Contains(trimmed, extraLink) {
+	if len(links) == 0 {
 		return body, nil
 	}
 	if looksLikeSubscriptionText(trimmed) {
-		merged := strings.TrimRight(trimmed, "\n") + "\n" + extraLink + "\n"
+		merged := strings.TrimRight(trimmed, "\n")
+		added := false
+		for _, link := range links {
+			if strings.Contains(merged, link) {
+				continue
+			}
+			merged += "\n" + link
+			added = true
+		}
+		if !added {
+			return body, nil
+		}
+		merged += "\n"
 		return []byte(merged), nil
 	}
 	decoded, encode, err := decodeSubscriptionPayload(trimmed)
 	if err != nil {
 		return nil, err
 	}
-	if strings.Contains(decoded, extraLink) {
+	merged := strings.TrimRight(decoded, "\n")
+	added := false
+	for _, link := range links {
+		if strings.Contains(merged, link) {
+			continue
+		}
+		merged += "\n" + link
+		added = true
+	}
+	if !added {
 		return body, nil
 	}
-	merged := strings.TrimRight(decoded, "\n") + "\n" + extraLink + "\n"
+	merged += "\n"
 	return []byte(encode([]byte(merged))), nil
 }
 
@@ -3704,13 +3799,13 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mergedStatus := "primary_only"
-	if extraLink, err := buildMergedProviderLinkWithPrimaryInfo(mergedXrayCfg, targetUserID, subID, primaryInfo); err != nil {
-		log.Printf("[merged-sub] extra link unavailable user=%s: %v", targetUserID, err)
-	} else if mergedBody, err := mergeSubscriptionBody(body, extraLink); err != nil {
+	if extraLinks, err := buildMergedProviderLinksWithPrimaryInfo(mergedXrayCfg, targetUserID, subID, primaryInfo); err != nil {
+		log.Printf("[merged-sub] extra links unavailable user=%s: %v", targetUserID, err)
+	} else if mergedBody, err := mergeSubscriptionBody(body, extraLinks); err != nil {
 		log.Printf("[merged-sub] merge failed user=%s: %v", targetUserID, err)
 	} else {
 		body = mergedBody
-		mergedStatus = "merged"
+		mergedStatus = fmt.Sprintf("merged:%d", len(extraLinks))
 	}
 	copySubscriptionHeaders(w.Header(), headers)
 	w.Header().Set("X-Merged-Subscription-Status", mergedStatus)
@@ -3737,7 +3832,8 @@ func handleMergedSubCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, primary
 		_, _ = bot.Send(m)
 		return
 	}
-	if _, err := buildMergedProviderLink(mergedXrayCfg, userID, subID); err != nil {
+	links, err := buildMergedProviderLinks(mergedXrayCfg, userID, subID)
+	if err != nil {
 		m := tgbotapi.NewMessage(chatID, "❌ Не удалось получить ноду второго сервера: "+html.EscapeString(err.Error()))
 		m.ParseMode = "HTML"
 		_, _ = bot.Send(m)
@@ -3750,7 +3846,7 @@ func handleMergedSubCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, primary
 		_, _ = bot.Send(m)
 		return
 	}
-	text := fmt.Sprintf("<b>merged-подписка для теста готова</b>\n\n<b>merged:</b>\n<code>%s</code>\n\n<b>upstream:</b>\n<code>%s</code>", html.EscapeString(mergedURL), html.EscapeString(upstreamURL))
+	text := fmt.Sprintf("<b>merged-подписка для теста готова</b>\nmerged-ноды: <b>%d</b>\n\n<b>merged:</b>\n<code>%s</code>\n\n<b>upstream:</b>\n<code>%s</code>", len(links), html.EscapeString(mergedURL), html.EscapeString(upstreamURL))
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ParseMode = "HTML"
 	_, _ = bot.Send(m)
