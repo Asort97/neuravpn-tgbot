@@ -280,6 +280,7 @@ type DataStore interface {
 	GetReferralsCount(userID string) int
 	IsPaymentApplied(userID, paymentID string) (bool, error)
 	MarkPaymentApplied(userID, paymentID, provider, planID string, amount float64, currency string, at time.Time) (bool, error)
+	GetUnpaidTrialReminderUsers(cutoff time.Time) ([]string, error)
 	SetLinkToken(userID, token string) error
 	GetUserByLinkToken(token string) (string, error)
 	ClearLinkToken(userID string) error
@@ -942,6 +943,30 @@ func shouldSendExpiryReminder(userID int64, stage string, expiry time.Time) bool
 	return true
 }
 
+func oneTimeReminderSent(userID int64, stage string) bool {
+	stage = strings.TrimSpace(stage)
+	if userID <= 0 || stage == "" {
+		return true
+	}
+	expiryReminderMu.Lock()
+	defer expiryReminderMu.Unlock()
+	return expiryReminderState[userID] != nil && expiryReminderState[userID][stage] != ""
+}
+
+func markOneTimeReminderSent(userID int64, stage string) {
+	stage = strings.TrimSpace(stage)
+	if userID <= 0 || stage == "" {
+		return
+	}
+	expiryReminderMu.Lock()
+	defer expiryReminderMu.Unlock()
+	if expiryReminderState[userID] == nil {
+		expiryReminderState[userID] = make(map[string]string)
+	}
+	expiryReminderState[userID][stage] = time.Now().UTC().Format(time.RFC3339Nano)
+	_ = saveExpiryReminderState()
+}
+
 func clearExpiryReminderStage(userID int64, stage string) {
 	expiryReminderMu.Lock()
 	defer expiryReminderMu.Unlock()
@@ -1387,6 +1412,10 @@ func expiredThreeDaysReminderText() string {
 	return "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> <b>доступ закончился 3 дня назад</b>\n\nесли VPN ещё нужен — продлите подписку, и он снова заработает."
 }
 
+func trialPaymentReminderText() string {
+	return "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> <b>как VPN, всё работает?</b>\n\nесли хотите оставить доступ после пробного периода — можно продлить заранее.\n30 дней стоят <b>149 ₽</b>."
+}
+
 func expiryReminderKeyboardRaw() rawInlineKeyboardMarkup {
 	plan, ok := ratePlanByID["30d"]
 	label := "30 дней - 149 ₽"
@@ -1396,6 +1425,18 @@ func expiryReminderKeyboardRaw() rawInlineKeyboardMarkup {
 	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawCallbackButton(label, "rate_30d", "", "5344015205531686528")},
 		{rawCallbackButton("выбрать тариф", "nav_topup", "", "5344015205531686528")},
+	}}
+}
+
+func trialPaymentReminderKeyboardRaw() rawInlineKeyboardMarkup {
+	extendLabel := "продлить 30 дней"
+	if plan, ok := ratePlanByID["30d"]; ok && strings.TrimSpace(plan.Title) != "" {
+		extendLabel = "продлить " + strings.ToLower(strings.TrimSpace(plan.Title))
+	}
+	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton(extendLabel, "rate_30d", "", "5344015205531686528")},
+		{rawCallbackButton("выбрать тариф", "nav_topup", "", "5344015205531686528")},
+		{rawCallbackButton("позже", "trial_reminder_later", "", "")},
 	}}
 }
 
@@ -1423,6 +1464,50 @@ func userHasZeroDayBalance(userID int64) bool {
 		return false
 	}
 	return days <= 0
+}
+
+func processTrialPaymentReminders(bot *tgbotapi.BotAPI) {
+	if bot == nil || userStore == nil {
+		return
+	}
+	userIDs, err := userStore.GetUnpaidTrialReminderUsers(time.Now().UTC().Add(-24 * time.Hour))
+	if err != nil {
+		log.Printf("trial payment reminder: %v", err)
+		return
+	}
+	for _, userIDStr := range userIDs {
+		userIDStr = strings.TrimSpace(userIDStr)
+		if userIDStr == "" {
+			continue
+		}
+		userID, err := strconv.ParseInt(userIDStr, 10, 64)
+		if err != nil || userID <= 0 {
+			continue
+		}
+		if oneTimeReminderSent(userID, "trial_24h") {
+			continue
+		}
+		if _, err := sendMessageRaw(bot, userID, trialPaymentReminderText(), "HTML", trialPaymentReminderKeyboardRaw()); err != nil {
+			log.Printf("trial payment reminder send failed user=%s err=%v", userIDStr, err)
+			continue
+		}
+		markOneTimeReminderSent(userID, "trial_24h")
+		sendUserNotificationAdminLog(bot, userID, "", "trial активен 24 часа без оплаты")
+	}
+}
+
+func startTrialPaymentReminderLoop(bot *tgbotapi.BotAPI) {
+	if bot == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			processTrialPaymentReminders(bot)
+			<-ticker.C
+		}
+	}()
 }
 
 func maybeSendTrafficReminder(bot *tgbotapi.BotAPI, status *mergedTrafficStatus) {
@@ -2939,6 +3024,7 @@ func main() {
 	startAutopayLoop(bot, xrayCfg)
 	startMergedTrafficLoop(bot)
 	startOnboardingFollowupLoop(bot, xrayCfg)
+	startTrialPaymentReminderLoop(bot)
 	startDailyLogSummary(bot)
 
 	// Профилактический re-login к XRAY раз в час
@@ -5765,6 +5851,15 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		handleGetVPN(bot, cq, session, xrCfg)
 	case data == "nav_topup":
 		handleTopUp(bot, cq, session)
+	case data == "trial_reminder_later":
+		_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, cq.Message.MessageID))
+		if session.MessageID == cq.Message.MessageID {
+			session.MessageID = 0
+			session.State = stateMenu
+			session.ContentType = ""
+		}
+		ackCallback(bot, cq, "")
+		return
 	case data == "nav_buy_traffic":
 		handleBuyTraffic(bot, cq, session)
 	case data == "enter_promo":

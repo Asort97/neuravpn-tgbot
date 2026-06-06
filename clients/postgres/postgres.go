@@ -714,6 +714,47 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	return tag.RowsAffected() > 0, nil
 }
 
+func (s *Store) GetUnpaidTrialReminderUsers(cutoff time.Time) ([]string, error) {
+	ctx := context.Background()
+	if cutoff.IsZero() {
+		cutoff = time.Now().UTC().Add(-24 * time.Hour)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.id
+		FROM users u
+		WHERE u.days > 0
+			AND u.start_bonus_claimed = TRUE
+			AND COALESCE(u.start_bonus_claimed_at, u.created_at) <= $1
+			AND NOT EXISTS (
+				SELECT 1
+				FROM applied_payments ap
+				WHERE ap.user_id = u.id
+			)
+		ORDER BY COALESCE(u.start_bonus_claimed_at, u.created_at) ASC
+		LIMIT 1000
+	`, cutoff.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var userIDs []string
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, err
+		}
+		userID = strings.TrimSpace(userID)
+		if userID != "" {
+			userIDs = append(userIDs, userID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return userIDs, nil
+}
+
 func (s *Store) GetMergedTraffic(userID string) (string, int64, int64, time.Time, error) {
 	ctx := context.Background()
 	userID = strings.TrimSpace(userID)

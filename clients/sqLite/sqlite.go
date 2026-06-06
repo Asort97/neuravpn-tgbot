@@ -718,6 +718,39 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	return true, nil
 }
 
+func (s *Store) GetUnpaidTrialReminderUsers(cutoff time.Time) ([]string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if cutoff.IsZero() {
+		cutoff = time.Now().UTC().Add(-24 * time.Hour)
+	}
+
+	var userIDs []string
+	for userID, ud := range db {
+		if strings.TrimSpace(userID) == "" || ud.Days <= 0 || !ud.StartBonusClaimed || len(ud.AppliedPayments) > 0 {
+			continue
+		}
+		claimedAtRaw := strings.TrimSpace(ud.StartBonusClaimedAt)
+		if claimedAtRaw == "" {
+			claimedAtRaw = strings.TrimSpace(ud.CreatedAt)
+		}
+		if claimedAtRaw == "" {
+			continue
+		}
+		claimedAt, err := time.Parse(time.RFC3339, claimedAtRaw)
+		if err != nil {
+			continue
+		}
+		if claimedAt.UTC().After(cutoff.UTC()) {
+			continue
+		}
+		userIDs = append(userIDs, userID)
+	}
+	return userIDs, nil
+}
+
 func (s *Store) GetMergedTraffic(userID string) (string, int64, int64, time.Time, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
