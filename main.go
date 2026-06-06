@@ -6595,32 +6595,13 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		days = info.daysLeft
 	}
 
-	email, _ := userStore.GetEmail(userIDStr)
-	if strings.TrimSpace(email) == "" {
-		email = "не указан"
-	}
-	emailEsc := html.EscapeString(email)
-	verifiedEmail, _ := userStore.GetVerifiedEmail(userIDStr)
-	if strings.TrimSpace(verifiedEmail) == "" {
-		verifiedEmail = "не подтверждена"
-	}
-	verifiedEmailEsc := html.EscapeString(verifiedEmail)
-	refCount := userStore.GetReferralsCount(userIDStr)
-	refBonus := refCount * referralBonusDays
-
 	header := fmt.Sprintf(
-		"<tg-emoji emoji-id=\"5343693752999383705\">👤</tg-emoji> профиль\n• id: <code>%d</code>\n• mail для чеков: %s\n• подтверждённая почта: %s\n• рефералы: %d (дней: %d)",
-		userID, emailEsc, verifiedEmailEsc, refCount, refBonus,
+		"<tg-emoji emoji-id=\"5343693752999383705\">👤</tg-emoji> профиль\n• id: <code>%d</code>",
+		userID,
 	)
 	if session.EmailVerifiedJustNow {
 		header += "\n• ✅ почта подтверждена"
 		session.EmailVerifiedJustNow = false
-	}
-
-	// Show linked VK account if any
-	linkedVK, _ := userStore.GetLinkedVKUsers(userIDStr)
-	if len(linkedVK) > 0 {
-		header += fmt.Sprintf("\n• вк: привязан (%s)", html.EscapeString(linkedVK[0]))
 	}
 
 	var accessBlock string
@@ -6657,7 +6638,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
 			{rawCallbackButton("докупить трафик", "nav_buy_traffic", "", "5346325906526868503")},
-			{rawCallbackButton("настройки", "nav_settings", "", "5264852846527941278")},
+			{rawCallbackButton("настройки", "nav_settings", "", "5264991913274019640")},
 		},
 	}
 	kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
@@ -6695,6 +6676,8 @@ func handleProfileSettings(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, ses
 	if len(linkedVK) > 0 {
 		vkStatus = fmt.Sprintf("привязан (%s)", linkedVK[0])
 	}
+	refCount := userStore.GetReferralsCount(userIDStr)
+	refBonus := refCount * referralBonusDays
 	apMethodID, apPlanID, apEnabled, _ := userStore.GetAutopay(userIDStr)
 	autopayStatus := "выключено"
 	if apEnabled {
@@ -6712,9 +6695,11 @@ func handleProfileSettings(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, ses
 	}
 
 	text := fmt.Sprintf(
-		"<tg-emoji emoji-id=\"5264852846527941278\">⚙️</tg-emoji> настройки\n\n• e-mail для чеков: %s\n• подтверждённая почта: %s\n• вк: %s\n• автопродление: %s\n• карта: %s",
+		"<tg-emoji emoji-id=\"5264991913274019640\">⚙️</tg-emoji> настройки\n\n• e-mail для чеков: %s\n• подтверждённая почта: %s\n• рефералы: %d (дней: %d)\n• вк: %s\n• автопродление: %s\n• карта: %s",
 		html.EscapeString(email),
 		html.EscapeString(verifiedEmail),
+		refCount,
+		refBonus,
 		html.EscapeString(vkStatus),
 		html.EscapeString(autopayStatus),
 		html.EscapeString(cardStatus),
@@ -7465,7 +7450,7 @@ func getActionName(data string) string {
 		"nav_topup":        "💰 покупка доступа",
 		"nav_buy_traffic":  "📶 докупить трафик",
 		"nav_status":       "👤 профиль",
-		"nav_settings":     "⚙️ настройки",
+		"nav_settings":     "🛠 настройки",
 		"nav_referral":     "🎁 +15 дней",
 		"nav_support":      "📞 поддержка",
 		"nav_instructions": "🛠 инструкции",
