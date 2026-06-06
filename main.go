@@ -930,7 +930,7 @@ func shouldSendExpiryReminder(userID int64, stage string, expiry time.Time) bool
 		expiryReminderState[userID] = make(map[string]string)
 	}
 	expKey := expiry.UTC().Format(time.RFC3339Nano)
-	if stage == "expired" {
+	if stage == "expired" || stage == "expired_d3" {
 		if expiryReminderState[userID][stage] != "" {
 			return false
 		}
@@ -1383,6 +1383,10 @@ func expiryReminderText(daysLeft int64, expiry time.Time) string {
 	return fmt.Sprintf("⏰ <b>ваш доступ к neuravpn заканчивается через %d дн.</b>\nподписка активна до: <code>%s</code>\nпродлите в разделе «оплата» чтобы не потерять связь.", daysLeft, html.EscapeString(expStr))
 }
 
+func expiredThreeDaysReminderText() string {
+	return "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> <b>доступ закончился 3 дня назад</b>\n\nесли VPN ещё нужен — продлите подписку, и он снова заработает."
+}
+
 func expiryReminderKeyboardRaw() rawInlineKeyboardMarkup {
 	plan, ok := ratePlanByID["30d"]
 	label := "30 дней - 149 ₽"
@@ -1403,9 +1407,22 @@ func expiryReminderAdminLabel(key string) string {
 		return "доступ заканчивается: остался 1 день"
 	case "expired":
 		return "доступ закончился"
+	case "expired_d3":
+		return "доступ закончился 3 дня назад"
 	default:
 		return "доступ заканчивается"
 	}
+}
+
+func userHasZeroDayBalance(userID int64) bool {
+	if userStore == nil || userID <= 0 {
+		return false
+	}
+	days, err := userStore.GetDays(strconv.FormatInt(userID, 10))
+	if err != nil {
+		return false
+	}
+	return days <= 0
 }
 
 func maybeSendTrafficReminder(bot *tgbotapi.BotAPI, status *mergedTrafficStatus) {
@@ -1463,6 +1480,7 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 					if remain > 0 {
 						daysLeft = int64(remain.Hours()/24 + 0.999)
 						clearExpiryReminderStage(userID, "expired")
+						clearExpiryReminderStage(userID, "expired_d3")
 					}
 
 					key := ""
@@ -1471,7 +1489,11 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 					} else if daysLeft == 1 {
 						key = "d1"
 					} else if daysLeft <= 0 {
-						key = "expired"
+						if now.Sub(exp.UTC()) >= 72*time.Hour && userHasZeroDayBalance(userID) {
+							key = "expired_d3"
+						} else {
+							key = "expired"
+						}
 					} else {
 						continue
 					}
@@ -1481,6 +1503,9 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 					}
 
 					text := expiryReminderText(daysLeft, exp)
+					if key == "expired_d3" {
+						text = expiredThreeDaysReminderText()
+					}
 					if _, err := sendMessageRaw(bot, userID, text, "HTML", expiryReminderKeyboardRaw()); err != nil {
 						log.Printf("expiry reminder send failed user=%d key=%s err=%v", userID, key, err)
 						continue
