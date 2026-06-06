@@ -1247,6 +1247,7 @@ func processOnboardingFollowups(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 			log.Printf("[onboarding] instruction followup send failed user=%s err=%v", f.UserID, err)
 			continue
 		}
+		sendUserNotificationAdminLog(bot, userID, "", "подключить устройство")
 		resolveOnboardingFollowup(f.UserID, true, false, true)
 	}
 }
@@ -1359,6 +1360,21 @@ func trafficReminderKeyboardRaw() rawInlineKeyboardMarkup {
 	}}
 }
 
+func trafficReminderAdminLabel(stage string) string {
+	switch stage {
+	case "traffic_gb3":
+		return "трафик белых списков: осталось до 3 ГБ"
+	case "traffic_gb2":
+		return "трафик белых списков: осталось до 2 ГБ"
+	case "traffic_gb1":
+		return "трафик белых списков: остался 1 ГБ"
+	case "traffic_gb0":
+		return "трафик белых списков: закончился"
+	default:
+		return "трафик белых списков"
+	}
+}
+
 func expiryReminderText(daysLeft int64, expiry time.Time) string {
 	expStr := formatExpiryUTC(expiry)
 	if daysLeft <= 0 {
@@ -1377,6 +1393,19 @@ func expiryReminderKeyboardRaw() rawInlineKeyboardMarkup {
 		{rawCallbackButton(label, "rate_30d", "", "5344015205531686528")},
 		{rawCallbackButton("выбрать тариф", "nav_topup", "", "5344015205531686528")},
 	}}
+}
+
+func expiryReminderAdminLabel(key string) string {
+	switch key {
+	case "d3":
+		return "доступ заканчивается: осталось 3 дня"
+	case "d1":
+		return "доступ заканчивается: остался 1 день"
+	case "expired":
+		return "доступ закончился"
+	default:
+		return "доступ заканчивается"
+	}
 }
 
 func maybeSendTrafficReminder(bot *tgbotapi.BotAPI, status *mergedTrafficStatus) {
@@ -1409,7 +1438,9 @@ func maybeSendTrafficReminder(bot *tgbotapi.BotAPI, status *mergedTrafficStatus)
 	}
 	if _, err := sendMessageRaw(bot, userID, text, "HTML", trafficReminderKeyboardRaw()); err != nil {
 		log.Printf("[merged-traffic] reminder send failed user=%s stage=%s err=%v", userIDStr, stage, err)
+		return
 	}
+	sendUserNotificationAdminLog(bot, userID, "", trafficReminderAdminLabel(stage))
 }
 
 func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
@@ -1452,7 +1483,9 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 					text := expiryReminderText(daysLeft, exp)
 					if _, err := sendMessageRaw(bot, userID, text, "HTML", expiryReminderKeyboardRaw()); err != nil {
 						log.Printf("expiry reminder send failed user=%d key=%s err=%v", userID, key, err)
+						continue
 					}
+					sendUserNotificationAdminLog(bot, userID, "", expiryReminderAdminLabel(key))
 				}
 			}()
 
@@ -6287,6 +6320,40 @@ func stripHTML(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func notificationUserLink(bot *tgbotapi.BotAPI, userID int64, username string) string {
+	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+	if username == "" && bot != nil && userID > 0 {
+		if u, err := bot.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: userID}}); err == nil {
+			username = strings.TrimPrefix(strings.TrimSpace(u.UserName), "@")
+		}
+	}
+	if username != "" {
+		escapedUsername := html.EscapeString(username)
+		return fmt.Sprintf(`<a href="https://t.me/%s">@%s</a> (ID:<code>%d</code>)`, escapedUsername, escapedUsername, userID)
+	}
+	return fmt.Sprintf(`<a href="tg://user?id=%d">ID:<code>%d</code></a>`, userID, userID)
+}
+
+func sendUserNotificationAdminLog(bot *tgbotapi.BotAPI, userID int64, username, notificationType string) {
+	if bot == nil || userID <= 0 || strings.TrimSpace(notificationType) == "" {
+		return
+	}
+	text := fmt.Sprintf("🔔 уведомление пользователю\nтип: <b>%s</b>\nuser: %s",
+		html.EscapeString(strings.TrimSpace(notificationType)),
+		notificationUserLink(bot, userID, username),
+	)
+	if testMode {
+		log.Printf("[TEST MODE] user notification admin log: %s", stripHTML(text))
+		return
+	}
+	msg := tgbotapi.NewMessage(logChatID, text)
+	msg.ParseMode = "HTML"
+	msg.DisableWebPagePreview = true
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("user notification admin log send failed user=%d type=%q err=%v", userID, notificationType, err)
+	}
 }
 
 func logAction(bot *tgbotapi.BotAPI, userID int64, username, action string, isNew bool) {
