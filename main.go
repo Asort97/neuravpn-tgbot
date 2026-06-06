@@ -144,6 +144,7 @@ const (
 	stateVerifyEmail  SessionState = "verify_email"
 	stateEnterPromo   SessionState = "enter_promo"
 	stateBuyTraffic   SessionState = "buy_traffic"
+	stateSettings     SessionState = "settings"
 )
 
 type RatePlan struct {
@@ -343,6 +344,7 @@ var trafficPackByID = func() map[string]TrafficPack {
 
 const (
 	gibBytes               int64 = 1024 * 1024 * 1024
+	mibBytes               int64 = 1024 * 1024
 	mergedBaseTrafficBytes int64 = 10 * gibBytes
 )
 
@@ -1015,7 +1017,7 @@ func shouldSendTrafficReminder(userID int64, stage string, status *mergedTraffic
 }
 
 func trafficReminderText(stage string, remainingBytes int64) string {
-	remaining := formatTrafficGB(remainingBytes)
+	remaining := formatTrafficUserAmount(remainingBytes)
 	switch stage {
 	case "traffic_gb3":
 		return fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> трафик белых списков почти закончился\n\nосталось: <b>%s</b>\nпора докупить трафик, чтобы обход продолжил работать без пауз.", remaining)
@@ -1034,6 +1036,26 @@ func trafficReminderKeyboardRaw() rawInlineKeyboardMarkup {
 	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawCallbackButton("докупить трафик", "nav_buy_traffic", "", "5346325906526868503")},
 		{rawCallbackButton("профиль", "nav_status", "", "5343693752999383705")},
+	}}
+}
+
+func expiryReminderText(daysLeft int64, expiry time.Time) string {
+	expStr := formatExpiryUTC(expiry)
+	if daysLeft <= 0 {
+		return fmt.Sprintf("⏰ <b>ваш доступ к neuravpn закончился.</b>\nподписка была активна до: <code>%s</code>\nпродлите в разделе «оплата» чтобы не потерять связь.", html.EscapeString(expStr))
+	}
+	return fmt.Sprintf("⏰ <b>ваш доступ к neuravpn заканчивается через %d дн.</b>\nподписка активна до: <code>%s</code>\nпродлите в разделе «оплата» чтобы не потерять связь.", daysLeft, html.EscapeString(expStr))
+}
+
+func expiryReminderKeyboardRaw() rawInlineKeyboardMarkup {
+	plan, ok := ratePlanByID["30d"]
+	label := "30 дней - 149 ₽"
+	if ok {
+		label = fmt.Sprintf("%s - %.0f ₽", plan.Title, plan.Amount)
+	}
+	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton(label, "rate_30d", "", "5344015205531686528")},
+		{rawCallbackButton("выбрать тариф", "nav_topup", "", "5344015205531686528")},
 	}}
 }
 
@@ -1107,16 +1129,10 @@ func startExpiryReminder(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 						continue
 					}
 
-					expStr := formatExpiryUTC(exp)
-					text := ""
-					if daysLeft <= 0 {
-						text = fmt.Sprintf("⏰ ваш доступ к neuravpn закончился.\nдействовал до: %s\nпродлите в разделе «оплата» чтобы пользоваться VPN без ограничений.", expStr)
-					} else {
-						text = fmt.Sprintf("⏰ ваш доступ к neuravpn заканчивается через %d дн.\nдействует до: %s\nпродлите в разделе «оплата» чтобы пользоваться VPN без ограничений.", daysLeft, expStr)
+					text := expiryReminderText(daysLeft, exp)
+					if _, err := sendMessageRaw(bot, userID, text, "HTML", expiryReminderKeyboardRaw()); err != nil {
+						log.Printf("expiry reminder send failed user=%d key=%s err=%v", userID, key, err)
 					}
-
-					msg := tgbotapi.NewMessage(userID, text)
-					_, _ = bot.Send(msg)
 				}
 			}()
 
@@ -2892,6 +2908,20 @@ func formatTrafficGB(bytes int64) string {
 		return fmt.Sprintf("%.0f ГБ", gb)
 	}
 	return fmt.Sprintf("%.1f ГБ", gb)
+}
+
+func formatTrafficUserAmount(bytes int64) string {
+	if bytes <= 0 {
+		return "0 МБ"
+	}
+	if bytes < gibBytes {
+		mb := float64(bytes) / float64(mibBytes)
+		if mb >= 10 || math.Abs(mb-math.Round(mb)) < 0.05 {
+			return fmt.Sprintf("%.0f МБ", mb)
+		}
+		return fmt.Sprintf("%.1f МБ", mb)
+	}
+	return formatTrafficGB(bytes)
 }
 
 func mergedTrafficUserIDFromClient(client xray.Client) string {
@@ -5364,6 +5394,8 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			"<tg-emoji emoji-id=\"5345823764720426390\">💰</tg-emoji> введите промокод:", "HTML", promoKb)
 	case data == "nav_status":
 		handleStatus(bot, cq, session, xrCfg)
+	case data == "nav_settings":
+		handleProfileSettings(bot, cq, session)
 	case data == "nav_referral":
 		handleReferral(bot, cq, session)
 	case data == "nav_support":
@@ -5741,7 +5773,11 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			}
 		}
 		ackText = "автопродление включено ✅"
-		handleStatus(bot, cq, session, xrCfg)
+		if session.State == stateSettings {
+			handleProfileSettings(bot, cq, session)
+		} else {
+			handleStatus(bot, cq, session, xrCfg)
+		}
 
 	case data == "skip_autopay":
 		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
@@ -5758,7 +5794,11 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			log.Printf("disable_autopay error user=%s: %v", userIDStr, err)
 		}
 		ackText = "автопродление отключено ❌"
-		handleStatus(bot, cq, session, xrCfg)
+		if session.State == stateSettings {
+			handleProfileSettings(bot, cq, session)
+		} else {
+			handleStatus(bot, cq, session, xrCfg)
+		}
 
 	case data == "unbind_card":
 		// Показываем подтверждение: редактируем текущее сообщение
@@ -5779,10 +5819,18 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			log.Printf("unbind_card error user=%s: %v", userIDStr, err)
 		}
 		ackText = "карта отвязана ✅"
-		handleStatus(bot, cq, session, xrCfg)
+		if session.State == stateSettings {
+			handleProfileSettings(bot, cq, session)
+		} else {
+			handleStatus(bot, cq, session, xrCfg)
+		}
 
 	case data == "unbind_card_cancel":
-		handleStatus(bot, cq, session, xrCfg)
+		if session.State == stateSettings {
+			handleProfileSettings(bot, cq, session)
+		} else {
+			handleStatus(bot, cq, session, xrCfg)
+		}
 
 	}
 
@@ -6596,7 +6644,7 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	profileText := header + accessBlock
 
 	// Autopay status
-	apMethodID, apPlanID, apEnabled, _ := userStore.GetAutopay(userIDStr)
+	_, apPlanID, apEnabled, _ := userStore.GetAutopay(userIDStr)
 	if apEnabled {
 		if apPlan, ok := ratePlanByID[apPlanID]; ok {
 			profileText += fmt.Sprintf("\n\n<tg-emoji emoji-id=\"5345823764720426390\">🔄️</tg-emoji> автопродление: включено (%s, %.0f ₽)", apPlan.Title, apPlan.Amount)
@@ -6609,27 +6657,8 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
 			{rawCallbackButton("докупить трафик", "nav_buy_traffic", "", "5346325906526868503")},
-			{rawCallbackButton("e-mail", "email_menu", "", "5264870816671113060")},
+			{rawCallbackButton("настройки", "nav_settings", "", "5264852846527941278")},
 		},
-	}
-	if len(linkedVK) == 0 {
-		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
-			[]rawInlineKeyboardButton{rawCallbackButton("🔗 связать с ВК", "link_vk", "", "")},
-		)
-	}
-	if apEnabled {
-		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
-			[]rawInlineKeyboardButton{rawCallbackButton("отключить автопродление", "disable_autopay", "", "5264863854529124844")},
-		)
-	} else if apMethodID != "" && apPlanID != "" {
-		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
-			[]rawInlineKeyboardButton{rawCallbackButton("включить автопродление", "enable_autopay", "", "5345823764720426390")},
-		)
-	}
-	if apMethodID != "" {
-		kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
-			[]rawInlineKeyboardButton{rawCallbackButton("отвязать карту", "unbind_card", "", "5264863854529124844")},
-		)
 	}
 	kbRaw.InlineKeyboard = append(kbRaw.InlineKeyboard,
 		[]rawInlineKeyboardButton{rawCallbackButton("меню", "nav_menu", "", "5264852846527941278")},
@@ -6641,23 +6670,84 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	kbRows := [][]tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("💰 оплата", "nav_topup")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("📶 докупить трафик", "nav_buy_traffic")),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("e-mail", "email_menu")),
-	}
-	if len(linkedVK) == 0 {
-		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔗 связать с ВК", "link_vk")))
-	}
-	if apEnabled {
-		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("❌ отключить автопродление", "disable_autopay")))
-	} else if apMethodID != "" && apPlanID != "" {
-		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔄 включить автопродление", "enable_autopay")))
-	}
-	if apMethodID != "" {
-		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🗑 отвязать карту", "unbind_card")))
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("настройки", "nav_settings")),
 	}
 	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu")))
 	kb := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: kbRows}
 
 	_ = updateSessionText(bot, chatID, session, stateStatus, profileText, "HTML", kb)
+}
+
+func handleProfileSettings(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
+	chatID := cq.Message.Chat.ID
+	userIDStr := strconv.FormatInt(cq.From.ID, 10)
+
+	email, _ := userStore.GetEmail(userIDStr)
+	if strings.TrimSpace(email) == "" {
+		email = "не указан"
+	}
+	verifiedEmail, _ := userStore.GetVerifiedEmail(userIDStr)
+	if strings.TrimSpace(verifiedEmail) == "" {
+		verifiedEmail = "не подтверждена"
+	}
+	linkedVK, _ := userStore.GetLinkedVKUsers(userIDStr)
+	vkStatus := "не привязан"
+	if len(linkedVK) > 0 {
+		vkStatus = fmt.Sprintf("привязан (%s)", linkedVK[0])
+	}
+	apMethodID, apPlanID, apEnabled, _ := userStore.GetAutopay(userIDStr)
+	autopayStatus := "выключено"
+	if apEnabled {
+		if apPlan, ok := ratePlanByID[apPlanID]; ok {
+			autopayStatus = fmt.Sprintf("включено (%s, %.0f ₽)", apPlan.Title, apPlan.Amount)
+		} else {
+			autopayStatus = "включено"
+		}
+	} else if apMethodID != "" && apPlanID != "" {
+		autopayStatus = "карта сохранена, автопродление выключено"
+	}
+	cardStatus := "не привязана"
+	if apMethodID != "" {
+		cardStatus = "привязана"
+	}
+
+	text := fmt.Sprintf(
+		"<tg-emoji emoji-id=\"5264852846527941278\">⚙️</tg-emoji> настройки\n\n• e-mail для чеков: %s\n• подтверждённая почта: %s\n• вк: %s\n• автопродление: %s\n• карта: %s",
+		html.EscapeString(email),
+		html.EscapeString(verifiedEmail),
+		html.EscapeString(vkStatus),
+		html.EscapeString(autopayStatus),
+		html.EscapeString(cardStatus),
+	)
+
+	kbRows := [][]rawInlineKeyboardButton{
+		{rawCallbackButton("e-mail", "email_menu", "", "5264870816671113060")},
+	}
+	if len(linkedVK) == 0 {
+		kbRows = append(kbRows, []rawInlineKeyboardButton{
+			rawCallbackButton("привязать ВК", "link_vk", "", ""),
+		})
+	}
+	if apEnabled {
+		kbRows = append(kbRows, []rawInlineKeyboardButton{
+			rawCallbackButton("отключить автопродление", "disable_autopay", "", "5264863854529124844"),
+		})
+	} else if apMethodID != "" && apPlanID != "" {
+		kbRows = append(kbRows, []rawInlineKeyboardButton{
+			rawCallbackButton("включить автопродление", "enable_autopay", "", "5345823764720426390"),
+		})
+	}
+	if apMethodID != "" {
+		kbRows = append(kbRows, []rawInlineKeyboardButton{
+			rawCallbackButton("отвязать карту", "unbind_card", "", "5264863854529124844"),
+		})
+	}
+	kbRows = append(kbRows, []rawInlineKeyboardButton{
+		rawCallbackButton("назад", "nav_status", "", "5264852846527941278"),
+	})
+
+	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: kbRows}
+	_ = updateSessionTextRaw(bot, chatID, session, stateSettings, text, "HTML", kbRaw)
 }
 
 func mergedTrafficProfileBlock(userID string) string {
@@ -6678,8 +6768,8 @@ func mergedTrafficProfileBlock(userID string) string {
 	}
 	return fmt.Sprintf(
 		"\n\n<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> трафик белых списков\n├ остаток в этом месяце: <b>%s</b>\n└ перенесется в следующий месяц: <b>%s</b>",
-		formatTrafficGB(remaining),
-		formatTrafficGB(status.CarryNextBytes),
+		formatTrafficUserAmount(remaining),
+		formatTrafficUserAmount(status.CarryNextBytes),
 	)
 }
 
@@ -6740,10 +6830,10 @@ func showEmailMenu(bot *tgbotapi.BotAPI, chatID int64, userIDStr string, session
 		})
 	}
 	kbRows = append(kbRows, []rawInlineKeyboardButton{
-		rawCallbackButton("назад", "nav_status", "", "5264852846527941278"),
+		rawCallbackButton("назад", "nav_settings", "", "5264852846527941278"),
 	})
 	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: kbRows}
-	_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+	_ = updateSessionTextRaw(bot, chatID, session, stateSettings, text, "HTML", kbRaw)
 }
 
 func handleEmailMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
@@ -6763,9 +6853,9 @@ func handleConfirmEmail(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 		text := "📧 сначала укажи e-mail для чеков."
 		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("изменить почту", "edit_email", "", "5264870816671113060")},
-			{rawCallbackButton("назад", "nav_status", "", "5264852846527941278")},
+			{rawCallbackButton("назад", "nav_settings", "", "5264852846527941278")},
 		}}
-		_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+		_ = updateSessionTextRaw(bot, chatID, session, stateSettings, text, "HTML", kbRaw)
 		ackCallback(bot, cq, "укажи e-mail")
 		return
 	}
@@ -6857,9 +6947,9 @@ func handleLinkVK(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	linked, _ := userStore.GetLinkedVKUsers(userIDStr)
 	if len(linked) > 0 {
 		text := fmt.Sprintf("ℹ️ аккаунт уже привязан к вк: <code>%s</code>", html.EscapeString(linked[0]))
-		_ = updateSessionText(bot, chatID, session, stateStatus, text, "HTML",
+		_ = updateSessionText(bot, chatID, session, stateSettings, text, "HTML",
 			tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_status")),
+				tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_settings")),
 			))
 		ackCallback(bot, cq, "уже привязан")
 		return
@@ -6887,10 +6977,10 @@ func handleLinkVK(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 			tgbotapi.NewInlineKeyboardButtonURL("🔗 перейти в ВК", "https://vk.com/neuravpn"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_status"),
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ назад", "nav_settings"),
 		),
 	)
-	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", kb)
+	_ = updateSessionText(bot, chatID, session, stateSettings, text, "HTML", kb)
 	ackCallback(bot, cq, "")
 }
 
@@ -7375,6 +7465,7 @@ func getActionName(data string) string {
 		"nav_topup":        "💰 покупка доступа",
 		"nav_buy_traffic":  "📶 докупить трафик",
 		"nav_status":       "👤 профиль",
+		"nav_settings":     "⚙️ настройки",
 		"nav_referral":     "🎁 +15 дней",
 		"nav_support":      "📞 поддержка",
 		"nav_instructions": "🛠 инструкции",
