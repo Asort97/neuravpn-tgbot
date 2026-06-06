@@ -438,9 +438,35 @@ func isMainAdmin(chatID int64) bool {
 var (
 	expiryReminderMu    sync.Mutex
 	expiryReminderState = make(map[int64]map[string]string)
+	onboardingMu        sync.Mutex
+	onboardingFollowups = make(map[string]*onboardingInstructionFollowup)
+	onboardingOpened    = make(map[string]time.Time)
 )
 
 const expiryReminderStatePath = "database/reminder_state.json"
+const onboardingFollowupStatePath = "database/onboarding_followups.json"
+
+const (
+	onboardingInstructionDelay       = 20 * time.Minute
+	onboardingTrafficThresholdBytes  = 512 * 1024
+	onboardingFollowupCheckInterval  = 1 * time.Minute
+	onboardingInstructionLookbackTTL = 24 * time.Hour
+)
+
+type onboardingInstructionFollowup struct {
+	UserID            string    `json:"user_id"`
+	Source            string    `json:"source"`
+	Email             string    `json:"email"`
+	SubID             string    `json:"sub_id"`
+	IssuedAt          time.Time `json:"issued_at"`
+	BaselineBytes     int64     `json:"baseline_bytes"`
+	InstructionOpened bool      `json:"instruction_opened"`
+	Connected         bool      `json:"connected"`
+	Sent              bool      `json:"sent"`
+	Resolved          bool      `json:"resolved"`
+	SentAt            time.Time `json:"sent_at,omitempty"`
+	ResolvedAt        time.Time `json:"resolved_at,omitempty"`
+}
 
 var trafficReminderThresholds = []int64{0, 1, 2, 3}
 
@@ -969,6 +995,300 @@ func saveExpiryReminderState() error {
 		return err
 	}
 	return os.WriteFile(expiryReminderStatePath, data, 0o644)
+}
+
+func loadOnboardingFollowupState() {
+	onboardingMu.Lock()
+	defer onboardingMu.Unlock()
+
+	data, err := os.ReadFile(onboardingFollowupStatePath)
+	if err != nil {
+		return
+	}
+	var raw struct {
+		Followups         map[string]*onboardingInstructionFollowup `json:"followups"`
+		InstructionsOpen  map[string]time.Time                      `json:"instructions_opened"`
+		InstructionOpened map[string]time.Time                      `json:"instruction_opened"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		log.Printf("onboarding followup load failed: %v", err)
+		return
+	}
+	if raw.Followups != nil {
+		onboardingFollowups = raw.Followups
+	}
+	if raw.InstructionsOpen != nil {
+		onboardingOpened = raw.InstructionsOpen
+	} else if raw.InstructionOpened != nil {
+		onboardingOpened = raw.InstructionOpened
+	}
+}
+
+func saveOnboardingFollowupStateLocked() error {
+	if err := os.MkdirAll(filepath.Dir(onboardingFollowupStatePath), 0o755); err != nil {
+		return err
+	}
+	raw := struct {
+		Followups        map[string]*onboardingInstructionFollowup `json:"followups"`
+		InstructionsOpen map[string]time.Time                      `json:"instructions_opened"`
+	}{
+		Followups:        onboardingFollowups,
+		InstructionsOpen: onboardingOpened,
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(onboardingFollowupStatePath, data, 0o644)
+}
+
+func markOnboardingInstructionOpened(userID string) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return
+	}
+	now := time.Now()
+	onboardingMu.Lock()
+	defer onboardingMu.Unlock()
+	onboardingOpened[userID] = now
+	if f := onboardingFollowups[userID]; f != nil && !f.Sent && !f.Resolved {
+		f.InstructionOpened = true
+		f.Resolved = true
+		f.ResolvedAt = now
+	}
+	_ = saveOnboardingFollowupStateLocked()
+}
+
+func clientTrafficBytes(cfg *xraySettings, email string) (int64, error) {
+	if cfg == nil || cfg.client == nil {
+		return 0, fmt.Errorf("xray not configured")
+	}
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return 0, fmt.Errorf("client email is empty")
+	}
+	traffic, err := cfg.client.GetClientTrafficByEmail(email)
+	if err != nil || traffic == nil {
+		return 0, err
+	}
+	used := traffic.Up + traffic.Down
+	if used < 0 {
+		return 0, nil
+	}
+	return used, nil
+}
+
+func onboardingTrafficBytes(cfg *xraySettings, userID string, email string, subID string) (int64, error) {
+	var total int64
+	var gotAny bool
+	var lastErr error
+
+	if strings.TrimSpace(email) != "" {
+		if used, err := clientTrafficBytes(cfg, email); err == nil {
+			total += used
+			gotAny = true
+		} else {
+			lastErr = err
+		}
+	}
+
+	if mergedXrayCfg != nil && mergedXrayCfg.client != nil {
+		client, _, err := findMergedProviderClient(mergedXrayCfg, userID, subID)
+		if err == nil && client != nil {
+			if used, trafficErr := getMergedTrafficUsedBytes(mergedXrayCfg, client); trafficErr == nil {
+				total += used
+				gotAny = true
+			} else {
+				lastErr = trafficErr
+			}
+		} else if err != nil {
+			lastErr = err
+		}
+	}
+
+	if !gotAny && lastErr != nil {
+		return 0, lastErr
+	}
+	return total, nil
+}
+
+func trafficEmailFromAccessInfo(info *accessInfo, fallback string) string {
+	if info != nil && info.client != nil && strings.TrimSpace(info.client.Email) != "" {
+		return strings.TrimSpace(info.client.Email)
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func scheduleOnboardingInstructionFollowup(bot *tgbotapi.BotAPI, cfg *xraySettings, userID string, source string, info *accessInfo) {
+	userID = strings.TrimSpace(userID)
+	if bot == nil || cfg == nil || cfg.client == nil || userID == "" || userStore == nil {
+		return
+	}
+	days, err := userStore.GetDays(userID)
+	if err != nil || days <= 0 {
+		return
+	}
+
+	now := time.Now()
+	email := trafficEmailFromAccessInfo(info, fallbackEmail(userID))
+	subID := ""
+	if info != nil && info.client != nil {
+		subID = strings.TrimSpace(info.client.SubID)
+	}
+	baselineBytes, err := onboardingTrafficBytes(cfg, userID, email, subID)
+	if err != nil {
+		log.Printf("[onboarding] traffic baseline unavailable user=%s email=%s err=%v", userID, email, err)
+	}
+
+	onboardingMu.Lock()
+	defer onboardingMu.Unlock()
+	if existing := onboardingFollowups[userID]; existing != nil && (existing.Sent || existing.Resolved) {
+		return
+	}
+	instructionOpened := false
+	if openedAt, ok := onboardingOpened[userID]; ok && now.Sub(openedAt) <= onboardingInstructionLookbackTTL {
+		instructionOpened = true
+	}
+	onboardingFollowups[userID] = &onboardingInstructionFollowup{
+		UserID:            userID,
+		Source:            strings.TrimSpace(source),
+		Email:             email,
+		SubID:             subID,
+		IssuedAt:          now,
+		BaselineBytes:     baselineBytes,
+		InstructionOpened: instructionOpened,
+		Resolved:          instructionOpened,
+		ResolvedAt:        time.Time{},
+	}
+	if instructionOpened {
+		onboardingFollowups[userID].ResolvedAt = now
+	}
+	_ = saveOnboardingFollowupStateLocked()
+}
+
+func onboardingInstructionKeyboardRaw() rawInlineKeyboardMarkup {
+	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{
+			rawCallbackButton("android", "android", "", ""),
+			rawCallbackButton("windows", "windows", "", ""),
+		},
+		{
+			rawCallbackButton("ios", "ios", "", ""),
+			rawCallbackButton("macos", "macos", "", ""),
+		},
+	}}
+}
+
+func onboardingInstructionText() string {
+	return "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> <b>доступ уже активен</b>\n\nосталось только подключить устройство.\nвыберите, где хотите подключиться:"
+}
+
+func onboardingFollowupStillPending(userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	onboardingMu.Lock()
+	defer onboardingMu.Unlock()
+	f := onboardingFollowups[userID]
+	return f != nil && !f.Sent && !f.Resolved && !f.InstructionOpened
+}
+
+func processOnboardingFollowups(bot *tgbotapi.BotAPI, cfg *xraySettings) {
+	if bot == nil || cfg == nil || cfg.client == nil || userStore == nil {
+		return
+	}
+	now := time.Now()
+	var due []*onboardingInstructionFollowup
+
+	onboardingMu.Lock()
+	for _, f := range onboardingFollowups {
+		if f == nil || f.Sent || f.Resolved || f.InstructionOpened || f.IssuedAt.IsZero() {
+			continue
+		}
+		if now.Sub(f.IssuedAt) >= onboardingInstructionDelay {
+			copyFollowup := *f
+			due = append(due, &copyFollowup)
+		}
+	}
+	onboardingMu.Unlock()
+
+	for _, f := range due {
+		days, err := userStore.GetDays(f.UserID)
+		if err != nil || days <= 0 {
+			resolveOnboardingFollowup(f.UserID, false, false, true)
+			continue
+		}
+
+		email := strings.TrimSpace(f.Email)
+		if email == "" {
+			if info, _ := ensureXrayAccess(cfg, f.UserID, fallbackEmail(f.UserID), 0, false); info != nil && info.client != nil {
+				email = strings.TrimSpace(info.client.Email)
+			}
+		}
+		usedBytes, err := onboardingTrafficBytes(cfg, f.UserID, email, f.SubID)
+		if err == nil && usedBytes > f.BaselineBytes+onboardingTrafficThresholdBytes {
+			resolveOnboardingFollowup(f.UserID, false, true, true)
+			continue
+		}
+		if err != nil {
+			log.Printf("[onboarding] traffic check failed user=%s email=%s err=%v", f.UserID, email, err)
+		}
+
+		userID, parseErr := strconv.ParseInt(f.UserID, 10, 64)
+		if parseErr != nil || userID <= 0 {
+			resolveOnboardingFollowup(f.UserID, false, false, true)
+			continue
+		}
+		if !onboardingFollowupStillPending(f.UserID) {
+			continue
+		}
+		if _, err := sendMessageRaw(bot, userID, onboardingInstructionText(), "HTML", onboardingInstructionKeyboardRaw()); err != nil {
+			log.Printf("[onboarding] instruction followup send failed user=%s err=%v", f.UserID, err)
+			continue
+		}
+		resolveOnboardingFollowup(f.UserID, true, false, true)
+	}
+}
+
+func resolveOnboardingFollowup(userID string, sent bool, connected bool, resolved bool) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return
+	}
+	now := time.Now()
+	onboardingMu.Lock()
+	defer onboardingMu.Unlock()
+	f := onboardingFollowups[userID]
+	if f == nil {
+		return
+	}
+	if sent {
+		f.Sent = true
+		f.SentAt = now
+	}
+	if connected {
+		f.Connected = true
+	}
+	if resolved {
+		f.Resolved = true
+		f.ResolvedAt = now
+	}
+	_ = saveOnboardingFollowupStateLocked()
+}
+
+func startOnboardingFollowupLoop(bot *tgbotapi.BotAPI, cfg *xraySettings) {
+	if bot == nil || cfg == nil || cfg.client == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(onboardingFollowupCheckInterval)
+		defer ticker.Stop()
+		for {
+			processOnboardingFollowups(bot, cfg)
+			<-ticker.C
+		}
+	}()
 }
 
 func trafficReminderStage(remainingBytes int64) string {
@@ -2556,9 +2876,11 @@ func main() {
 	instruct.ValidateCustomEmojiIDs(bot)
 
 	loadExpiryReminderState()
+	loadOnboardingFollowupState()
 	startExpiryReminder(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
 	startMergedTrafficLoop(bot)
+	startOnboardingFollowupLoop(bot, xrayCfg)
 	startDailyLogSummary(bot)
 
 	// Профилактический re-login к XRAY раз в час
@@ -4962,7 +5284,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		case "status", "profile", "профиль":
 			handleStatus(bot, &tgbotapi.CallbackQuery{Message: msg, From: msg.From}, session, xrCfg)
 		case "instructions", "инструкции":
-			handleInstructionsMenu(bot, &tgbotapi.CallbackQuery{Message: msg}, session)
+			handleInstructionsMenu(bot, &tgbotapi.CallbackQuery{Message: msg, From: msg.From}, session)
 		case "referral", "рефералы":
 			handleReferral(bot, &tgbotapi.CallbackQuery{Message: msg, From: msg.From}, session)
 		case "support", "поддержка":
@@ -5172,7 +5494,9 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		if err := userStore.RecordReferral(userID, referrerID); err == nil {
 			if ok, _ := userStore.ClaimStartBonus(userID, "referral", time.Now()); ok {
 				_ = userStore.AddDays(userID, startTrialDays)
-				_, _ = ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), startTrialDays, true)
+				if info, err := ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), startTrialDays, true); err == nil {
+					scheduleOnboardingInstructionFollowup(bot, xrayCfg, userID, "referral_trial", info)
+				}
 			}
 
 			subscribed, subErr := isSubscribedToChannel(bot, msg.From.ID)
@@ -5434,21 +5758,25 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			return
 		}
 	case data == "windows":
+		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
 		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.Windows, 0); err != nil {
 			log.Printf("windows instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
 	case data == "android":
+		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
 		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.Android, 0); err != nil {
 			log.Printf("android instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
 	case data == "ios":
+		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
 		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.IOS, 0); err != nil {
 			log.Printf("ios instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
 		}
 	case data == "macos":
+		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
 		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.MacOS, 0); err != nil {
 			log.Printf("macos instruction error: %v", err)
 			ackText = "Не удалось открыть инструкцию"
@@ -6491,6 +6819,7 @@ func handleClaimSubscriptionBonus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQue
 	}
 
 	_ = sendAccess(info, userIDStr, chatID, channelBonusDays, userID, xrCfg, bot, session)
+	scheduleOnboardingInstructionFollowup(bot, xrCfg, userIDStr, "channel_bonus", info)
 	if refRewardGranted {
 		ackCallback(bot, cq, "бонус выдан, пригласившему +15 дней")
 		return
@@ -6971,6 +7300,9 @@ func handleLinkVK(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
+	if cq.From != nil {
+		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
+	}
 	instruct.ResetState(chatID)
 	text := "<tg-emoji emoji-id=\"5264991913274019640\">🛠️</tg-emoji> инструкции\nвыбери платформу:"
 	kbRaw := rawInlineKeyboardMarkup{
