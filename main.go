@@ -280,7 +280,7 @@ type DataStore interface {
 	GetReferralsCount(userID string) int
 	IsPaymentApplied(userID, paymentID string) (bool, error)
 	MarkPaymentApplied(userID, paymentID, provider, planID string, amount float64, currency string, at time.Time) (bool, error)
-	GetUnpaidTrialReminderUsers(cutoff time.Time) ([]string, error)
+	GetUnpaidTrialReminderUsers(windowStart, windowEnd time.Time, maxDays int64) ([]string, error)
 	SetLinkToken(userID, token string) error
 	GetUserByLinkToken(token string) (string, error)
 	ClearLinkToken(userID string) error
@@ -1470,7 +1470,12 @@ func processTrialPaymentReminders(bot *tgbotapi.BotAPI) {
 	if bot == nil || userStore == nil {
 		return
 	}
-	userIDs, err := userStore.GetUnpaidTrialReminderUsers(time.Now().UTC().Add(-24 * time.Hour))
+	now := time.Now().UTC()
+	maxTrialDays := int64(startTrialDays)
+	if int64(channelBonusDays) > maxTrialDays {
+		maxTrialDays = int64(channelBonusDays)
+	}
+	userIDs, err := userStore.GetUnpaidTrialReminderUsers(now.Add(-48*time.Hour), now.Add(-24*time.Hour), maxTrialDays)
 	if err != nil {
 		log.Printf("trial payment reminder: %v", err)
 		return

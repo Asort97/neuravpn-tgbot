@@ -714,17 +714,27 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	return tag.RowsAffected() > 0, nil
 }
 
-func (s *Store) GetUnpaidTrialReminderUsers(cutoff time.Time) ([]string, error) {
+func (s *Store) GetUnpaidTrialReminderUsers(windowStart, windowEnd time.Time, maxDays int64) ([]string, error) {
 	ctx := context.Background()
-	if cutoff.IsZero() {
-		cutoff = time.Now().UTC().Add(-24 * time.Hour)
+	now := time.Now().UTC()
+	if windowStart.IsZero() {
+		windowStart = now.Add(-48 * time.Hour)
+	}
+	if windowEnd.IsZero() {
+		windowEnd = now.Add(-24 * time.Hour)
+	}
+	if maxDays <= 0 {
+		maxDays = 5
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT u.id
 		FROM users u
 		WHERE u.days > 0
+			AND u.days <= $3
 			AND u.start_bonus_claimed = TRUE
-			AND COALESCE(u.start_bonus_claimed_at, u.created_at) <= $1
+			AND LOWER(COALESCE(u.start_bonus_source, '')) IN ('channel', 'referral', 'trial')
+			AND COALESCE(u.start_bonus_claimed_at, u.created_at) >= $1
+			AND COALESCE(u.start_bonus_claimed_at, u.created_at) < $2
 			AND NOT EXISTS (
 				SELECT 1
 				FROM applied_payments ap
@@ -732,7 +742,7 @@ func (s *Store) GetUnpaidTrialReminderUsers(cutoff time.Time) ([]string, error) 
 			)
 		ORDER BY COALESCE(u.start_bonus_claimed_at, u.created_at) ASC
 		LIMIT 1000
-	`, cutoff.UTC())
+	`, windowStart.UTC(), windowEnd.UTC(), maxDays)
 	if err != nil {
 		return nil, err
 	}

@@ -718,18 +718,29 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	return true, nil
 }
 
-func (s *Store) GetUnpaidTrialReminderUsers(cutoff time.Time) ([]string, error) {
+func (s *Store) GetUnpaidTrialReminderUsers(windowStart, windowEnd time.Time, maxDays int64) ([]string, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
 	s.loadUsersLocked()
-	if cutoff.IsZero() {
-		cutoff = time.Now().UTC().Add(-24 * time.Hour)
+	now := time.Now().UTC()
+	if windowStart.IsZero() {
+		windowStart = now.Add(-48 * time.Hour)
+	}
+	if windowEnd.IsZero() {
+		windowEnd = now.Add(-24 * time.Hour)
+	}
+	if maxDays <= 0 {
+		maxDays = 5
 	}
 
 	var userIDs []string
 	for userID, ud := range db {
-		if strings.TrimSpace(userID) == "" || ud.Days <= 0 || !ud.StartBonusClaimed || len(ud.AppliedPayments) > 0 {
+		source := strings.ToLower(strings.TrimSpace(ud.StartBonusSource))
+		if strings.TrimSpace(userID) == "" || ud.Days <= 0 || ud.Days > maxDays || !ud.StartBonusClaimed || len(ud.AppliedPayments) > 0 {
+			continue
+		}
+		if source != "channel" && source != "referral" && source != "trial" {
 			continue
 		}
 		claimedAtRaw := strings.TrimSpace(ud.StartBonusClaimedAt)
@@ -743,7 +754,8 @@ func (s *Store) GetUnpaidTrialReminderUsers(cutoff time.Time) ([]string, error) 
 		if err != nil {
 			continue
 		}
-		if claimedAt.UTC().After(cutoff.UTC()) {
+		claimedAt = claimedAt.UTC()
+		if claimedAt.Before(windowStart.UTC()) || !claimedAt.Before(windowEnd.UTC()) {
 			continue
 		}
 		userIDs = append(userIDs, userID)
