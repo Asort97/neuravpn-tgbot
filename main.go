@@ -71,6 +71,8 @@ var (
 	adStats            = newAdStatsStore(resolveAdStatsPath())
 	logSessionMu       sync.Mutex
 	logSessions        = make(map[int64]*logSession) // key: userID
+	notificationLogMu  sync.Mutex
+	notificationLogs   = make(map[string]*notificationLogBatch) // key: notification type
 )
 
 func init() {
@@ -378,6 +380,16 @@ type logSession struct {
 	Last    time.Time
 	Actions []string
 	IsNew   bool
+	Sending bool
+	Dirty   bool
+}
+
+type notificationLogBatch struct {
+	MsgID   int
+	Type    string
+	Start   time.Time
+	Last    time.Time
+	Users   []string
 	Sending bool
 	Dirty   bool
 }
@@ -6461,23 +6473,117 @@ func notificationUserLink(bot *tgbotapi.BotAPI, userID int64, username string) s
 	return fmt.Sprintf(`<a href="tg://user?id=%d">ID:<code>%d</code></a>`, userID, userID)
 }
 
+func buildNotificationLogBatchText(batch *notificationLogBatch) string {
+	if batch == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("🔔 уведомление пользователю\n")
+	b.WriteString(fmt.Sprintf("тип: <b>%s</b>\n", html.EscapeString(batch.Type)))
+	b.WriteString(fmt.Sprintf("🕒 %s–%s · %d\n\n", batch.Start.Format("15:04"), batch.Last.Format("15:04"), len(batch.Users)))
+
+	for i, user := range batch.Users {
+		line := fmt.Sprintf("%d. %s\n", i+1, user)
+		if b.Len()+len(line) > 3600 {
+			b.WriteString(fmt.Sprintf("… и ещё %d", len(batch.Users)-i))
+			break
+		}
+		b.WriteString(line)
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func sendUserNotificationAdminLog(bot *tgbotapi.BotAPI, userID int64, username, notificationType string) {
-	if bot == nil || userID <= 0 || strings.TrimSpace(notificationType) == "" {
+	notificationType = strings.TrimSpace(notificationType)
+	if bot == nil || userID <= 0 || notificationType == "" {
 		return
 	}
-	text := fmt.Sprintf("🔔 уведомление пользователю\nтип: <b>%s</b>\nuser: %s",
-		html.EscapeString(strings.TrimSpace(notificationType)),
-		notificationUserLink(bot, userID, username),
-	)
+	userLink := notificationUserLink(bot, userID, username)
 	if testMode {
-		log.Printf("[TEST MODE] user notification admin log: %s", stripHTML(text))
+		log.Printf("[TEST MODE] user notification admin log: type=%s user=%s", notificationType, stripHTML(userLink))
 		return
 	}
-	msg := tgbotapi.NewMessage(logChatID, text)
-	msg.ParseMode = "HTML"
-	msg.DisableWebPagePreview = true
-	if _, err := bot.Send(msg); err != nil {
-		log.Printf("user notification admin log send failed user=%d type=%q err=%v", userID, notificationType, err)
+
+	now := time.Now()
+	notificationLogMu.Lock()
+	batch := notificationLogs[notificationType]
+	if batch == nil || now.Sub(batch.Start) > 10*time.Minute {
+		batch = &notificationLogBatch{
+			Type:  notificationType,
+			Start: now,
+			Last:  now,
+			Users: []string{},
+		}
+		notificationLogs[notificationType] = batch
+	}
+	batch.Last = now
+	batch.Users = append(batch.Users, userLink)
+	notificationLogMu.Unlock()
+
+	for {
+		notificationLogMu.Lock()
+		current := notificationLogs[notificationType]
+		if current != batch {
+			notificationLogMu.Unlock()
+			return
+		}
+		if batch.Sending {
+			batch.Dirty = true
+			notificationLogMu.Unlock()
+			return
+		}
+		text := buildNotificationLogBatchText(batch)
+		msgID := batch.MsgID
+		batch.Sending = true
+		notificationLogMu.Unlock()
+
+		newMsgID := 0
+		if msgID == 0 {
+			msg := tgbotapi.NewMessage(logChatID, text)
+			msg.ParseMode = "HTML"
+			msg.DisableWebPagePreview = true
+			if sent, err := bot.Send(msg); err == nil {
+				newMsgID = sent.MessageID
+			} else {
+				log.Printf("user notification admin log send failed type=%q err=%v", notificationType, err)
+			}
+		} else {
+			edit := tgbotapi.NewEditMessageText(logChatID, msgID, text)
+			edit.ParseMode = "HTML"
+			edit.DisableWebPagePreview = true
+			if _, err := bot.Send(edit); err != nil {
+				if strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
+					// no-op
+				} else {
+					msg := tgbotapi.NewMessage(logChatID, text)
+					msg.ParseMode = "HTML"
+					msg.DisableWebPagePreview = true
+					if sent, err2 := bot.Send(msg); err2 == nil {
+						newMsgID = sent.MessageID
+					} else {
+						log.Printf("user notification admin log edit failed type=%q err=%v; fallback send failed: %v", notificationType, err, err2)
+					}
+				}
+			}
+		}
+
+		notificationLogMu.Lock()
+		current = notificationLogs[notificationType]
+		if current != batch {
+			notificationLogMu.Unlock()
+			return
+		}
+		if newMsgID != 0 {
+			batch.MsgID = newMsgID
+		}
+		batch.Sending = false
+		if batch.Dirty {
+			batch.Dirty = false
+			notificationLogMu.Unlock()
+			continue
+		}
+		notificationLogMu.Unlock()
+		return
 	}
 }
 
