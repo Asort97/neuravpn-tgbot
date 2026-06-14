@@ -1,0 +1,4 @@
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS autopay_method_id TEXT,
+    ADD COLUMN IF NOT EXISTS autopay_plan_id TEXT,
+    ADD COLUMN IF NOT EXISTS autopay_enabled BOOLEAN NOT NULL DEFAULT FALSE;

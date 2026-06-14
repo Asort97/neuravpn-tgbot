@@ -77,6 +77,25 @@ func (c *Client) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (c Client) MarshalJSON() ([]byte, error) {
+	dto := clientDTO{
+		ID:         c.ID,
+		Email:      c.Email,
+		Enable:     c.Enable,
+		Flow:       c.Flow,
+		LimitIP:    c.LimitIP,
+		TotalGB:    c.TotalGB,
+		ExpiryTime: c.ExpiryTime,
+		SubID:      c.SubID,
+		TgID:       tgIDAsNumber(c.TgID),
+		Comment:    c.Comment,
+		Reset:      c.Reset,
+		CreatedAt:  c.CreatedAt,
+		UpdatedAt:  c.UpdatedAt,
+	}
+	return json.Marshal(dto)
+}
+
 func normalizeTgID(value interface{}) string {
 	switch v := value.(type) {
 	case nil:
@@ -96,6 +115,18 @@ func normalizeTgID(value interface{}) string {
 	}
 }
 
+func tgIDAsNumber(value string) int64 {
+	value = strings.ReplaceAll(strings.TrimSpace(value), " ", "")
+	if value == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // InboundSettings describes inbound settings payload with embedded clients.
 type InboundSettings struct {
 	Clients    []Client      `json:"clients"`
@@ -105,21 +136,105 @@ type InboundSettings struct {
 
 // InboundData mirrors inbound API response object.
 type InboundData struct {
-	ID             int    `json:"id"`
-	Remark         string `json:"remark"`
-	Enable         bool   `json:"enable"`
-	Port           int    `json:"port"`
-	Protocol       string `json:"protocol"`
-	Settings       string `json:"settings"`
-	StreamSettings string `json:"streamSettings"`
-	Tag            string `json:"tag"`
-	Sniffing       string `json:"sniffing"`
+	ID                   int    `json:"id"`
+	Up                   int64  `json:"up"`
+	Down                 int64  `json:"down"`
+	Total                int64  `json:"total"`
+	Remark               string `json:"remark"`
+	Enable               bool   `json:"enable"`
+	ExpiryTime           int64  `json:"expiryTime"`
+	TrafficReset         string `json:"trafficReset"`
+	LastTrafficResetTime int64  `json:"lastTrafficResetTime"`
+	Listen               string `json:"listen"`
+	Port                 int    `json:"port"`
+	Protocol             string `json:"protocol"`
+	Settings             string `json:"settings"`
+	StreamSettings       string `json:"streamSettings"`
+	Tag                  string `json:"tag"`
+	Sniffing             string `json:"sniffing"`
+	NodeID               *int   `json:"nodeId,omitempty"`
+}
+
+func (i *InboundData) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID                   int             `json:"id"`
+		Up                   int64           `json:"up"`
+		Down                 int64           `json:"down"`
+		Total                int64           `json:"total"`
+		Remark               string          `json:"remark"`
+		Enable               bool            `json:"enable"`
+		ExpiryTime           int64           `json:"expiryTime"`
+		TrafficReset         string          `json:"trafficReset"`
+		LastTrafficResetTime int64           `json:"lastTrafficResetTime"`
+		Listen               string          `json:"listen"`
+		Port                 int             `json:"port"`
+		Protocol             string          `json:"protocol"`
+		Settings             json.RawMessage `json:"settings"`
+		StreamSettings       json.RawMessage `json:"streamSettings"`
+		Tag                  string          `json:"tag"`
+		Sniffing             json.RawMessage `json:"sniffing"`
+		NodeID               *int            `json:"nodeId"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*i = InboundData{
+		ID:                   raw.ID,
+		Up:                   raw.Up,
+		Down:                 raw.Down,
+		Total:                raw.Total,
+		Remark:               raw.Remark,
+		Enable:               raw.Enable,
+		ExpiryTime:           raw.ExpiryTime,
+		TrafficReset:         raw.TrafficReset,
+		LastTrafficResetTime: raw.LastTrafficResetTime,
+		Listen:               raw.Listen,
+		Port:                 raw.Port,
+		Protocol:             raw.Protocol,
+		Settings:             rawJSONString(raw.Settings),
+		StreamSettings:       rawJSONString(raw.StreamSettings),
+		Tag:                  raw.Tag,
+		Sniffing:             rawJSONString(raw.Sniffing),
+		NodeID:               raw.NodeID,
+	}
+	return nil
+}
+
+func rawJSONString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s
+		}
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err == nil {
+		return buf.String()
+	}
+	return string(raw)
 }
 
 type InboundResponse struct {
 	Success bool        `json:"success"`
 	Msg     string      `json:"msg"`
 	Obj     InboundData `json:"obj"`
+}
+
+// ClientTraffic describes 3X-UI traffic counters for a client email.
+type ClientTraffic struct {
+	ID         int    `json:"id"`
+	InboundID  int    `json:"inboundId"`
+	Enable     bool   `json:"enable"`
+	Email      string `json:"email"`
+	Up         int64  `json:"up"`
+	Down       int64  `json:"down"`
+	ExpiryTime int64  `json:"expiryTime"`
+	Total      int64  `json:"total"`
+	Reset      int    `json:"reset"`
 }
 
 type XRayClient struct {
@@ -129,6 +244,7 @@ type XRayClient struct {
 	port        string
 	webBasePath string
 	serverURL   string
+	apiToken    string
 	httpClient  *http.Client
 	authMu      sync.Mutex
 	csrfToken   string
@@ -164,29 +280,52 @@ func New(username, password, host, port, webBasePath string) *XRayClient {
 	}
 }
 
+func (x *XRayClient) SetAPIToken(token string) {
+	x.apiToken = strings.TrimSpace(token)
+}
+
+func (x *XRayClient) hasAPIToken() bool {
+	return strings.TrimSpace(x.apiToken) != ""
+}
+
 // LoginToServer must be called before any other API calls.
 func (x *XRayClient) LoginToServer() error {
 	x.authMu.Lock()
 	defer x.authMu.Unlock()
 
+	if x.hasAPIToken() {
+		return nil
+	}
+
 	// 1. Fetch CSRF token for 3x-ui v3.0.0+
 	csrfUrl := fmt.Sprintf("%s/csrf-token", x.serverURL)
 	csrfReq, err := http.NewRequest("GET", csrfUrl, nil)
-	if err == nil {
-		csrfResp, csrfErr := x.httpClient.Do(csrfReq)
-		if csrfErr == nil {
-			defer csrfResp.Body.Close()
-			if csrfResp.StatusCode >= 200 && csrfResp.StatusCode < 300 {
-				var result struct {
-					Success bool   `json:"success"`
-					Obj     string `json:"obj"`
-				}
-				body, _ := io.ReadAll(csrfResp.Body)
-				if err := json.Unmarshal(body, &result); err == nil && result.Success {
-					x.csrfToken = result.Obj
-				}
-			}
+	if err != nil {
+		return err
+	}
+	csrfResp, csrfErr := x.httpClient.Do(csrfReq)
+	if csrfErr != nil {
+		return fmt.Errorf("xray csrf request failed: %w", csrfErr)
+	}
+	defer csrfResp.Body.Close()
+	csrfBody, _ := io.ReadAll(csrfResp.Body)
+	if csrfResp.StatusCode < 200 || csrfResp.StatusCode >= 300 {
+		if !isEndpointUnsupported(csrfResp.StatusCode) {
+			return fmt.Errorf("xray csrf returned status=%d body=%s", csrfResp.StatusCode, responseSnippet(csrfBody))
 		}
+	} else {
+		var csrfResult struct {
+			Success bool   `json:"success"`
+			Msg     string `json:"msg"`
+			Obj     string `json:"obj"`
+		}
+		if err := json.Unmarshal(csrfBody, &csrfResult); err != nil {
+			return fmt.Errorf("xray csrf invalid response: %w; body=%s", err, responseSnippet(csrfBody))
+		}
+		if !csrfResult.Success || strings.TrimSpace(csrfResult.Obj) == "" {
+			return fmt.Errorf("xray csrf failed: %s", strings.TrimSpace(csrfResult.Msg))
+		}
+		x.csrfToken = csrfResult.Obj
 	}
 
 	url := fmt.Sprintf("%s/login", x.serverURL)
@@ -227,6 +366,16 @@ func (x *XRayClient) LoginToServer() error {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return fmt.Errorf("xray login returned empty body")
 	}
+	var loginResult struct {
+		Success bool   `json:"success"`
+		Msg     string `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &loginResult); err != nil {
+		return fmt.Errorf("xray login invalid response: %w; body=%s", err, responseSnippet(body))
+	}
+	if !loginResult.Success {
+		return fmt.Errorf("xray login failed: %s", strings.TrimSpace(loginResult.Msg))
+	}
 
 	return nil
 }
@@ -247,6 +396,9 @@ func shouldRetryAfterRelogin(statusCode int, body []byte) bool {
 	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
 		return true
 	}
+	if statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed {
+		return false
+	}
 	if len(trimmed) == 0 {
 		return true
 	}
@@ -254,6 +406,27 @@ func shouldRetryAfterRelogin(statusCode int, body []byte) bool {
 		return true
 	}
 	return false
+}
+
+func isEndpointUnsupported(statusCode int) bool {
+	return statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed
+}
+
+func checkAPISuccess(action string, statusCode int, body []byte) error {
+	if statusCode < 200 || statusCode >= 300 {
+		return fmt.Errorf("%s returned status=%d body=%s", action, statusCode, responseSnippet(body))
+	}
+	var raw struct {
+		Success *bool  `json:"success"`
+		Msg     string `json:"msg"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return fmt.Errorf("%s invalid response: %w; body=%s", action, err, responseSnippet(body))
+	}
+	if raw.Success != nil && !*raw.Success {
+		return fmt.Errorf("%s returned success=false: %s", action, strings.TrimSpace(raw.Msg))
+	}
+	return nil
 }
 
 func (x *XRayClient) doAPIRequest(method, url string, payload []byte, headers map[string]string) (int, []byte, error) {
@@ -272,6 +445,10 @@ func (x *XRayClient) doAPIRequestOnce(method, url string, payload []byte, header
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
+	}
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	if x.hasAPIToken() {
+		req.Header.Set("Authorization", "Bearer "+x.apiToken)
 	}
 	if x.csrfToken != "" {
 		req.Header.Set("X-CSRF-Token", x.csrfToken)
@@ -432,6 +609,82 @@ func (x *XRayClient) GetClientBySubID(inboundID int, subID string) (*Client, err
 	return nil, nil
 }
 
+func (x *XRayClient) GetClientTrafficByEmail(email string) (*ClientTraffic, error) {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil, fmt.Errorf("client email is empty")
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/clients/traffic/%s", x.serverURL, url.PathEscape(email))
+
+	statusCode, body, err := x.doAPIRequest("GET", requestURL, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return nil, err
+	}
+	if isEndpointUnsupported(statusCode) {
+		requestURL = fmt.Sprintf("%s/panel/api/inbounds/getClientTraffics/%s", x.serverURL, url.PathEscape(email))
+		statusCode, body, err = x.doAPIRequest("GET", requestURL, nil, map[string]string{"Accept": "application/json"})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return nil, fmt.Errorf("get client traffic returned status=%d body=%s", statusCode, responseSnippet(body))
+	}
+
+	var raw struct {
+		Success bool            `json:"success"`
+		Msg     string          `json:"msg"`
+		Obj     json.RawMessage `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("%w; body=%s", err, responseSnippet(body))
+	}
+	if !raw.Success {
+		return nil, fmt.Errorf("API returned success=false: %s", raw.Msg)
+	}
+	if len(raw.Obj) == 0 || string(raw.Obj) == "null" {
+		return nil, nil
+	}
+
+	var traffic ClientTraffic
+	if err := json.Unmarshal(raw.Obj, &traffic); err == nil {
+		return &traffic, nil
+	}
+
+	var trafficList []ClientTraffic
+	if err := json.Unmarshal(raw.Obj, &trafficList); err != nil {
+		return nil, fmt.Errorf("unexpected traffic payload: %s", responseSnippet(raw.Obj))
+	}
+	if len(trafficList) == 0 {
+		return nil, nil
+	}
+	return &trafficList[0], nil
+}
+
+func (x *XRayClient) ResetClientTraffic(inboundID int, email string) error {
+	email = strings.TrimSpace(email)
+	if inboundID <= 0 {
+		return fmt.Errorf("inboundID is invalid")
+	}
+	if email == "" {
+		return fmt.Errorf("client email is empty")
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/clients/resetTraffic/%s", x.serverURL, url.PathEscape(email))
+
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return err
+	}
+	if isEndpointUnsupported(statusCode) {
+		requestURL = fmt.Sprintf("%s/panel/api/inbounds/%d/resetClientTraffic/%s", x.serverURL, inboundID, url.PathEscape(email))
+		statusCode, body, err = x.doAPIRequest("POST", requestURL, nil, map[string]string{"Accept": "application/json"})
+		if err != nil {
+			return err
+		}
+	}
+	return checkAPISuccess("reset client traffic", statusCode, body)
+}
+
 func (x *XRayClient) GenerateVLESSLink(client *Client, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string) string {
 	spx := spiderX
 	if strings.TrimSpace(spx) == "" {
@@ -528,6 +781,7 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 		Security        string `json:"security"`
 		RealitySettings struct {
 			Dest        string   `json:"dest"`
+			Target      string   `json:"target"`
 			ServerNames []string `json:"serverNames"`
 			ShortIds    []string `json:"shortIds"`
 			// Client-visible params nested inside "settings"
@@ -576,8 +830,12 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 	if len(r.ServerNames) > 0 {
 		serverName = strings.TrimSpace(r.ServerNames[0])
 	}
-	if serverName == "" && r.Dest != "" {
-		host := r.Dest
+	if serverName == "" {
+		// target/dest can be "hostname:port" or just "hostname"
+		host := strings.TrimSpace(r.Target)
+		if host == "" {
+			host = strings.TrimSpace(r.Dest)
+		}
 		if idx := strings.LastIndex(host, ":"); idx >= 0 {
 			host = host[:idx]
 		}
@@ -605,6 +863,7 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 		spx = "/"
 	}
 
+	// port: use the inbound port if non-zero
 	port := inboundPort
 
 	return &RealityParams{
@@ -617,14 +876,15 @@ func parseRealityParams(streamSettings string, inboundPort int) *RealityParams {
 	}
 }
 
-// parseTransportParams reads streamSettings JSON from the panel and returns
-// the correct VLESS query params (type=xhttp, type=ws, type=tcp, etc.)
+// parseTransportParams extracts transport-specific query params from raw streamSettings JSON.
+// Returns params string like "type=xhttp" or "type=tcp&headerType=none" etc.
 func parseTransportParams(streamSettings string) string {
 	raw := strings.TrimSpace(streamSettings)
 	if raw == "" {
 		return "type=tcp&headerType=none"
 	}
 
+	// First pass: get network type and raw xhttpSettings blob
 	var outer struct {
 		Network           string          `json:"network"`
 		XhttpSettings     json.RawMessage `json:"xhttpSettings"`
@@ -659,11 +919,13 @@ func parseTransportParams(streamSettings string) string {
 
 	switch network {
 	case "xhttp", "splithttp":
+		// Pick the right settings blob
 		settingsRaw := outer.XhttpSettings
 		if len(settingsRaw) == 0 || string(settingsRaw) == "null" {
 			settingsRaw = outer.SplitHttpSettings
 		}
 
+		// Second pass: extract individual fields for standard params
 		var xhttpFields struct {
 			Path string `json:"path"`
 			Host string `json:"host"`
@@ -687,6 +949,7 @@ func parseTransportParams(streamSettings string) string {
 		if mode != "" {
 			params += "&mode=" + url.QueryEscape(mode)
 		}
+		// Pass entire xhttpSettings as extra so clients get all server-side params
 		if len(settingsRaw) > 0 && string(settingsRaw) != "null" {
 			params += "&extra=" + url.QueryEscape(string(settingsRaw))
 		}
@@ -723,7 +986,7 @@ func parseTransportParams(streamSettings string) string {
 			params += "&host=" + url.QueryEscape(outer.HttpSettings.Host[0])
 		}
 		return params
-	default:
+	default: // tcp
 		headerType := strings.TrimSpace(outer.TcpSettings.Header.Type)
 		if headerType == "" {
 			headerType = "none"
@@ -732,8 +995,8 @@ func parseTransportParams(streamSettings string) string {
 	}
 }
 
-// GenerateVLESSLinkForInbound generates a VLESS link using the actual transport
-// settings read from the specified inbound, instead of hardcoding tcp.
+// GenerateVLESSLinkForInbound generates a VLESS link using the actual transport settings
+// read from the specified inbound, instead of hardcoding tcp.
 func (x *XRayClient) GenerateVLESSLinkForInbound(client *Client, inboundID int, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string, fingerprint string) string {
 	spx := spiderX
 	if strings.TrimSpace(spx) == "" {
@@ -837,8 +1100,9 @@ func (x *XRayClient) AddClient(inboundID int, tgUserId string) (string, error) {
 
 // AddClientWithData sends full client struct to add a new entry.
 func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, error) {
-	url := fmt.Sprintf("%s/panel/api/inbounds/addClient", x.serverURL)
-
+	if inboundID <= 0 {
+		return nil, fmt.Errorf("inboundID is invalid")
+	}
 	if client.ID == "" {
 		client.ID = uuid.New().String()
 	}
@@ -847,77 +1111,231 @@ func (x *XRayClient) AddClientWithData(inboundID int, client Client) (*Client, e
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
-	jsonBody, err := buildClientPayload(inboundID, client)
-	if err != nil {
-		colorfulprint.PrintError("Failed marshal settings", err)
-		return nil, err
+	if err := x.AddClientToInbounds(client, []int{inboundID}); err == nil {
+		return &client, nil
+	} else {
+		log.Printf("[XRAY] clients/add failed inbound=%d email=%s uuid=%s err=%v", inboundID, client.Email, client.ID, err)
+		if legacyErr := x.addClientWithLegacyAPI(inboundID, client); legacyErr != nil {
+			return nil, fmt.Errorf("add client failed: clients/add: %v; inbounds/addClient: %v", err, legacyErr)
+		}
 	}
-
-	statusCode, body, err := x.doAPIRequest("POST", url, jsonBody, map[string]string{
-		"Content-Type": "application/json",
-		"Accept":       "application/json",
-	})
-	if err != nil {
-		colorfulprint.PrintError("Failed response", err)
-		return nil, err
-	}
-	colorfulprint.PrintState(fmt.Sprintf("add client status=%d\n%s", statusCode, string(body)))
-	if statusCode < 200 || statusCode >= 300 {
-		return nil, fmt.Errorf("add client returned status=%d body=%s", statusCode, responseSnippet(body))
-	}
-
 	return &client, nil
-}
-
-func buildClientPayload(inboundID int, client Client) ([]byte, error) {
-	settings := map[string]interface{}{
-		"clients": []Client{client},
-	}
-
-	settingsJSON, err := json.Marshal(settings)
-	if err != nil {
-		return nil, err
-	}
-
-	payload := map[string]interface{}{
-		"id":       inboundID,
-		"settings": string(settingsJSON), // raw JSON string expected by API
-	}
-
-	return json.Marshal(payload)
 }
 
 func (x *XRayClient) UpdateClient(inboundID int, client Client) error {
 	if client.ID == "" {
 		return fmt.Errorf("client uuid is empty")
 	}
+	if inboundID <= 0 {
+		return fmt.Errorf("inboundID is invalid")
+	}
 	client.Flow = strings.TrimSpace(client.Flow)
 	if client.Flow == "" {
 		client.Flow = x.defaultFlowForInbound(inboundID)
 	}
 
-	url := fmt.Sprintf("%s/panel/api/inbounds/updateClient/%s", x.serverURL, client.ID)
+	if err := x.UpdateClientByEmail(client.Email, client); err == nil {
+		return nil
+	} else {
+		log.Printf("[XRAY] clients/update failed inbound=%d email=%s uuid=%s err=%v", inboundID, client.Email, client.ID, err)
+		if legacyErr := x.updateClientWithLegacyAPI(inboundID, client); legacyErr != nil {
+			return fmt.Errorf("update client failed: clients/update: %v; inbounds/updateClient: %v", err, legacyErr)
+		}
+	}
+	return nil
+}
 
-	jsonBody, err := buildClientPayload(inboundID, client)
+func (x *XRayClient) addClientWithLegacyAPI(inboundID int, client Client) error {
+	requestURL := fmt.Sprintf("%s/panel/api/inbounds/addClient", x.serverURL)
+	bodyPayload, err := buildLegacyClientPayload(inboundID, client)
 	if err != nil {
-		colorfulprint.PrintError("Failed marshal json", err)
 		return err
 	}
-
-	statusCode, body, err := x.doAPIRequest("POST", url, jsonBody, map[string]string{
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, bodyPayload, map[string]string{
 		"Content-Type": "application/json",
 		"Accept":       "application/json",
 	})
 	if err != nil {
-		colorfulprint.PrintError("Failed response", err)
 		return err
 	}
-	colorfulprint.PrintState(fmt.Sprintf("update client status=%d\n%s", statusCode, string(body)))
+	return checkAPISuccess("add client", statusCode, body)
+}
+
+func (x *XRayClient) updateClientWithLegacyAPI(inboundID int, client Client) error {
+	requestURL := fmt.Sprintf("%s/panel/api/inbounds/updateClient/%s", x.serverURL, url.PathEscape(client.ID))
+	bodyPayload, err := buildLegacyClientPayload(inboundID, client)
+	if err != nil {
+		return err
+	}
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, bodyPayload, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("update client", statusCode, body)
+}
+
+func buildLegacyClientPayload(inboundID int, client Client) ([]byte, error) {
+	settings := map[string]interface{}{
+		"clients": []Client{client},
+	}
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]interface{}{
+		"id":       inboundID,
+		"settings": string(settingsJSON),
+	}
+	return json.Marshal(payload)
+}
+
+func (x *XRayClient) GetClientRecordByEmail(email string) (*Client, []int, error) {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil, nil, fmt.Errorf("client email is empty")
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/clients/get/%s", x.serverURL, url.PathEscape(email))
+	statusCode, body, err := x.doAPIRequest("GET", requestURL, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return nil, nil, err
+	}
+	if statusCode == http.StatusNotFound {
+		return nil, nil, nil
+	}
 	if statusCode < 200 || statusCode >= 300 {
-		return fmt.Errorf("update client returned status=%d body=%s", statusCode, responseSnippet(body))
+		return nil, nil, fmt.Errorf("get client record returned status=%d body=%s", statusCode, responseSnippet(body))
 	}
 
-	return nil
+	var raw struct {
+		Success bool   `json:"success"`
+		Msg     string `json:"msg"`
+		Obj     struct {
+			Client struct {
+				UUID       string      `json:"uuid"`
+				Email      string      `json:"email"`
+				Enable     bool        `json:"enable"`
+				Flow       string      `json:"flow"`
+				LimitIP    int         `json:"limitIp"`
+				TotalGB    int64       `json:"totalGB"`
+				ExpiryTime int64       `json:"expiryTime"`
+				SubID      string      `json:"subId"`
+				TgID       interface{} `json:"tgId"`
+				Comment    string      `json:"comment"`
+				Reset      int         `json:"reset"`
+				CreatedAt  int64       `json:"createdAt"`
+				UpdatedAt  int64       `json:"updatedAt"`
+			} `json:"client"`
+			InboundIDs []int `json:"inboundIds"`
+		} `json:"obj"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, nil, fmt.Errorf("%w; body=%s", err, responseSnippet(body))
+	}
+	if !raw.Success {
+		return nil, nil, nil
+	}
+	c := &Client{
+		ID:         raw.Obj.Client.UUID,
+		Email:      raw.Obj.Client.Email,
+		Enable:     raw.Obj.Client.Enable,
+		Flow:       raw.Obj.Client.Flow,
+		LimitIP:    raw.Obj.Client.LimitIP,
+		TotalGB:    raw.Obj.Client.TotalGB,
+		ExpiryTime: raw.Obj.Client.ExpiryTime,
+		SubID:      raw.Obj.Client.SubID,
+		TgID:       normalizeTgID(raw.Obj.Client.TgID),
+		Comment:    raw.Obj.Client.Comment,
+		Reset:      raw.Obj.Client.Reset,
+		CreatedAt:  raw.Obj.Client.CreatedAt,
+		UpdatedAt:  raw.Obj.Client.UpdatedAt,
+	}
+	return c, raw.Obj.InboundIDs, nil
+}
+
+func (x *XRayClient) AddClientToInbounds(client Client, inboundIDs []int) error {
+	if len(inboundIDs) == 0 {
+		return fmt.Errorf("no inbound IDs provided")
+	}
+	payload := map[string]interface{}{
+		"client":     client,
+		"inboundIds": inboundIDs,
+	}
+	bodyPayload, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/clients/add", x.serverURL)
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, bodyPayload, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("add client", statusCode, body)
+}
+
+func (x *XRayClient) AttachClientToInbounds(email string, inboundIDs []int) error {
+	email = strings.TrimSpace(email)
+	if email == "" || len(inboundIDs) == 0 {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"inboundIds": inboundIDs,
+	}
+	bodyPayload, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/clients/%s/attach", x.serverURL, url.PathEscape(email))
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, bodyPayload, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("attach client", statusCode, body)
+}
+
+func (x *XRayClient) DeleteClientByEmail(email string, keepTraffic bool) error {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("client email is empty")
+	}
+	suffix := ""
+	if keepTraffic {
+		suffix = "?keepTraffic=1"
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/clients/del/%s%s", x.serverURL, url.PathEscape(email), suffix)
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("delete client", statusCode, body)
+}
+
+func (x *XRayClient) UpdateClientByEmail(routeEmail string, client Client) error {
+	routeEmail = strings.TrimSpace(routeEmail)
+	if routeEmail == "" {
+		return fmt.Errorf("client email is empty")
+	}
+	bodyPayload, err := json.Marshal(client)
+	if err != nil {
+		return err
+	}
+	requestURL := fmt.Sprintf("%s/panel/api/clients/update/%s", x.serverURL, url.PathEscape(routeEmail))
+	statusCode, body, err := x.doAPIRequest("POST", requestURL, bodyPayload, map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	})
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("update client", statusCode, body)
 }
 
 // EnsureExpiry updates expiryTime for client by adding given days (from now or existing expiry).
@@ -930,8 +1348,11 @@ func (x *XRayClient) EnsureExpiry(inboundID int, client *Client, daysToAdd int64
 	if expireAt.Before(now) {
 		expireAt = now
 	}
-	if daysToAdd > 0 {
+	if daysToAdd != 0 {
 		expireAt = expireAt.Add(time.Duration(daysToAdd) * 24 * time.Hour)
+		if expireAt.Before(now) {
+			expireAt = now
+		}
 	}
 
 	client.ExpiryTime = expireAt.UnixMilli()
@@ -958,97 +1379,159 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 	}
 	log.Printf("[XRAY] ensure across inbounds=%v tg=%s daysToAdd=%d", inboundIDs, tgID, daysToAdd)
 
-	// First ensure on primary inbound, capturing UUID and expiry
-	primaryID := inboundIDs[0]
-	primaryEmail := buildXrayClientEmail(email, tgID, primaryID)
-	primaryFlow := x.defaultFlowForInbound(primaryID)
-	primaryClient, err := x.GetClientByTelegram(primaryID, tgID)
-	if err != nil {
-		return nil, time.Time{}, err
+	stableSubID := strings.TrimSpace(subID)
+	if stableSubID == "" {
+		stableSubID = "sub" + strings.TrimSpace(tgID)
 	}
 
-	if primaryClient == nil {
-		primaryClient = &Client{
-			ID:      uuid.New().String(),
-			Email:   primaryEmail,
-			Enable:  true,
-			Flow:    primaryFlow,
-			LimitIP: 0,
-			TotalGB: 0,
-			TgID:    tgID,
-			SubID:   strings.TrimSpace(subID),
-			Comment: "tg:" + tgID,
-		}
-		if _, err := x.AddClientWithData(primaryID, *primaryClient); err != nil {
-			return nil, time.Time{}, err
-		}
-	} else {
-		// normalize fields
-		if strings.TrimSpace(primaryClient.Email) == "" || primaryClient.Email != primaryEmail {
-			primaryClient.Email = primaryEmail
-		}
-		primaryClient.Enable = true
-		primaryClient.Flow = primaryFlow
-		primaryClient.TgID = tgID
-		if strings.TrimSpace(subID) != "" {
-			primaryClient.SubID = strings.TrimSpace(subID)
-		} else {
-			primaryClient.SubID = "sub" + tgID
-		}
-		if strings.TrimSpace(primaryClient.Comment) == "" {
-			primaryClient.Comment = "tg:" + tgID
-		}
-		if err := x.UpdateClient(primaryID, *primaryClient); err != nil {
-			return nil, time.Time{}, err
-		}
+	type inboundClient struct {
+		inboundID int
+		client    Client
 	}
-
-	exp, err := x.EnsureExpiry(primaryID, primaryClient, daysToAdd)
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-
-	// Mirror client to other inbounds using the same UUID
-	for _, inboundID := range inboundIDs[1:] {
-		log.Printf("[XRAY] sync client tg=%s to inbound=%d", tgID, inboundID)
-		c, err := x.GetClientByTelegram(inboundID, tgID)
+	var matches []inboundClient
+	var lastErr error
+	for _, inboundID := range inboundIDs {
+		clients, err := x.GetInboundById(inboundID)
 		if err != nil {
-			return nil, time.Time{}, err
+			lastErr = err
+			log.Printf("[XRAY] scan inbound failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
+			continue
 		}
-
-		// Prepare client data with same UUID and expiry from primary
-		inboundFlow := x.defaultFlowForInbound(inboundID)
-		clientData := &Client{
-			ID:         primaryClient.ID, // keep same UUID across inbounds
-			Email:      buildXrayClientEmail(email, tgID, inboundID),
-			Enable:     true,
-			Flow:       inboundFlow,
-			LimitIP:    0,
-			TotalGB:    0,
-			ExpiryTime: exp.UnixMilli(), // use expiry from primary
-			TgID:       tgID,
-			SubID:      primaryClient.SubID,
-			Comment:    "tg:" + tgID,
-		}
-
-		if c == nil {
-			// Client doesn't exist on this inbound, create it
-			if _, err := x.AddClientWithData(inboundID, *clientData); err != nil {
-				log.Printf("[XRAY] add client failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
-				return nil, time.Time{}, err
-			}
-		} else {
-			// Client exists, update all fields
-			clientData.CreatedAt = c.CreatedAt
-			clientData.UpdatedAt = c.UpdatedAt
-			if err := x.UpdateClient(inboundID, *clientData); err != nil {
-				log.Printf("[XRAY] update client failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
-				return nil, time.Time{}, err
+		for _, candidate := range clients {
+			if clientMatchesTelegram(candidate, tgID, stableSubID) {
+				matches = append(matches, inboundClient{inboundID: inboundID, client: candidate})
 			}
 		}
 	}
 
-	return primaryClient, exp, nil
+	now := time.Now()
+	expireAt := now
+	for _, item := range matches {
+		if item.client.ExpiryTime <= 0 {
+			continue
+		}
+		candidateExpire := time.UnixMilli(item.client.ExpiryTime)
+		if candidateExpire.After(expireAt) {
+			expireAt = candidateExpire
+		}
+	}
+	if expireAt.Before(now) {
+		expireAt = now
+	}
+	if daysToAdd != 0 {
+		expireAt = expireAt.Add(time.Duration(daysToAdd) * 24 * time.Hour)
+		if expireAt.Before(now) {
+			expireAt = now
+		}
+	}
+
+	if len(matches) > 0 {
+		var primary *Client
+		updated := 0
+		for _, item := range matches {
+			client := item.client
+			client.Enable = true
+			client.ExpiryTime = expireAt.UnixMilli()
+			client.TgID = strings.TrimSpace(tgID)
+			client.SubID = stableSubID
+			if strings.TrimSpace(client.Comment) == "" || strings.HasPrefix(strings.TrimSpace(client.Comment), "tg:") {
+				client.Comment = "tg:" + strings.TrimSpace(tgID)
+			}
+			if strings.TrimSpace(client.Flow) == "" {
+				client.Flow = x.defaultFlowForInbound(item.inboundID)
+			}
+			if err := x.UpdateClient(item.inboundID, client); err != nil {
+				lastErr = err
+				log.Printf("[XRAY] update duplicate failed inbound=%d email=%s tg=%s err=%v", item.inboundID, client.Email, tgID, err)
+				continue
+			}
+			updated++
+			if primary == nil {
+				copyClient := client
+				primary = &copyClient
+			}
+		}
+		if updated > 0 && primary != nil {
+			return primary, expireAt, nil
+		}
+		if lastErr != nil {
+			return nil, time.Time{}, lastErr
+		}
+		return nil, time.Time{}, fmt.Errorf("no xray duplicate clients updated for tg=%s", tgID)
+	}
+
+	client := Client{
+		ID:         uuid.New().String(),
+		Email:      buildStableXrayClientEmail(email, tgID),
+		Enable:     true,
+		Flow:       x.defaultFlowForInbound(inboundIDs[0]),
+		LimitIP:    0,
+		TotalGB:    0,
+		ExpiryTime: expireAt.UnixMilli(),
+		TgID:       strings.TrimSpace(tgID),
+		SubID:      stableSubID,
+		Comment:    "tg:" + strings.TrimSpace(tgID),
+	}
+	if err := x.AddClientToInbounds(client, inboundIDs); err == nil {
+		return &client, expireAt, nil
+	} else {
+		lastErr = err
+		log.Printf("[XRAY] create multi-inbound client failed inbounds=%v email=%s tg=%s err=%v", inboundIDs, client.Email, tgID, err)
+	}
+
+	created := 0
+	var primary *Client
+	for _, inboundID := range inboundIDs {
+		perInboundClient := client
+		perInboundClient.Email = buildXrayClientEmail(email, tgID, inboundID)
+		perInboundClient.Flow = x.defaultFlowForInbound(inboundID)
+		if err := x.addClientWithLegacyAPI(inboundID, perInboundClient); err != nil {
+			lastErr = err
+			log.Printf("[XRAY] create legacy duplicate failed inbound=%d email=%s tg=%s err=%v", inboundID, perInboundClient.Email, tgID, err)
+			continue
+		}
+		created++
+		if primary == nil {
+			copyClient := perInboundClient
+			primary = &copyClient
+		}
+	}
+	if created > 0 && primary != nil {
+		return primary, expireAt, nil
+	}
+	return nil, time.Time{}, lastErr
+}
+
+func clientMatchesTelegram(client Client, tgID string, subID string) bool {
+	tgID = strings.TrimSpace(tgID)
+	subID = strings.TrimSpace(subID)
+	if tgID != "" && strings.TrimSpace(client.TgID) == tgID {
+		return true
+	}
+	if subID != "" && strings.TrimSpace(client.SubID) == subID {
+		return true
+	}
+	if tgID != "" && strings.TrimSpace(client.Comment) == "tg:"+tgID {
+		return true
+	}
+	email := strings.ToLower(strings.TrimSpace(client.Email))
+	if tgID != "" && (strings.Contains(email, "tg"+strings.ToLower(tgID)) || strings.HasPrefix(email, strings.ToLower(tgID)+"@")) {
+		return true
+	}
+	return false
+}
+
+func buildStableXrayClientEmail(billingEmail, tgID string) string {
+	tgID = sanitizeEmailToken(tgID)
+	if tgID == "" {
+		tgID = "unknown"
+	}
+	billingEmail = strings.TrimSpace(billingEmail)
+	parts := strings.SplitN(billingEmail, "@", 2)
+	if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+		return fmt.Sprintf("tg%s@%s", tgID, strings.TrimSpace(parts[1]))
+	}
+	return fmt.Sprintf("tg%s@happycat", tgID)
 }
 
 // buildXrayClientEmail returns a deterministic technical email for Xray client identity.
@@ -1065,11 +1548,11 @@ func buildXrayClientEmail(billingEmail, tgID string, inboundID int) string {
 		local := sanitizeEmailToken(parts[0])
 		domain := strings.TrimSpace(parts[1])
 		if local != "" && domain != "" {
-			return fmt.Sprintf("%s+vk%s+inb%d@%s", local, tgID, inboundID, domain)
+			return fmt.Sprintf("%s+tg%s+inb%d@%s", local, tgID, inboundID, domain)
 		}
 	}
 
-	return fmt.Sprintf("vk%s_inb%d@happycat", tgID, inboundID)
+	return fmt.Sprintf("tg%s_inb%d@happycat", tgID, inboundID)
 }
 
 func sanitizeEmailToken(s string) string {

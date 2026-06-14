@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS users (
     referral_used BOOLEAN NOT NULL DEFAULT FALSE,
     referrals_count INT NOT NULL DEFAULT 0,
     email TEXT,
+	verified_email TEXT,
+	verified_email_at TIMESTAMPTZ,
+	verify_email TEXT,
+	verify_code TEXT,
+	verify_expires TIMESTAMPTZ,
     consent_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -44,6 +46,11 @@ CREATE TABLE IF NOT EXISTS users (
 	referral_confirmed_at TIMESTAMPTZ,
 	referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE,
     email TEXT,
+	verified_email TEXT,
+	verified_email_at TIMESTAMPTZ,
+	verify_email TEXT,
+	verify_code TEXT,
+	verify_expires TIMESTAMPTZ,
 	subscription_id TEXT,
 	start_bonus_claimed BOOLEAN NOT NULL DEFAULT FALSE,
 	start_bonus_source TEXT,
@@ -65,8 +72,25 @@ CREATE TABLE IF NOT EXISTS users (
 			ADD COLUMN IF NOT EXISTS referral_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
 			ADD COLUMN IF NOT EXISTS referral_confirmed_at TIMESTAMPTZ,
 			ADD COLUMN IF NOT EXISTS referrer_reward_given BOOLEAN NOT NULL DEFAULT FALSE,
+			ADD COLUMN IF NOT EXISTS verified_email TEXT,
+			ADD COLUMN IF NOT EXISTS verified_email_at TIMESTAMPTZ,
+			ADD COLUMN IF NOT EXISTS verify_email TEXT,
+			ADD COLUMN IF NOT EXISTS verify_code TEXT,
+			ADD COLUMN IF NOT EXISTS verify_expires TIMESTAMPTZ,
 			ADD COLUMN IF NOT EXISTS link_token TEXT,
-			ADD COLUMN IF NOT EXISTS linked_to TEXT;
+			ADD COLUMN IF NOT EXISTS linked_to TEXT,
+			ADD COLUMN IF NOT EXISTS autopay_method_id TEXT,
+			ADD COLUMN IF NOT EXISTS autopay_plan_id TEXT,
+			ADD COLUMN IF NOT EXISTS autopay_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_users_verified_email
+			ON users (LOWER(verified_email))
+			WHERE verified_email IS NOT NULL AND verified_email <> '';
 	`)
 	if err != nil {
 		return err
@@ -78,9 +102,49 @@ CREATE TABLE IF NOT EXISTS users (
 			user_id TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			plan_id TEXT,
+			amount_value NUMERIC(12,2) NOT NULL DEFAULT 0,
+			currency TEXT NOT NULL DEFAULT 'RUB',
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE INDEX IF NOT EXISTS idx_applied_payments_user_id ON applied_payments(user_id);
+		CREATE INDEX IF NOT EXISTS idx_applied_payments_applied_at ON applied_payments(applied_at);
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		ALTER TABLE applied_payments
+			ADD COLUMN IF NOT EXISTS amount_value NUMERIC(12,2) NOT NULL DEFAULT 0,
+			ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'RUB';
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS merged_traffic (
+			user_id TEXT PRIMARY KEY,
+			month TEXT NOT NULL,
+			extra_allocated_bytes BIGINT NOT NULL DEFAULT 0,
+			last_synced_used_bytes BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS web_login_tokens (
+			token_hash TEXT PRIMARY KEY,
+			user_id TEXT REFERENCES users(id),
+			expires_at TIMESTAMPTZ NOT NULL,
+			confirmed_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_web_login_tokens_expires_at ON web_login_tokens(expires_at);
+		DELETE FROM web_login_tokens WHERE expires_at < NOW() - INTERVAL '1 day';
 	`)
 	if err != nil {
 		return err
@@ -94,9 +158,9 @@ CREATE TABLE IF NOT EXISTS users (
 			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE TABLE IF NOT EXISTS user_promocodes (
-			user_id        TEXT NOT NULL,
-			code           TEXT NOT NULL REFERENCES promocodes(code),
-			activated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			user_id       TEXT NOT NULL,
+			code          TEXT NOT NULL REFERENCES promocodes(code),
+			activated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			discount_until TIMESTAMPTZ NOT NULL,
 			PRIMARY KEY (user_id, code)
 		);
@@ -163,6 +227,29 @@ func (s *Store) SetDays(userID string, days int64) error {
 	return err
 }
 
+func (s *Store) DeleteUser(userID string) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	statements := []string{
+		`DELETE FROM applied_payments WHERE user_id = $1`,
+		`DELETE FROM merged_traffic WHERE user_id = $1`,
+		`DELETE FROM web_login_tokens WHERE user_id = $1`,
+		`DELETE FROM user_promocodes WHERE user_id = $1`,
+		`DELETE FROM users WHERE id = $1`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.Exec(ctx, stmt, userID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) SetEmail(userID, email string) error {
 	ctx := context.Background()
 	email = strings.TrimSpace(email)
@@ -187,6 +274,130 @@ func (s *Store) GetEmail(userID string) (string, error) {
 		return "", err
 	}
 	return email, nil
+}
+
+func (s *Store) GetVerifiedEmail(userID string) (string, error) {
+	ctx := context.Background()
+	var email string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(verified_email, '') FROM users WHERE id = $1`, userID).Scan(&email)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	return email, nil
+}
+
+func (s *Store) SetVerifiedEmail(userID, email string, at time.Time) error {
+	ctx := context.Background()
+	if strings.TrimSpace(email) == "" {
+		return fmt.Errorf("email is empty")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if err := s.ensureUser(ctx, userID); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET verified_email = $2,
+			verified_email_at = $3,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID, strings.TrimSpace(email), at.UTC())
+	return err
+}
+
+func (s *Store) ClearVerifiedEmail(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET verified_email = NULL,
+			verified_email_at = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID)
+	return err
+}
+
+func (s *Store) SetEmailVerification(userID, email, code string, expiresAt time.Time) error {
+	ctx := context.Background()
+	email = strings.TrimSpace(email)
+	code = strings.TrimSpace(code)
+	if email == "" || code == "" {
+		return fmt.Errorf("verification data is empty")
+	}
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(15 * time.Minute)
+	}
+	if err := s.ensureUser(ctx, userID); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET verify_email = $2,
+			verify_code = $3,
+			verify_expires = $4,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID, email, code, expiresAt.UTC())
+	return err
+}
+
+func (s *Store) GetEmailVerification(userID string) (string, string, time.Time, error) {
+	ctx := context.Background()
+	var email string
+	var code string
+	var expires *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(verify_email, ''), COALESCE(verify_code, ''), verify_expires
+		FROM users WHERE id = $1
+	`, userID).Scan(&email, &code, &expires)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", "", time.Time{}, nil
+		}
+		return "", "", time.Time{}, err
+	}
+	if expires == nil {
+		return email, code, time.Time{}, nil
+	}
+	return email, code, *expires, nil
+}
+
+func (s *Store) ClearEmailVerification(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET verify_email = NULL,
+			verify_code = NULL,
+			verify_expires = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID)
+	return err
+}
+
+func (s *Store) IsVerifiedEmailInUse(email, excludeUserID string) (bool, error) {
+	ctx := context.Background()
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return false, nil
+	}
+
+	var exists bool
+	query := `SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(verified_email) = LOWER($1))`
+	args := []interface{}{email}
+	if strings.TrimSpace(excludeUserID) != "" {
+		query = `SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(verified_email) = LOWER($1) AND id <> $2)`
+		args = append(args, excludeUserID)
+	}
+	if err := s.pool.QueryRow(ctx, query, args...).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // EnsureSubscriptionID returns existing subscription_id or creates a new UUIDv4 and stores it.
@@ -467,12 +678,13 @@ func (s *Store) IsPaymentApplied(userID, paymentID string) (bool, error) {
 	return exists, nil
 }
 
-func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error) {
+func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, amount float64, currency string, at time.Time) (bool, error) {
 	ctx := context.Background()
 	userID = strings.TrimSpace(userID)
 	paymentID = strings.TrimSpace(paymentID)
 	provider = strings.TrimSpace(provider)
 	planID = strings.TrimSpace(planID)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
 
 	if userID == "" {
 		return false, fmt.Errorf("userID is empty")
@@ -483,15 +695,18 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	if provider == "" {
 		return false, fmt.Errorf("provider is empty")
 	}
+	if currency == "" {
+		currency = "RUB"
+	}
 	if at.IsZero() {
 		at = time.Now()
 	}
 
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO applied_payments (payment_id, user_id, provider, plan_id, applied_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO applied_payments (payment_id, user_id, provider, plan_id, amount_value, currency, applied_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (payment_id) DO NOTHING
-	`, paymentID, userID, provider, planID, at.UTC())
+	`, paymentID, userID, provider, planID, amount, currency, at.UTC())
 	if err != nil {
 		return false, err
 	}
@@ -499,53 +714,326 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	return tag.RowsAffected() > 0, nil
 }
 
+func (s *Store) GetUnpaidTrialReminderUsers(windowStart, windowEnd time.Time, maxDays int64) ([]string, error) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if windowStart.IsZero() {
+		windowStart = now.Add(-48 * time.Hour)
+	}
+	if windowEnd.IsZero() {
+		windowEnd = now.Add(-24 * time.Hour)
+	}
+	if maxDays <= 0 {
+		maxDays = 5
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.id
+		FROM users u
+		WHERE u.days > 0
+			AND u.days <= $3
+			AND u.start_bonus_claimed = TRUE
+			AND LOWER(COALESCE(u.start_bonus_source, '')) IN ('channel', 'referral', 'trial')
+			AND COALESCE(u.start_bonus_claimed_at, u.created_at) >= $1
+			AND COALESCE(u.start_bonus_claimed_at, u.created_at) < $2
+			AND NOT EXISTS (
+				SELECT 1
+				FROM applied_payments ap
+				WHERE ap.user_id = u.id
+			)
+		ORDER BY COALESCE(u.start_bonus_claimed_at, u.created_at) ASC
+		LIMIT 1000
+	`, windowStart.UTC(), windowEnd.UTC(), maxDays)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var userIDs []string
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, err
+		}
+		userID = strings.TrimSpace(userID)
+		if userID != "" {
+			userIDs = append(userIDs, userID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return userIDs, nil
+}
+
+func (s *Store) GetMergedTraffic(userID string) (string, int64, int64, time.Time, error) {
+	ctx := context.Background()
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "", 0, 0, time.Time{}, fmt.Errorf("userID is empty")
+	}
+
+	var month string
+	var extraAllocatedBytes int64
+	var lastSyncedUsedBytes int64
+	var updatedAt time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT month, extra_allocated_bytes, last_synced_used_bytes, updated_at
+		FROM merged_traffic
+		WHERE user_id = $1
+	`, userID).Scan(&month, &extraAllocatedBytes, &lastSyncedUsedBytes, &updatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", 0, 0, time.Time{}, nil
+		}
+		return "", 0, 0, time.Time{}, err
+	}
+	return month, extraAllocatedBytes, lastSyncedUsedBytes, updatedAt, nil
+}
+
+func (s *Store) SetMergedTraffic(userID, month string, extraAllocatedBytes, lastSyncedUsedBytes int64, at time.Time) error {
+	ctx := context.Background()
+	userID = strings.TrimSpace(userID)
+	month = strings.TrimSpace(month)
+	if userID == "" {
+		return fmt.Errorf("userID is empty")
+	}
+	if month == "" {
+		return fmt.Errorf("month is empty")
+	}
+	if extraAllocatedBytes < 0 {
+		extraAllocatedBytes = 0
+	}
+	if lastSyncedUsedBytes < 0 {
+		lastSyncedUsedBytes = 0
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO merged_traffic (user_id, month, extra_allocated_bytes, last_synced_used_bytes, updated_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id) DO UPDATE SET
+			month = EXCLUDED.month,
+			extra_allocated_bytes = EXCLUDED.extra_allocated_bytes,
+			last_synced_used_bytes = EXCLUDED.last_synced_used_bytes,
+			updated_at = EXCLUDED.updated_at
+	`, userID, month, extraAllocatedBytes, lastSyncedUsedBytes, at.UTC())
+	return err
+}
+
+func (s *Store) AddMergedTrafficExtra(userID, month string, bytesToAdd int64, at time.Time) (int64, error) {
+	ctx := context.Background()
+	userID = strings.TrimSpace(userID)
+	month = strings.TrimSpace(month)
+	if userID == "" {
+		return 0, fmt.Errorf("userID is empty")
+	}
+	if month == "" {
+		return 0, fmt.Errorf("month is empty")
+	}
+	if bytesToAdd <= 0 {
+		return 0, fmt.Errorf("bytesToAdd must be positive")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	var extraAllocatedBytes int64
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO merged_traffic (user_id, month, extra_allocated_bytes, last_synced_used_bytes, updated_at)
+		VALUES ($1, $2, $3, 0, $4)
+		ON CONFLICT (user_id) DO UPDATE SET
+			month = EXCLUDED.month,
+			extra_allocated_bytes = merged_traffic.extra_allocated_bytes + EXCLUDED.extra_allocated_bytes,
+			updated_at = EXCLUDED.updated_at
+		RETURNING extra_allocated_bytes
+	`, userID, month, bytesToAdd, at.UTC()).Scan(&extraAllocatedBytes)
+	return extraAllocatedBytes, err
+}
+
+func (s *Store) GetDailyStats(start, end time.Time) (int, int, float64, float64, error) {
+	ctx := context.Background()
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, 0, 0, 0, fmt.Errorf("invalid stats range")
+	}
+
+	var newUsers int
+	var payingUsers int
+	var rubTotal float64
+	var starsTotal float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM users WHERE created_at >= $1 AND created_at < $2),
+			(SELECT COUNT(DISTINCT user_id) FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2),
+			COALESCE((SELECT SUM(amount_value)::float8 FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'RUB'), 0),
+			COALESCE((SELECT SUM(amount_value)::float8 FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'XTR'), 0)
+	`, start.UTC(), end.UTC()).Scan(&newUsers, &payingUsers, &rubTotal, &starsTotal)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return newUsers, payingUsers, rubTotal, starsTotal, nil
+}
+
+func (s *Store) GetDailyReportStats(start, end time.Time) (int, int, int, int, float64, float64, error) {
+	ctx := context.Background()
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid stats range")
+	}
+
+	var newUsers int
+	var channelSubs int
+	var payingUsers int
+	var firstPayments int
+	var rubTotal float64
+	var starsTotal float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM users WHERE created_at >= $1 AND created_at < $2),
+			(SELECT COUNT(*) FROM users WHERE start_bonus_source = 'channel' AND start_bonus_claimed_at >= $1 AND start_bonus_claimed_at < $2),
+			(SELECT COUNT(DISTINCT user_id) FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2),
+			(SELECT COUNT(*) FROM (
+				SELECT user_id, MIN(applied_at) AS first_at
+				FROM applied_payments
+				GROUP BY user_id
+			) t WHERE t.first_at >= $1 AND t.first_at < $2),
+			COALESCE((SELECT SUM(amount_value)::float8 FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'RUB'), 0),
+			COALESCE((SELECT SUM(amount_value)::float8 FROM applied_payments WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'XTR'), 0)
+	`, start.UTC(), end.UTC()).Scan(&newUsers, &channelSubs, &payingUsers, &firstPayments, &rubTotal, &starsTotal)
+	if err != nil {
+		return 0, 0, 0, 0, 0, 0, err
+	}
+	return newUsers, channelSubs, payingUsers, firstPayments, rubTotal, starsTotal, nil
+}
+
+func (s *Store) GetCohortStats(cohortStart, reportEnd time.Time) (int, int, error) {
+	ctx := context.Background()
+	if cohortStart.IsZero() || reportEnd.IsZero() || !reportEnd.After(cohortStart) {
+		return 0, 0, fmt.Errorf("invalid cohort range")
+	}
+	cohortEnd := cohortStart.Add(24 * time.Hour)
+
+	var cohortUsers int
+	var cohortPaying int
+	err := s.pool.QueryRow(ctx, `
+		WITH cohort AS (
+			SELECT id FROM users WHERE created_at >= $1 AND created_at < $2
+		), payers AS (
+			SELECT DISTINCT ap.user_id
+			FROM applied_payments ap
+			JOIN cohort c ON c.id = ap.user_id
+			WHERE ap.applied_at >= $1 AND ap.applied_at < $3
+		)
+		SELECT (SELECT COUNT(*) FROM cohort), (SELECT COUNT(*) FROM payers)
+	`, cohortStart.UTC(), cohortEnd.UTC(), reportEnd.UTC()).Scan(&cohortUsers, &cohortPaying)
+	if err != nil {
+		return 0, 0, err
+	}
+	return cohortUsers, cohortPaying, nil
+}
+
+func (s *Store) GetAverageStats(end time.Time, days int) (float64, float64, float64, error) {
+	ctx := context.Background()
+	if end.IsZero() || days <= 0 {
+		return 0, 0, 0, fmt.Errorf("invalid average range")
+	}
+	start := end.AddDate(0, 0, -days)
+
+	var avgNewUsers float64
+	var avgRub float64
+	var avgFirstPayments float64
+	err := s.pool.QueryRow(ctx, `
+		WITH day_series AS (
+			SELECT generate_series($1::timestamptz, $2::timestamptz - interval '1 day', interval '1 day') AS day_start
+		), daily_new AS (
+			SELECT date_trunc('day', created_at) AS day_start, COUNT(*)::float8 AS cnt
+			FROM users
+			WHERE created_at >= $1 AND created_at < $2
+			GROUP BY 1
+		), daily_rub AS (
+			SELECT date_trunc('day', applied_at) AS day_start, COALESCE(SUM(amount_value), 0)::float8 AS sum
+			FROM applied_payments
+			WHERE applied_at >= $1 AND applied_at < $2 AND currency = 'RUB'
+			GROUP BY 1
+		), first_payments AS (
+			SELECT date_trunc('day', MIN(applied_at)) AS day_start
+			FROM applied_payments
+			GROUP BY user_id
+		), daily_first AS (
+			SELECT day_start, COUNT(*)::float8 AS cnt
+			FROM first_payments
+			WHERE day_start >= $1 AND day_start < $2
+			GROUP BY day_start
+		)
+		SELECT
+			COALESCE(AVG(COALESCE(n.cnt, 0)), 0),
+			COALESCE(AVG(COALESCE(r.sum, 0)), 0),
+			COALESCE(AVG(COALESCE(f.cnt, 0)), 0)
+		FROM day_series d
+		LEFT JOIN daily_new n ON n.day_start = d.day_start
+		LEFT JOIN daily_rub r ON r.day_start = d.day_start
+		LEFT JOIN daily_first f ON f.day_start = d.day_start
+	`, start.UTC(), end.UTC()).Scan(&avgNewUsers, &avgRub, &avgFirstPayments)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return avgNewUsers, avgRub, avgFirstPayments, nil
+}
+
 func (s *Store) SetLinkToken(userID, token string) error {
 	ctx := context.Background()
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO users (id, link_token, last_deduct, updated_at)
-		VALUES ($1, $2, NOW(), NOW())
-		ON CONFLICT (id) DO UPDATE SET
-			link_token = EXCLUDED.link_token,
-			updated_at = NOW()
-	`, userID, token)
+	_ = s.ensureUser(ctx, userID)
+	_, err := s.pool.Exec(ctx, `UPDATE users SET link_token = $1, updated_at = NOW() WHERE id = $2`, token, userID)
 	return err
 }
 
 func (s *Store) GetUserByLinkToken(token string) (string, error) {
 	ctx := context.Background()
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", fmt.Errorf("empty token")
-	}
 	var userID string
 	err := s.pool.QueryRow(ctx, `SELECT id FROM users WHERE link_token = $1`, token).Scan(&userID)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return "", fmt.Errorf("token not found")
-		}
-		return "", err
+		return "", fmt.Errorf("token not found: %w", err)
 	}
 	return userID, nil
 }
 
 func (s *Store) ClearLinkToken(userID string) error {
 	ctx := context.Background()
-	_, err := s.pool.Exec(ctx, `
-		UPDATE users SET link_token = NULL, updated_at = NOW()
-		WHERE id = $1
-	`, userID)
+	_, err := s.pool.Exec(ctx, `UPDATE users SET link_token = NULL, updated_at = NOW() WHERE id = $1`, userID)
 	return err
+}
+
+func (s *Store) ConfirmWebLoginToken(token, userID string, at time.Time) (bool, error) {
+	ctx := context.Background()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if err := s.ensureUser(ctx, userID); err != nil {
+		return false, err
+	}
+	sum := sha256.Sum256([]byte(token))
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE web_login_tokens
+		SET user_id=$2, confirmed_at=$3
+		WHERE token_hash=$1
+			AND expires_at > NOW()
+			AND confirmed_at IS NULL`,
+		hex.EncodeToString(sum[:]), userID, at.UTC())
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func (s *Store) SetLinkedTo(userID, linkedTo string) error {
 	ctx := context.Background()
+	_ = s.ensureUser(ctx, userID)
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO users (id, linked_to, last_deduct, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
 		ON CONFLICT (id) DO UPDATE SET
 			linked_to = EXCLUDED.linked_to,
-			updated_at = NOW()
-	`, userID, linkedTo)
+			updated_at = NOW()`, userID, linkedTo)
 	return err
 }
 
@@ -554,12 +1042,120 @@ func (s *Store) GetLinkedTo(userID string) (string, error) {
 	var linked string
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE(linked_to, '') FROM users WHERE id = $1`, userID).Scan(&linked)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return "", nil
-		}
 		return "", err
 	}
 	return linked, nil
+}
+
+func (s *Store) GetLinkedVKUsers(tgUserID string) ([]string, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `SELECT id FROM users WHERE linked_to = $1 AND id LIKE 'vk_%'`, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// AutopayUser holds autopay info for a single user.
+type AutopayUser = struct {
+	UserID   string
+	MethodID string
+	PlanID   string
+}
+
+func (s *Store) SetAutopay(userID, methodID, planID string) error {
+	ctx := context.Background()
+	_ = s.ensureUser(ctx, userID)
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users
+		SET autopay_method_id = $2, autopay_plan_id = $3, autopay_enabled = TRUE, updated_at = NOW()
+		WHERE id = $1
+	`, userID, methodID, planID)
+	return err
+}
+
+func (s *Store) DisableAutopay(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users SET autopay_enabled = FALSE, updated_at = NOW() WHERE id = $1
+	`, userID)
+	return err
+}
+
+func (s *Store) ClearAutopay(userID string) error {
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `
+		UPDATE users SET autopay_enabled = FALSE, autopay_method_id = NULL, autopay_plan_id = NULL, updated_at = NOW() WHERE id = $1
+	`, userID)
+	return err
+}
+
+func (s *Store) GetAutopay(userID string) (string, string, bool, error) {
+	ctx := context.Background()
+	var methodID, planID string
+	var enabled bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(autopay_method_id, ''), COALESCE(autopay_plan_id, ''), autopay_enabled
+		FROM users WHERE id = $1
+	`, userID).Scan(&methodID, &planID, &enabled)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", "", false, nil
+		}
+		return "", "", false, err
+	}
+	return methodID, planID, enabled, nil
+}
+
+func (s *Store) GetUsersWithAutopay() ([]AutopayUser, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, autopay_method_id, autopay_plan_id
+		FROM users WHERE autopay_enabled = TRUE AND autopay_method_id IS NOT NULL
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []AutopayUser
+	for rows.Next() {
+		var u AutopayUser
+		if err := rows.Scan(&u.UserID, &u.MethodID, &u.PlanID); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) GetSleepingUsers(since time.Time) ([]string, error) {
+	ctx := context.Background()
+	rows, err := s.pool.Query(ctx, `
+		SELECT id FROM users
+		WHERE days = 0 AND updated_at < $1
+	`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // GetAllUserIDs возвращает список всех user id из таблицы users
@@ -585,16 +1181,7 @@ func (s *Store) GetAllUserIDs() ([]string, error) {
 	return ids, nil
 }
 
-// ────────────────────────────────────────────────────────────────
-// Promo codes
-// ────────────────────────────────────────────────────────────────
-
-// PromocodeInfo содержит данные о промокоде.
-type PromocodeInfo struct {
-	Code      string
-	Discount  int
-	ExpiresAt time.Time
-}
+// --- Промокоды ---
 
 // CreatePromocode создаёт новый промокод. code нормализуется в верхний регистр.
 func (s *Store) CreatePromocode(code string, discountPercent int, validForHours int) error {
@@ -609,6 +1196,13 @@ func (s *Store) CreatePromocode(code string, discountPercent int, validForHours 
 			expires_at = EXCLUDED.expires_at
 	`, code, discountPercent, expiresAt)
 	return err
+}
+
+// PromocodeInfo содержит данные о промокоде.
+type PromocodeInfo struct {
+	Code      string
+	Discount  int
+	ExpiresAt time.Time
 }
 
 // GetPromocode возвращает промокод, если он существует и не истёк.
@@ -644,6 +1238,7 @@ func (s *Store) ActivatePromocode(userID, code string) (discountPercent int, dis
 		return 0, time.Time{}, false, fmt.Errorf("not found")
 	}
 
+	// Проверяем не активировал ли уже этот пользователь
 	var exists bool
 	_ = s.pool.QueryRow(ctx, `
 		SELECT TRUE FROM user_promocodes WHERE user_id = $1 AND code = $2

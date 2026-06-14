@@ -17,6 +17,7 @@ type Store struct {
 }
 
 type UserData struct {
+	CreatedAt           string                        `json:"created_at,omitempty"`
 	Days                int64                         `json:"days"`
 	CertRef             string                        `json:"certref"`
 	LastDeduct          string                        `json:"last_deduct"`     // ISO8601 timestamp
@@ -27,20 +28,40 @@ type UserData struct {
 	ReferralConfirmedAt string                        `json:"referral_confirmed_at"`
 	ReferrerRewardGiven bool                          `json:"referrer_reward_given"`
 	Email               string                        `json:"email"`
+	VerifiedEmail       string                        `json:"verified_email"`
+	VerifiedEmailAt     string                        `json:"verified_email_at"`
+	VerifyEmail         string                        `json:"verify_email"`
+	VerifyCode          string                        `json:"verify_code"`
+	VerifyExpires       string                        `json:"verify_expires"`
 	SubscriptionID      string                        `json:"subscription_id"`
 	StartBonusClaimed   bool                          `json:"start_bonus_claimed"`
 	StartBonusSource    string                        `json:"start_bonus_source"`
 	StartBonusClaimedAt string                        `json:"start_bonus_claimed_at"`
 	ConsentAt           string                        `json:"consent_at"` // ISO8601 timestamp, когда принял политику
+	AppliedPayments     map[string]AppliedPaymentMeta `json:"applied_payments,omitempty"`
 	LinkToken           string                        `json:"link_token,omitempty"`
 	LinkedTo            string                        `json:"linked_to,omitempty"`
-	AppliedPayments     map[string]AppliedPaymentMeta `json:"applied_payments,omitempty"`
+	AutopayMethodID     string                        `json:"autopay_method_id,omitempty"`
+	AutopayPlanID       string                        `json:"autopay_plan_id,omitempty"`
+	AutopayEnabled      bool                          `json:"autopay_enabled,omitempty"`
+	MergedTrafficMonth  string                        `json:"merged_traffic_month,omitempty"`
+	MergedTrafficExtra  int64                         `json:"merged_traffic_extra_allocated_bytes,omitempty"`
+	MergedTrafficUsed   int64                         `json:"merged_traffic_last_synced_used_bytes,omitempty"`
+	MergedTrafficAt     string                        `json:"merged_traffic_updated_at,omitempty"`
 }
 
 type AppliedPaymentMeta struct {
-	Provider  string `json:"provider"`
-	PlanID    string `json:"plan_id"`
-	AppliedAt string `json:"applied_at"`
+	Provider  string  `json:"provider"`
+	PlanID    string  `json:"plan_id"`
+	Amount    float64 `json:"amount,omitempty"`
+	Currency  string  `json:"currency,omitempty"`
+	AppliedAt string  `json:"applied_at"`
+}
+
+func ensureCreatedAt(ud *UserData) {
+	if ud.CreatedAt == "" {
+		ud.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 }
 
 var (
@@ -104,10 +125,12 @@ func (s *Store) AddDays(userID string, days int64) error {
 
 	if !exist {
 		userData = UserData{
+			CreatedAt:  now.Format(time.RFC3339),
 			Days:       days,
 			LastDeduct: now.Format(time.RFC3339),
 		}
 	} else {
+		ensureCreatedAt(&userData)
 		prev := userData.Days
 		userData.Days += days
 		// если пополнение было с нуля -> начать новый 24ч цикл от момента пополнения
@@ -144,12 +167,22 @@ func (s *Store) SetDays(userID string, days int64) error {
 	s.loadUsersLocked()
 
 	userData := db[userID]
+	ensureCreatedAt(&userData)
 	userData.Days = days
 	if userData.LastDeduct == "" {
 		userData.LastDeduct = time.Now().UTC().Format(time.RFC3339)
 	}
 	db[userID] = userData
 
+	return s.saveUsersLocked()
+}
+
+func (s *Store) DeleteUser(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	delete(db, userID)
 	return s.saveUsersLocked()
 }
 
@@ -247,6 +280,7 @@ func (s *Store) SetEmail(userID, email string) error {
 	s.loadUsersLocked()
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if ud.LastDeduct == "" {
 		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -269,6 +303,142 @@ func (s *Store) GetEmail(userID string) (string, error) {
 	return ud.Email, nil
 }
 
+func (s *Store) GetVerifiedEmail(userID string) (string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return "", nil
+	}
+	return ud.VerifiedEmail, nil
+}
+
+func (s *Store) SetVerifiedEmail(userID, email string, at time.Time) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("email is empty")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	ud := db[userID]
+	ensureCreatedAt(&ud)
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.VerifiedEmail = email
+	ud.VerifiedEmailAt = at.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) ClearVerifiedEmail(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return nil
+	}
+	ud.VerifiedEmail = ""
+	ud.VerifiedEmailAt = ""
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) SetEmailVerification(userID, email, code string, expiresAt time.Time) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	email = strings.TrimSpace(email)
+	code = strings.TrimSpace(code)
+	if email == "" || code == "" {
+		return fmt.Errorf("verification data is empty")
+	}
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(15 * time.Minute)
+	}
+
+	ud := db[userID]
+	ensureCreatedAt(&ud)
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.VerifyEmail = email
+	ud.VerifyCode = code
+	ud.VerifyExpires = expiresAt.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) GetEmailVerification(userID string) (string, string, time.Time, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return "", "", time.Time{}, nil
+	}
+	var expires time.Time
+	if ts := strings.TrimSpace(ud.VerifyExpires); ts != "" {
+		exp, err := time.Parse(time.RFC3339, ts)
+		if err == nil {
+			expires = exp
+		}
+	}
+	return ud.VerifyEmail, ud.VerifyCode, expires, nil
+}
+
+func (s *Store) ClearEmailVerification(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud := db[userID]
+	ud.VerifyEmail = ""
+	ud.VerifyCode = ""
+	ud.VerifyExpires = ""
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) IsVerifiedEmailInUse(email, excludeUserID string) (bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return false, nil
+	}
+	for id, ud := range db {
+		if excludeUserID != "" && id == excludeUserID {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(ud.VerifiedEmail)) == email {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // EnsureSubscriptionID returns existing subscription_id or creates UUIDv4 and stores it.
 func (s *Store) EnsureSubscriptionID(userID string) (string, error) {
 	dbMu.Lock()
@@ -277,6 +447,7 @@ func (s *Store) EnsureSubscriptionID(userID string) (string, error) {
 	s.loadUsersLocked()
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if strings.TrimSpace(ud.SubscriptionID) != "" {
 		return ud.SubscriptionID, nil
 	}
@@ -313,6 +484,7 @@ func (s *Store) AcceptPrivacy(userID string, at time.Time) error {
 	s.loadUsersLocked()
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if ud.LastDeduct == "" {
 		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -353,6 +525,7 @@ func (s *Store) ClaimStartBonus(userID string, source string, at time.Time) (boo
 	s.loadUsersLocked()
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if ud.StartBonusClaimed {
 		return false, nil
 	}
@@ -490,7 +663,7 @@ func (s *Store) IsPaymentApplied(userID, paymentID string) (bool, error) {
 	return false, nil
 }
 
-func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error) {
+func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, amount float64, currency string, at time.Time) (bool, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
@@ -500,6 +673,7 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	paymentID = strings.TrimSpace(paymentID)
 	provider = strings.TrimSpace(provider)
 	planID = strings.TrimSpace(planID)
+	currency = strings.ToUpper(strings.TrimSpace(currency))
 
 	if userID == "" {
 		return false, fmt.Errorf("userID is empty")
@@ -510,11 +684,15 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	if provider == "" {
 		return false, fmt.Errorf("provider is empty")
 	}
+	if currency == "" {
+		currency = "RUB"
+	}
 	if at.IsZero() {
 		at = time.Now()
 	}
 
 	ud := db[userID]
+	ensureCreatedAt(&ud)
 	if ud.AppliedPayments == nil {
 		ud.AppliedPayments = make(map[string]AppliedPaymentMeta)
 	}
@@ -525,6 +703,8 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	ud.AppliedPayments[paymentID] = AppliedPaymentMeta{
 		Provider:  provider,
 		PlanID:    planID,
+		Amount:    amount,
+		Currency:  currency,
 		AppliedAt: at.UTC().Format(time.RFC3339),
 	}
 	if ud.LastDeduct == "" {
@@ -538,13 +718,372 @@ func (s *Store) MarkPaymentApplied(userID, paymentID, provider, planID string, a
 	return true, nil
 }
 
+func (s *Store) GetUnpaidTrialReminderUsers(windowStart, windowEnd time.Time, maxDays int64) ([]string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	now := time.Now().UTC()
+	if windowStart.IsZero() {
+		windowStart = now.Add(-48 * time.Hour)
+	}
+	if windowEnd.IsZero() {
+		windowEnd = now.Add(-24 * time.Hour)
+	}
+	if maxDays <= 0 {
+		maxDays = 5
+	}
+
+	var userIDs []string
+	for userID, ud := range db {
+		source := strings.ToLower(strings.TrimSpace(ud.StartBonusSource))
+		if strings.TrimSpace(userID) == "" || ud.Days <= 0 || ud.Days > maxDays || !ud.StartBonusClaimed || len(ud.AppliedPayments) > 0 {
+			continue
+		}
+		if source != "channel" && source != "referral" && source != "trial" {
+			continue
+		}
+		claimedAtRaw := strings.TrimSpace(ud.StartBonusClaimedAt)
+		if claimedAtRaw == "" {
+			claimedAtRaw = strings.TrimSpace(ud.CreatedAt)
+		}
+		if claimedAtRaw == "" {
+			continue
+		}
+		claimedAt, err := time.Parse(time.RFC3339, claimedAtRaw)
+		if err != nil {
+			continue
+		}
+		claimedAt = claimedAt.UTC()
+		if claimedAt.Before(windowStart.UTC()) || !claimedAt.Before(windowEnd.UTC()) {
+			continue
+		}
+		userIDs = append(userIDs, userID)
+	}
+	return userIDs, nil
+}
+
+func (s *Store) GetMergedTraffic(userID string) (string, int64, int64, time.Time, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	ud, ok := db[userID]
+	if !ok {
+		return "", 0, 0, time.Time{}, nil
+	}
+	var updatedAt time.Time
+	if strings.TrimSpace(ud.MergedTrafficAt) != "" {
+		if ts, err := time.Parse(time.RFC3339, ud.MergedTrafficAt); err == nil {
+			updatedAt = ts
+		}
+	}
+	if ud.MergedTrafficExtra < 0 {
+		ud.MergedTrafficExtra = 0
+	}
+	if ud.MergedTrafficUsed < 0 {
+		ud.MergedTrafficUsed = 0
+	}
+	return ud.MergedTrafficMonth, ud.MergedTrafficExtra, ud.MergedTrafficUsed, updatedAt, nil
+}
+
+func (s *Store) SetMergedTraffic(userID, month string, extraAllocatedBytes, lastSyncedUsedBytes int64, at time.Time) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	userID = strings.TrimSpace(userID)
+	month = strings.TrimSpace(month)
+	if userID == "" {
+		return fmt.Errorf("userID is empty")
+	}
+	if month == "" {
+		return fmt.Errorf("month is empty")
+	}
+	if extraAllocatedBytes < 0 {
+		extraAllocatedBytes = 0
+	}
+	if lastSyncedUsedBytes < 0 {
+		lastSyncedUsedBytes = 0
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	ud := db[userID]
+	ensureCreatedAt(&ud)
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.MergedTrafficMonth = month
+	ud.MergedTrafficExtra = extraAllocatedBytes
+	ud.MergedTrafficUsed = lastSyncedUsedBytes
+	ud.MergedTrafficAt = at.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) AddMergedTrafficExtra(userID, month string, bytesToAdd int64, at time.Time) (int64, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+
+	userID = strings.TrimSpace(userID)
+	month = strings.TrimSpace(month)
+	if userID == "" {
+		return 0, fmt.Errorf("userID is empty")
+	}
+	if month == "" {
+		return 0, fmt.Errorf("month is empty")
+	}
+	if bytesToAdd <= 0 {
+		return 0, fmt.Errorf("bytesToAdd must be positive")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+
+	ud := db[userID]
+	ensureCreatedAt(&ud)
+	if ud.LastDeduct == "" {
+		ud.LastDeduct = time.Now().UTC().Format(time.RFC3339)
+	}
+	ud.MergedTrafficMonth = month
+	ud.MergedTrafficExtra += bytesToAdd
+	if ud.MergedTrafficExtra < 0 {
+		ud.MergedTrafficExtra = 0
+	}
+	ud.MergedTrafficAt = at.UTC().Format(time.RFC3339)
+	db[userID] = ud
+	return ud.MergedTrafficExtra, s.saveUsersLocked()
+}
+
+func (s *Store) GetDailyStats(start, end time.Time) (int, int, float64, float64, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, 0, 0, 0, fmt.Errorf("invalid stats range")
+	}
+
+	newUsers := 0
+	payingUsersSet := make(map[string]bool)
+	rubTotal := 0.0
+	starsTotal := 0.0
+
+	for userID, ud := range db {
+		if ts := strings.TrimSpace(ud.CreatedAt); ts != "" {
+			if createdAt, err := time.Parse(time.RFC3339, ts); err == nil {
+				if !createdAt.Before(start) && createdAt.Before(end) {
+					newUsers++
+				}
+			}
+		}
+		for _, payment := range ud.AppliedPayments {
+			appliedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payment.AppliedAt))
+			if err != nil || appliedAt.Before(start) || !appliedAt.Before(end) {
+				continue
+			}
+			payingUsersSet[userID] = true
+			switch strings.ToUpper(strings.TrimSpace(payment.Currency)) {
+			case "XTR":
+				starsTotal += payment.Amount
+			default:
+				rubTotal += payment.Amount
+			}
+		}
+	}
+
+	return newUsers, len(payingUsersSet), rubTotal, starsTotal, nil
+}
+
+func (s *Store) GetDailyReportStats(start, end time.Time) (int, int, int, int, float64, float64, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid stats range")
+	}
+
+	newUsers := 0
+	channelSubs := 0
+	payingUsersSet := make(map[string]bool)
+	firstPayments := 0
+	rubTotal := 0.0
+	starsTotal := 0.0
+
+	for userID, ud := range db {
+		if ts := strings.TrimSpace(ud.CreatedAt); ts != "" {
+			if createdAt, err := time.Parse(time.RFC3339, ts); err == nil {
+				if !createdAt.Before(start) && createdAt.Before(end) {
+					newUsers++
+				}
+			}
+		}
+
+		if strings.EqualFold(strings.TrimSpace(ud.StartBonusSource), "channel") {
+			if ts := strings.TrimSpace(ud.StartBonusClaimedAt); ts != "" {
+				if claimedAt, err := time.Parse(time.RFC3339, ts); err == nil {
+					if !claimedAt.Before(start) && claimedAt.Before(end) {
+						channelSubs++
+					}
+				}
+			}
+		}
+
+		var firstAt time.Time
+		for _, payment := range ud.AppliedPayments {
+			appliedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payment.AppliedAt))
+			if err != nil {
+				continue
+			}
+			if firstAt.IsZero() || appliedAt.Before(firstAt) {
+				firstAt = appliedAt
+			}
+			if appliedAt.Before(start) || !appliedAt.Before(end) {
+				continue
+			}
+			payingUsersSet[userID] = true
+			switch strings.ToUpper(strings.TrimSpace(payment.Currency)) {
+			case "XTR":
+				starsTotal += payment.Amount
+			default:
+				rubTotal += payment.Amount
+			}
+		}
+
+		if !firstAt.IsZero() && !firstAt.Before(start) && firstAt.Before(end) {
+			firstPayments++
+		}
+	}
+
+	return newUsers, channelSubs, len(payingUsersSet), firstPayments, rubTotal, starsTotal, nil
+}
+
+func (s *Store) GetCohortStats(cohortStart, reportEnd time.Time) (int, int, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if cohortStart.IsZero() || reportEnd.IsZero() || !reportEnd.After(cohortStart) {
+		return 0, 0, fmt.Errorf("invalid cohort range")
+	}
+	cohortEnd := cohortStart.Add(24 * time.Hour)
+
+	cohortUsers := 0
+	cohortPaying := 0
+
+	for _, ud := range db {
+		createdAtRaw := strings.TrimSpace(ud.CreatedAt)
+		if createdAtRaw == "" {
+			continue
+		}
+		createdAt, err := time.Parse(time.RFC3339, createdAtRaw)
+		if err != nil || createdAt.Before(cohortStart) || !createdAt.Before(cohortEnd) {
+			continue
+		}
+		cohortUsers++
+
+		paid := false
+		for _, payment := range ud.AppliedPayments {
+			appliedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payment.AppliedAt))
+			if err != nil {
+				continue
+			}
+			if appliedAt.Before(cohortStart) || !appliedAt.Before(reportEnd) {
+				continue
+			}
+			paid = true
+			break
+		}
+		if paid {
+			cohortPaying++
+		}
+	}
+
+	return cohortUsers, cohortPaying, nil
+}
+
+func (s *Store) GetAverageStats(end time.Time, days int) (float64, float64, float64, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	s.loadUsersLocked()
+	if end.IsZero() || days <= 0 {
+		return 0, 0, 0, fmt.Errorf("invalid average range")
+	}
+
+	rangeStart := end.AddDate(0, 0, -days)
+	loc := rangeStart.Location()
+	dayIndex := make(map[string]int, days)
+	for i := 0; i < days; i++ {
+		dayStart := time.Date(rangeStart.Year(), rangeStart.Month(), rangeStart.Day()+i, 0, 0, 0, 0, loc)
+		dayIndex[dayStart.Format("2006-01-02")] = i
+	}
+
+	newUsers := make([]float64, days)
+	rubTotals := make([]float64, days)
+	firstPayments := make([]float64, days)
+
+	for _, ud := range db {
+		if ts := strings.TrimSpace(ud.CreatedAt); ts != "" {
+			if createdAt, err := time.Parse(time.RFC3339, ts); err == nil {
+				if idx, ok := dayIndex[createdAt.In(loc).Format("2006-01-02")]; ok {
+					newUsers[idx]++
+				}
+			}
+		}
+
+		var firstAt time.Time
+		for _, payment := range ud.AppliedPayments {
+			appliedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payment.AppliedAt))
+			if err != nil {
+				continue
+			}
+			if firstAt.IsZero() || appliedAt.Before(firstAt) {
+				firstAt = appliedAt
+			}
+			if idx, ok := dayIndex[appliedAt.In(loc).Format("2006-01-02")]; ok {
+				if strings.ToUpper(strings.TrimSpace(payment.Currency)) != "XTR" {
+					rubTotals[idx] += payment.Amount
+				}
+			}
+		}
+
+		if !firstAt.IsZero() {
+			if idx, ok := dayIndex[firstAt.In(loc).Format("2006-01-02")]; ok {
+				firstPayments[idx]++
+			}
+		}
+	}
+
+	avgNewUsers := 0.0
+	avgRub := 0.0
+	avgFirstPayments := 0.0
+	for i := 0; i < days; i++ {
+		avgNewUsers += newUsers[i]
+		avgRub += rubTotals[i]
+		avgFirstPayments += firstPayments[i]
+	}
+	avgNewUsers /= float64(days)
+	avgRub /= float64(days)
+	avgFirstPayments /= float64(days)
+
+	return avgNewUsers, avgRub, avgFirstPayments, nil
+}
+
 func (s *Store) SetLinkToken(userID, token string) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 	s.loadUsersLocked()
-	u := db[userID]
-	u.LinkToken = token
-	db[userID] = u
+	ud := db[userID]
+	ud.LinkToken = token
+	db[userID] = ud
 	return s.saveUsersLocked()
 }
 
@@ -552,9 +1091,8 @@ func (s *Store) GetUserByLinkToken(token string) (string, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 	s.loadUsersLocked()
-	token = strings.TrimSpace(token)
-	for id, u := range db {
-		if u.LinkToken == token {
+	for id, ud := range db {
+		if ud.LinkToken == token {
 			return id, nil
 		}
 	}
@@ -565,19 +1103,25 @@ func (s *Store) ClearLinkToken(userID string) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 	s.loadUsersLocked()
-	u := db[userID]
-	u.LinkToken = ""
-	db[userID] = u
+	ud := db[userID]
+	ud.LinkToken = ""
+	db[userID] = ud
 	return s.saveUsersLocked()
+}
+
+func (s *Store) ConfirmWebLoginToken(token, userID string, at time.Time) (bool, error) {
+	// Web login tokens are created by the Postgres-backed website API.
+	// JSON storage cannot confirm those tokens safely, so local JSON mode reports expired tokens.
+	return false, nil
 }
 
 func (s *Store) SetLinkedTo(userID, linkedTo string) error {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 	s.loadUsersLocked()
-	u := db[userID]
-	u.LinkedTo = linkedTo
-	db[userID] = u
+	ud := db[userID]
+	ud.LinkedTo = linkedTo
+	db[userID] = ud
 	return s.saveUsersLocked()
 }
 
@@ -585,9 +1129,84 @@ func (s *Store) GetLinkedTo(userID string) (string, error) {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 	s.loadUsersLocked()
-	u, ok := db[userID]
-	if !ok {
-		return "", nil
+	ud := db[userID]
+	return ud.LinkedTo, nil
+}
+
+func (s *Store) GetLinkedVKUsers(tgUserID string) ([]string, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	var ids []string
+	for id, ud := range db {
+		if ud.LinkedTo == tgUserID && strings.HasPrefix(id, "vk_") {
+			ids = append(ids, id)
+		}
 	}
-	return u.LinkedTo, nil
+	return ids, nil
+}
+
+// AutopayUser holds autopay info for a single user.
+type AutopayUser = struct {
+	UserID   string
+	MethodID string
+	PlanID   string
+}
+
+func (s *Store) SetAutopay(userID, methodID, planID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	ud := db[userID]
+	ud.AutopayMethodID = methodID
+	ud.AutopayPlanID = planID
+	ud.AutopayEnabled = true
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) DisableAutopay(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	ud := db[userID]
+	ud.AutopayEnabled = false
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) ClearAutopay(userID string) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	ud := db[userID]
+	ud.AutopayEnabled = false
+	ud.AutopayMethodID = ""
+	ud.AutopayPlanID = ""
+	db[userID] = ud
+	return s.saveUsersLocked()
+}
+
+func (s *Store) GetAutopay(userID string) (string, string, bool, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	ud, ok := db[userID]
+	if !ok {
+		return "", "", false, nil
+	}
+	return ud.AutopayMethodID, ud.AutopayPlanID, ud.AutopayEnabled, nil
+}
+
+func (s *Store) GetUsersWithAutopay() ([]AutopayUser, error) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	s.loadUsersLocked()
+	var users []AutopayUser
+	for id, ud := range db {
+		if ud.AutopayEnabled && ud.AutopayMethodID != "" {
+			users = append(users, AutopayUser{UserID: id, MethodID: ud.AutopayMethodID, PlanID: ud.AutopayPlanID})
+		}
+	}
+	return users, nil
 }

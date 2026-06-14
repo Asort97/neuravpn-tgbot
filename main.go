@@ -269,7 +269,7 @@ type DataStore interface {
 	ConfirmReferralAndRewardReferrer(newUserID string, rewardDays int64, at time.Time) (string, bool, error)
 	GetReferralsCount(userID string) int
 	IsPaymentApplied(userID, paymentID string) (bool, error)
-	MarkPaymentApplied(userID, paymentID, provider, planID string, at time.Time) (bool, error)
+	MarkPaymentApplied(userID, paymentID, provider, planID string, amount float64, currency string, at time.Time) (bool, error)
 	SetLinkToken(userID, token string) error
 	GetUserByLinkToken(token string) (string, error)
 	ClearLinkToken(userID string) error
@@ -897,16 +897,41 @@ func mergedInboundIDs(cfg *xraySettings) ([]int, error) {
 	return ids, nil
 }
 
+func missingInboundIDs(current []int, required []int) []int {
+	if len(required) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(current))
+	for _, id := range current {
+		if id > 0 {
+			seen[id] = struct{}{}
+		}
+	}
+	var missing []int
+	for _, id := range required {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	return missing
+}
+
 func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Client, int, error) {
 	inboundIDs, err := mergedInboundIDs(cfg)
 	if err != nil {
 		return nil, 0, err
 	}
+	var lastErr error
 	for _, inboundID := range inboundIDs {
 		if strings.TrimSpace(subID) != "" {
 			client, err := cfg.client.GetClientBySubID(inboundID, subID)
 			if err != nil {
-				return nil, 0, err
+				lastErr = err
+				log.Printf("[merged] lookup by sub failed inbound=%d user=%s err=%v", inboundID, userID, err)
+				continue
 			}
 			if client != nil {
 				return client, inboundID, nil
@@ -914,11 +939,16 @@ func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Cl
 		}
 		client, err := cfg.client.GetClientByTelegram(inboundID, userID)
 		if err != nil {
-			return nil, 0, err
+			lastErr = err
+			log.Printf("[merged] lookup by tg failed inbound=%d user=%s err=%v", inboundID, userID, err)
+			continue
 		}
 		if client != nil {
 			return client, inboundID, nil
 		}
+	}
+	if lastErr != nil {
+		return nil, 0, lastErr
 	}
 	return nil, 0, nil
 }
@@ -1031,73 +1061,75 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		return nil, 0, fmt.Errorf("uuid primary client is empty")
 	}
 	primaryInboundID := inboundIDs[0]
-	var lastErr error
-	updatedAny := false
-	for _, inboundID := range inboundIDs {
-		existing, lookupErr := cfg.client.GetClientByTelegram(inboundID, userID)
-		if lookupErr != nil {
-			lastErr = lookupErr
-			log.Printf("[merged] skip inbound=%d user=%s lookup err=%v", inboundID, userID, lookupErr)
-			continue
-		}
-		if existing == nil && stableSubID != "" {
-			existing, lookupErr = cfg.client.GetClientBySubID(inboundID, stableSubID)
-			if lookupErr != nil {
-				lastErr = lookupErr
-				log.Printf("[merged] skip inbound=%d user=%s lookup by sub err=%v", inboundID, userID, lookupErr)
-				continue
+
+	if client != nil {
+		linkedInboundIDs := []int{foundInboundID}
+		if strings.TrimSpace(client.Email) != "" {
+			if record, recordInboundIDs, recordErr := cfg.client.GetClientRecordByEmail(client.Email); recordErr == nil && record != nil {
+				client = record
+				linkedInboundIDs = recordInboundIDs
+			} else if recordErr != nil {
+				log.Printf("[merged] client record lookup failed user=%s email=%s err=%v", userID, client.Email, recordErr)
 			}
 		}
-		clientData := xray.Client{
-			ID:         stableUUID,
-			Email:      fallbackEmail(userID),
-			Enable:     true,
-			ExpiryTime: expiryMillis,
-			TgID:       userID,
-			SubID:      stableSubID,
-			Comment:    "tg:" + userID,
+		if strings.TrimSpace(client.Email) == "" {
+			return nil, 0, fmt.Errorf("merged client email is empty")
 		}
-		if existing == nil {
-			created, addErr := cfg.client.AddClientWithData(inboundID, clientData)
-			if addErr != nil {
-				lastErr = addErr
-				log.Printf("[merged] skip inbound=%d user=%s add err=%v", inboundID, userID, addErr)
-				continue
+		if missing := missingInboundIDs(linkedInboundIDs, inboundIDs); len(missing) > 0 {
+			if err := cfg.client.AttachClientToInbounds(client.Email, missing); err != nil {
+				return nil, 0, err
 			}
-			updatedAny = true
-			if inboundID == primaryInboundID {
-				client = created
-				foundInboundID = inboundID
-			}
-			if client == nil {
-				client = created
-				foundInboundID = inboundID
-			}
-			continue
+			log.Printf("[merged] attached email=%s user=%s inbounds=%v", client.Email, userID, missing)
 		}
-		clientData.ID = existing.ID
-		clientData.CreatedAt = existing.CreatedAt
-		clientData.UpdatedAt = existing.UpdatedAt
-		if err := cfg.client.UpdateClient(inboundID, clientData); err != nil {
-			lastErr = err
-			log.Printf("[merged] skip inbound=%d user=%s update err=%v", inboundID, userID, err)
-			continue
+		updated := *client
+		updated.Enable = true
+		if expiryMillis > 0 {
+			updated.ExpiryTime = expiryMillis
 		}
-		updatedAny = true
-		if inboundID == foundInboundID || (client == nil && inboundID == primaryInboundID) {
-			updated := clientData
-			client = &updated
-			foundInboundID = inboundID
+		updated.TgID = userID
+		updated.SubID = stableSubID
+		if strings.TrimSpace(updated.Comment) == "" || strings.HasPrefix(strings.TrimSpace(updated.Comment), "tg:") {
+			updated.Comment = "tg:" + userID
+		}
+		if err := cfg.client.UpdateClient(foundInboundID, updated); err != nil {
+			return nil, 0, err
+		}
+		client = &updated
+		if foundInboundID == 0 {
+			foundInboundID = primaryInboundID
+		}
+		return client, foundInboundID, nil
+	}
+
+	clientData := xray.Client{
+		ID:         stableUUID,
+		Email:      fallbackEmail(userID),
+		Enable:     true,
+		ExpiryTime: expiryMillis,
+		TgID:       userID,
+		SubID:      stableSubID,
+		Comment:    "tg:" + userID,
+	}
+	if err := cfg.client.AddClientToInbounds(clientData, inboundIDs); err != nil {
+		if strings.TrimSpace(clientData.Email) != "" {
+			if record, linkedInboundIDs, recordErr := cfg.client.GetClientRecordByEmail(clientData.Email); recordErr == nil && record != nil {
+				if missing := missingInboundIDs(linkedInboundIDs, inboundIDs); len(missing) > 0 {
+					if attachErr := cfg.client.AttachClientToInbounds(record.Email, missing); attachErr != nil {
+						return nil, 0, fmt.Errorf("add merged client failed: %v; attach existing failed: %v", err, attachErr)
+					}
+				}
+				clientData = *record
+			} else {
+				return nil, 0, err
+			}
+		} else {
+			return nil, 0, err
 		}
 	}
-	if !updatedAny && lastErr != nil {
-		return nil, 0, lastErr
-	}
+	client = &clientData
+	foundInboundID = primaryInboundID
 	if client == nil {
 		return nil, 0, fmt.Errorf("не удалось создать ноду второго сервера")
-	}
-	if foundInboundID == 0 {
-		foundInboundID = primaryInboundID
 	}
 	return client, foundInboundID, nil
 }
@@ -1694,7 +1726,7 @@ func handleCheckPayment(bot *vkbot.Bot, peerID int, userID int, eventID string, 
 		return
 	}
 
-	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, time.Now())
+	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, plan.Amount, "RUB", time.Now())
 	if err != nil {
 		log.Printf("yookassa MarkPaymentApplied error: %v", err)
 	}
@@ -1902,7 +1934,7 @@ func handleYooKassaWebhook(bot *vkbot.Bot, xrCfg *xraySettings, w http.ResponseW
 		return
 	}
 
-	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, time.Now())
+	marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "yookassa", plan.ID, plan.Amount, "RUB", time.Now())
 	if err != nil {
 		log.Printf("[webhook] MarkPaymentApplied error: %v", err)
 		sendPaymentAlert(bot, "webhook: access issued but mark applied failed", peerID, paymentKey, plan.ID, err.Error())
@@ -3408,6 +3440,7 @@ func main() {
 	serverPort, _ := strconv.Atoi(os.Getenv("XRAY_SERVER_PORT"))
 
 	xClient := xray.New(xrayUser, xrayPass, xrayHost, xrayPort, xrayBasePath)
+	xClient.SetAPIToken(os.Getenv("XRAY_API_TOKEN"))
 	if !testMode {
 		if err := xClient.LoginToServer(); err != nil {
 			log.Fatalf("login to xray failed: %v", err)
@@ -3437,6 +3470,9 @@ func main() {
 	mergedXrayHost := strings.TrimSpace(os.Getenv("MERGED_XRAY_HOST"))
 	mergedXrayPort := strings.TrimSpace(os.Getenv("MERGED_XRAY_PORT"))
 	mergedXrayBasePath := strings.TrimSpace(os.Getenv("MERGED_XRAY_WEB_BASE_PATH"))
+	mergedXrayUser := strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME"))
+	mergedXrayPass := strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD"))
+	mergedXrayToken := strings.TrimSpace(os.Getenv("MERGED_XRAY_API_TOKEN"))
 	if panelURL := strings.TrimSpace(os.Getenv("MERGED_XRAY_PANEL_URL")); panelURL != "" && mergedXrayHost == "" {
 		host, port, basePath, err := parseXrayPanelURL(panelURL)
 		if err != nil {
@@ -3447,7 +3483,7 @@ func main() {
 			mergedXrayBasePath = basePath
 		}
 	}
-	if mergedXrayHost != "" {
+	if mergedXrayHost != "" && ((mergedXrayUser != "" && mergedXrayPass != "") || mergedXrayToken != "") {
 		mergedInboundID, _ := strconv.Atoi(os.Getenv("MERGED_XRAY_INBOUND_ID"))
 		mergedInboundIDsStr := strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_IDS"))
 		var mergedInboundIDs []int
@@ -3466,12 +3502,13 @@ func main() {
 		}
 		mergedServerPort, _ := strconv.Atoi(os.Getenv("MERGED_XRAY_SERVER_PORT"))
 		mergedClient := xray.New(
-			strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME")),
-			strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD")),
+			mergedXrayUser,
+			mergedXrayPass,
 			mergedXrayHost,
 			mergedXrayPort,
 			mergedXrayBasePath,
 		)
+		mergedClient.SetAPIToken(mergedXrayToken)
 		if !testMode {
 			if err := mergedClient.LoginToServer(); err != nil {
 				log.Printf("⚠️ merged xray connection failed: %v", err)
@@ -3497,16 +3534,14 @@ func main() {
 			log.Println("🧪 Skipping merged xray login in test mode")
 		}
 	} else {
-		mergedXrayUser := strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME"))
-		mergedXrayPass := strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD"))
 		var missing []string
 		if mergedXrayHost == "" {
 			missing = append(missing, "MERGED_XRAY_HOST or MERGED_XRAY_PANEL_URL")
 		}
-		if mergedXrayUser == "" {
+		if mergedXrayUser == "" && mergedXrayToken == "" {
 			missing = append(missing, "MERGED_XRAY_USERNAME")
 		}
-		if mergedXrayPass == "" {
+		if mergedXrayPass == "" && mergedXrayToken == "" {
 			missing = append(missing, "MERGED_XRAY_PASSWORD")
 		}
 		if len(missing) > 0 {
@@ -3535,6 +3570,7 @@ func main() {
 			}
 		}
 		oldXClient := xray.New(oldXrayUser, oldXrayPass, oldXrayHost, oldXrayPort, oldXrayBasePath)
+		oldXClient.SetAPIToken(os.Getenv("OLD_XRAY_API_TOKEN"))
 		if err := oldXClient.LoginToServer(); err != nil {
 			log.Printf("⚠️  old xray connection failed (migration unavailable): %v", err)
 		} else {
