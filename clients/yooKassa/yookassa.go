@@ -22,11 +22,14 @@ type YooKassaPaymentRequest struct {
 		Value    string `json:"value"`
 		Currency string `json:"currency"`
 	} `json:"amount"`
-	Capture      bool                   `json:"capture"`
-	Confirmation map[string]interface{} `json:"confirmation"`
-	Description  string                 `json:"description"`
-	Metadata     map[string]interface{} `json:"metadata"`
-	Receipt      *Receipt               `json:"receipt,omitempty"`
+	Capture           bool                   `json:"capture"`
+	Confirmation      map[string]interface{} `json:"confirmation,omitempty"`
+	Description       string                 `json:"description"`
+	Metadata          map[string]interface{} `json:"metadata"`
+	Receipt           *Receipt               `json:"receipt,omitempty"`
+	SavePaymentMethod bool                   `json:"save_payment_method,omitempty"`
+	PaymentMethodID   string                 `json:"payment_method_id,omitempty"`
+	ExpiresAt         string                 `json:"expires_at,omitempty"`
 }
 
 type Receipt struct {
@@ -55,17 +58,25 @@ var (
 )
 
 type YooKassaPaymentResponse struct {
-	ID           string                 `json:"id"`
-	Status       string                 `json:"status"`
-	Amount       map[string]interface{} `json:"amount"`
-	Description  string                 `json:"description"`
-	Recipient    map[string]interface{} `json:"recipient"`
-	CreatedAt    string                 `json:"created_at"`
-	Confirmation map[string]interface{} `json:"confirmation"`
-	Paid         bool                   `json:"paid"`
-	Refundable   bool                   `json:"refundable"`
-	Metadata     map[string]interface{} `json:"metadata"`
-	Receipt      *Receipt               `json:"receipt,omitempty"`
+	ID            string                 `json:"id"`
+	Status        string                 `json:"status"`
+	Amount        map[string]interface{} `json:"amount"`
+	Description   string                 `json:"description"`
+	Recipient     map[string]interface{} `json:"recipient"`
+	CreatedAt     string                 `json:"created_at"`
+	Confirmation  map[string]interface{} `json:"confirmation"`
+	Paid          bool                   `json:"paid"`
+	Refundable    bool                   `json:"refundable"`
+	Metadata      map[string]interface{} `json:"metadata"`
+	Receipt       *Receipt               `json:"receipt,omitempty"`
+	PaymentMethod *PaymentMethodInfo     `json:"payment_method,omitempty"`
+}
+
+type PaymentMethodInfo struct {
+	Type  string `json:"type"`
+	ID    string `json:"id"`
+	Saved bool   `json:"saved"`
+	Title string `json:"title"`
 }
 
 func New(shopID, apiKey string) *YooKassaClient {
@@ -82,6 +93,10 @@ func (y *YooKassaClient) SetReturnURL(url string) {
 }
 
 func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description string, chatID int64, product string, extraMeta map[string]interface{}, userEmail string) (*YooKassaPaymentResponse, error) {
+	return y.createYooKassaPayment(amount, description, chatID, product, extraMeta, userEmail, false)
+}
+
+func (y *YooKassaClient) createYooKassaPayment(amount float64, description string, chatID int64, product string, extraMeta map[string]interface{}, userEmail string, saveCard bool) (*YooKassaPaymentResponse, error) {
 	paymentReq := YooKassaPaymentRequest{}
 
 	paymentReq.Amount.Value = fmt.Sprintf("%.2f", amount)
@@ -99,6 +114,8 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	}
 
 	paymentReq.Description = description
+	paymentReq.SavePaymentMethod = saveCard
+	paymentReq.ExpiresAt = time.Now().UTC().Add(20 * time.Minute).Format(time.RFC3339)
 
 	paymentReq.Metadata = map[string]interface{}{
 		"chat_id":  chatID,
@@ -170,6 +187,74 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 		return nil, fmt.Errorf("не удалось разобрать ответ YooKassa: %v", err)
 	}
 
+	return &paymentResp, nil
+}
+
+func (y *YooKassaClient) CreateAutoPayment(methodID string, amount float64, description, userEmail string, metadata map[string]interface{}) (*YooKassaPaymentResponse, error) {
+	paymentReq := YooKassaPaymentRequest{}
+	paymentReq.Amount.Value = fmt.Sprintf("%.2f", amount)
+	paymentReq.Amount.Currency = "RUB"
+	paymentReq.Capture = true
+	paymentReq.PaymentMethodID = methodID
+	paymentReq.Description = description
+	paymentReq.Metadata = metadata
+
+	if userEmail != "" {
+		paymentReq.Receipt = &Receipt{
+			Items: []ReceiptItem{
+				{
+					Description: description,
+					Quantity:    "1.00",
+					Amount: struct {
+						Value    string `json:"value"`
+						Currency string `json:"currency"`
+					}{
+						Value:    fmt.Sprintf("%.2f", amount),
+						Currency: "RUB",
+					},
+					VatCode:        1,
+					PaymentMode:    "full_payment",
+					PaymentSubject: "service",
+				},
+			},
+		}
+		paymentReq.Receipt.Customer.Email = userEmail
+	}
+
+	jsonData, err := json.Marshal(paymentReq)
+	if err != nil {
+		return nil, fmt.Errorf("autopay marshal: %v", err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("POST", "https://api.yookassa.ru/v3/payments", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("autopay request: %v", err)
+	}
+
+	auth := fmt.Sprintf("%s:%s", y.yookassaShopID, y.yookassaSecretKey)
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotence-Key", fmt.Sprintf("autopay_%s_%d", methodID, time.Now().UnixNano()))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("autopay http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("autopay read body: %v", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("autopay API error %s: %s", resp.Status, string(body))
+	}
+
+	var paymentResp YooKassaPaymentResponse
+	if err := json.Unmarshal(body, &paymentResp); err != nil {
+		return nil, fmt.Errorf("autopay unmarshal: %v", err)
+	}
 	return &paymentResp, nil
 }
 
