@@ -4749,6 +4749,157 @@ func handleSyncInboundsInternal(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrC
 	_, _ = bot.Send(m)
 }
 
+func handleAttachActiveInbound(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	chatID := msg.Chat.ID
+	if !isAdmin(msg.From.ID) {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "⛔️ Только для админа"))
+		return
+	}
+
+	parts := strings.Fields(msg.CommandArguments())
+	if len(parts) != 1 {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "Использование: /attach_active_inbound inboundID\nПример: /attach_active_inbound 21"))
+		return
+	}
+	targetInboundID, err := strconv.Atoi(parts[0])
+	if err != nil || targetInboundID <= 0 {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "❌ inboundID должен быть положительным числом"))
+		return
+	}
+	if xrCfg == nil || xrCfg.client == nil {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "❌ Xray не настроен"))
+		return
+	}
+
+	searchInboundIDs := append([]int(nil), xrCfg.inboundIDs...)
+	if len(searchInboundIDs) == 0 {
+		inbounds, loadErr := xrCfg.client.GetAllInbounds()
+		if loadErr != nil {
+			_, _ = bot.Send(tgbotapi.NewMessage(chatID, "❌ Ошибка загрузки inbound: "+loadErr.Error()))
+			return
+		}
+		for _, inbound := range inbounds {
+			if inbound.Enable && strings.EqualFold(strings.TrimSpace(inbound.Protocol), "vless") {
+				searchInboundIDs = append(searchInboundIDs, inbound.ID)
+			}
+		}
+	}
+	targetConfigured := false
+	for _, inboundID := range searchInboundIDs {
+		if inboundID == targetInboundID {
+			targetConfigured = true
+			break
+		}
+	}
+	if !targetConfigured {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("❌ inbound %d отсутствует в XRAY_INBOUND_IDS", targetInboundID)))
+		return
+	}
+	if _, err := xrCfg.client.GetInboundById(targetInboundID); err != nil {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("❌ inbound %d недоступен: %v", targetInboundID, err)))
+		return
+	}
+
+	var userIDs []string
+	if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
+		ids, loadErr := pg.GetAllUserIDs()
+		if loadErr != nil {
+			_, _ = bot.Send(tgbotapi.NewMessage(chatID, "❌ Ошибка получения пользователей: "+loadErr.Error()))
+			return
+		}
+		userIDs = ids
+	} else if sq, ok := userStore.(interface {
+		GetAllUsers() map[string]sqlite.UserData
+	}); ok {
+		for id := range sq.GetAllUsers() {
+			userIDs = append(userIDs, id)
+		}
+	}
+	if len(userIDs) == 0 {
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "❌ Пользователи не найдены"))
+		return
+	}
+
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Запускаю привязку активных пользователей к inbound %d...", targetInboundID)))
+	go func() {
+		const workers = 8
+		type attachResult struct {
+			status string
+		}
+		jobs := make(chan string)
+		results := make(chan attachResult, workers)
+		var wg sync.WaitGroup
+
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for uid := range jobs {
+					days, daysErr := userStore.GetDays(uid)
+					if daysErr != nil || days <= 0 {
+						results <- attachResult{status: "skipped"}
+						continue
+					}
+					subID, subErr := userStore.EnsureSubscriptionID(uid)
+					if subErr != nil {
+						log.Printf("[XRAY] active attach subID failed user=%s inbound=%d err=%v", uid, targetInboundID, subErr)
+						results <- attachResult{status: "failed"}
+						continue
+					}
+					attached, attachErr := xrCfg.client.AttachExistingClientToInbounds(
+						searchInboundIDs,
+						[]int{targetInboundID},
+						uid,
+						subID,
+					)
+					if attachErr != nil {
+						log.Printf("[XRAY] active attach failed user=%s inbound=%d err=%v", uid, targetInboundID, attachErr)
+						results <- attachResult{status: "failed"}
+						continue
+					}
+					if attached {
+						results <- attachResult{status: "attached"}
+					} else {
+						results <- attachResult{status: "already"}
+					}
+				}
+			}()
+		}
+
+		go func() {
+			for _, uid := range userIDs {
+				jobs <- uid
+			}
+			close(jobs)
+			wg.Wait()
+			close(results)
+		}()
+
+		attached, already, skipped, failed := 0, 0, 0, 0
+		for result := range results {
+			switch result.status {
+			case "attached":
+				attached++
+			case "already":
+				already++
+			case "skipped":
+				skipped++
+			default:
+				failed++
+			}
+		}
+		text := fmt.Sprintf(
+			"Привязка к inbound %d завершена.\nДобавлено: %d\nУже было: %d\nНеактивных пропущено: %d\nОшибок: %d",
+			targetInboundID,
+			attached,
+			already,
+			skipped,
+			failed,
+		)
+		_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
+	}()
+}
+
 // Admin-only: migrate users from DB to new Xray server with their current days balance.
 func handleMigrateUsers(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
 	chatID := msg.Chat.ID
@@ -5424,6 +5575,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleSyncInbounds(bot, msg, xrCfg)
 		case "sync_active_inbounds":
 			handleSyncActiveInbounds(bot, msg, xrCfg)
+		case "attach_active_inbound":
+			handleAttachActiveInbound(bot, msg, xrCfg)
 		case "migrate_users":
 			handleMigrateUsers(bot, msg, xrCfg)
 		case "migrate_expiry_from_old":
