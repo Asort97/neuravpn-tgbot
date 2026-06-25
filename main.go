@@ -2689,6 +2689,151 @@ func handleAdminSyncInbounds(bot *vkbot.Bot, peerID int, xrCfg *xraySettings, ac
 	_, _ = bot.SendMessage(peerID, text, nil)
 }
 
+func handleAdminAttachActiveInbound(bot *vkbot.Bot, peerID int, args string, xrCfg *xraySettings) {
+	parts := strings.Fields(args)
+	if len(parts) != 1 {
+		_, _ = bot.SendMessage(peerID, "Использование: /attach_active_inbound inboundID\nПример: /attach_active_inbound 21", nil)
+		return
+	}
+	targetInboundID, err := strconv.Atoi(parts[0])
+	if err != nil || targetInboundID <= 0 {
+		_, _ = bot.SendMessage(peerID, "❌ inboundID должен быть положительным числом", nil)
+		return
+	}
+	if xrCfg == nil || xrCfg.client == nil {
+		_, _ = bot.SendMessage(peerID, "❌ Xray не настроен", nil)
+		return
+	}
+
+	searchInboundIDs := append([]int(nil), xrCfg.inboundIDs...)
+	if len(searchInboundIDs) == 0 {
+		inbounds, loadErr := xrCfg.client.GetAllInbounds()
+		if loadErr != nil {
+			_, _ = bot.SendMessage(peerID, "❌ Ошибка загрузки inbound: "+loadErr.Error(), nil)
+			return
+		}
+		for _, inbound := range inbounds {
+			if inbound.Enable && strings.EqualFold(strings.TrimSpace(inbound.Protocol), "vless") {
+				searchInboundIDs = append(searchInboundIDs, inbound.ID)
+			}
+		}
+	}
+	targetConfigured := false
+	for _, inboundID := range searchInboundIDs {
+		if inboundID == targetInboundID {
+			targetConfigured = true
+			break
+		}
+	}
+	if !targetConfigured {
+		_, _ = bot.SendMessage(peerID, fmt.Sprintf("❌ inbound %d отсутствует в XRAY_INBOUND_IDS", targetInboundID), nil)
+		return
+	}
+	if _, err := xrCfg.client.GetInboundById(targetInboundID); err != nil {
+		_, _ = bot.SendMessage(peerID, fmt.Sprintf("❌ inbound %d недоступен: %v", targetInboundID, err), nil)
+		return
+	}
+
+	var userIDs []string
+	if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
+		ids, loadErr := pg.GetAllUserIDs()
+		if loadErr != nil {
+			_, _ = bot.SendMessage(peerID, "❌ Ошибка получения пользователей: "+loadErr.Error(), nil)
+			return
+		}
+		userIDs = ids
+	} else if sq, ok := userStore.(interface {
+		GetAllUsers() map[string]sqlite.UserData
+	}); ok {
+		for id := range sq.GetAllUsers() {
+			userIDs = append(userIDs, id)
+		}
+	}
+	if len(userIDs) == 0 {
+		_, _ = bot.SendMessage(peerID, "❌ Пользователи не найдены", nil)
+		return
+	}
+
+	_, _ = bot.SendMessage(peerID, fmt.Sprintf("Запускаю привязку активных пользователей к inbound %d...", targetInboundID), nil)
+	go func() {
+		const workers = 8
+		type attachResult struct {
+			status string
+		}
+		jobs := make(chan string)
+		results := make(chan attachResult, workers)
+		var wg sync.WaitGroup
+
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for uid := range jobs {
+					days, daysErr := userStore.GetDays(uid)
+					if daysErr != nil || days <= 0 {
+						results <- attachResult{status: "skipped"}
+						continue
+					}
+					subID, subErr := userStore.EnsureSubscriptionID(uid)
+					if subErr != nil {
+						log.Printf("[XRAY] active attach subID failed user=%s inbound=%d err=%v", uid, targetInboundID, subErr)
+						results <- attachResult{status: "failed"}
+						continue
+					}
+					attached, attachErr := xrCfg.client.AttachExistingClientToInbounds(
+						searchInboundIDs,
+						[]int{targetInboundID},
+						uid,
+						subID,
+					)
+					if attachErr != nil {
+						log.Printf("[XRAY] active attach failed user=%s inbound=%d err=%v", uid, targetInboundID, attachErr)
+						results <- attachResult{status: "failed"}
+						continue
+					}
+					if attached {
+						results <- attachResult{status: "attached"}
+					} else {
+						results <- attachResult{status: "already"}
+					}
+				}
+			}()
+		}
+
+		go func() {
+			for _, uid := range userIDs {
+				jobs <- uid
+			}
+			close(jobs)
+			wg.Wait()
+			close(results)
+		}()
+
+		attached, already, skipped, failed := 0, 0, 0, 0
+		for result := range results {
+			switch result.status {
+			case "attached":
+				attached++
+			case "already":
+				already++
+			case "skipped":
+				skipped++
+			default:
+				failed++
+			}
+		}
+		text := fmt.Sprintf(
+			"Привязка к inbound %d завершена.\nДобавлено: %d\nУже было: %d\nНеактивных пропущено: %d\nОшибок: %d",
+			targetInboundID,
+			attached,
+			already,
+			skipped,
+			failed,
+		)
+		_, _ = bot.SendMessage(peerID, text, nil)
+	}()
+}
+
 func handleAdminMigrateUsers(bot *vkbot.Bot, peerID int, xrCfg *xraySettings) {
 	inboundIDs := xrCfg.inboundIDs
 	if len(inboundIDs) == 0 {
@@ -3252,6 +3397,9 @@ func handleMessage(bot *vkbot.Bot, msg events.MessageNewObject, xrCfg *xraySetti
 			return
 		case "sync_active_inbounds":
 			handleAdminSyncInbounds(bot, peerID, xrCfg, true)
+			return
+		case "attach_active_inbound":
+			handleAdminAttachActiveInbound(bot, peerID, args, xrCfg)
 			return
 		case "migrate_users":
 			handleAdminMigrateUsers(bot, peerID, xrCfg)
