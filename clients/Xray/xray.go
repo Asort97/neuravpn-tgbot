@@ -1301,6 +1301,151 @@ func (x *XRayClient) AttachClientToInbounds(email string, inboundIDs []int) erro
 	return checkAPISuccess("attach client", statusCode, body)
 }
 
+type inboundClientMatch struct {
+	inboundID int
+	client    Client
+}
+
+func normalizeInboundIDs(inboundIDs []int) []int {
+	seen := make(map[int]struct{}, len(inboundIDs))
+	result := make([]int, 0, len(inboundIDs))
+	for _, inboundID := range inboundIDs {
+		if inboundID <= 0 {
+			continue
+		}
+		if _, ok := seen[inboundID]; ok {
+			continue
+		}
+		seen[inboundID] = struct{}{}
+		result = append(result, inboundID)
+	}
+	return result
+}
+
+func missingInboundIDs(targetIDs, attachedIDs []int) []int {
+	attached := make(map[int]struct{}, len(attachedIDs))
+	for _, inboundID := range attachedIDs {
+		attached[inboundID] = struct{}{}
+	}
+	var missing []int
+	for _, inboundID := range normalizeInboundIDs(targetIDs) {
+		if _, ok := attached[inboundID]; !ok {
+			missing = append(missing, inboundID)
+		}
+	}
+	return missing
+}
+
+func (x *XRayClient) findClientMatchesAcrossInbounds(inboundIDs []int, tgID, subID string) ([]inboundClientMatch, error) {
+	inboundIDs = normalizeInboundIDs(inboundIDs)
+	if len(inboundIDs) == 0 {
+		return nil, fmt.Errorf("no inbound IDs provided")
+	}
+
+	type scanResult struct {
+		inboundID int
+		clients   []Client
+		err       error
+	}
+	results := make(chan scanResult, len(inboundIDs))
+	for _, inboundID := range inboundIDs {
+		go func(id int) {
+			clients, err := x.GetInboundById(id)
+			results <- scanResult{inboundID: id, clients: clients, err: err}
+		}(inboundID)
+	}
+
+	var matches []inboundClientMatch
+	var lastErr error
+	successfulScans := 0
+	for range inboundIDs {
+		result := <-results
+		if result.err != nil {
+			lastErr = result.err
+			log.Printf("[XRAY] scan inbound failed inbound=%d tg=%s err=%v", result.inboundID, tgID, result.err)
+			continue
+		}
+		successfulScans++
+		for _, candidate := range result.clients {
+			if clientMatchesTelegram(candidate, tgID, subID) {
+				matches = append(matches, inboundClientMatch{inboundID: result.inboundID, client: candidate})
+			}
+		}
+	}
+	if successfulScans == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return matches, nil
+}
+
+func canonicalClientMatch(matches []inboundClientMatch) (inboundClientMatch, bool) {
+	if len(matches) == 0 {
+		return inboundClientMatch{}, false
+	}
+	counts := make(map[string]int)
+	for _, match := range matches {
+		counts[strings.ToLower(strings.TrimSpace(match.client.Email))]++
+	}
+	best := matches[0]
+	for _, match := range matches[1:] {
+		bestKey := strings.ToLower(strings.TrimSpace(best.client.Email))
+		matchKey := strings.ToLower(strings.TrimSpace(match.client.Email))
+		switch {
+		case counts[matchKey] > counts[bestKey]:
+			best = match
+		case counts[matchKey] == counts[bestKey] && match.client.Enable && !best.client.Enable:
+			best = match
+		case counts[matchKey] == counts[bestKey] && match.client.Enable == best.client.Enable && match.client.ExpiryTime > best.client.ExpiryTime:
+			best = match
+		}
+	}
+	return best, true
+}
+
+func (x *XRayClient) attachedInboundIDs(match inboundClientMatch, matches []inboundClientMatch) ([]int, error) {
+	_, attachedIDs, err := x.GetClientRecordByEmail(match.client.Email)
+	if err == nil && len(attachedIDs) > 0 {
+		return normalizeInboundIDs(attachedIDs), nil
+	}
+
+	var inferred []int
+	for _, candidate := range matches {
+		if strings.EqualFold(strings.TrimSpace(candidate.client.Email), strings.TrimSpace(match.client.Email)) {
+			inferred = append(inferred, candidate.inboundID)
+		}
+	}
+	if len(inferred) > 0 {
+		return normalizeInboundIDs(inferred), nil
+	}
+	return nil, err
+}
+
+// AttachExistingClientToInbounds attaches the canonical existing client record
+// without changing its expiry. It returns true only when a new link was added.
+func (x *XRayClient) AttachExistingClientToInbounds(searchInboundIDs, targetInboundIDs []int, tgID, subID string) (bool, error) {
+	matches, err := x.findClientMatchesAcrossInbounds(searchInboundIDs, strings.TrimSpace(tgID), strings.TrimSpace(subID))
+	if err != nil {
+		return false, err
+	}
+	canonical, ok := canonicalClientMatch(matches)
+	if !ok {
+		return false, fmt.Errorf("xray client not found for tg=%s", strings.TrimSpace(tgID))
+	}
+	attachedIDs, err := x.attachedInboundIDs(canonical, matches)
+	if err != nil {
+		return false, err
+	}
+	missingIDs := missingInboundIDs(targetInboundIDs, attachedIDs)
+	if len(missingIDs) == 0 {
+		return false, nil
+	}
+	if err := x.AttachClientToInbounds(canonical.client.Email, missingIDs); err != nil {
+		return false, err
+	}
+	log.Printf("[XRAY] attached missing inbounds=%v email=%s tg=%s", missingIDs, canonical.client.Email, tgID)
+	return true, nil
+}
+
 func (x *XRayClient) DeleteClientByEmail(email string, keepTraffic bool) error {
 	email = strings.TrimSpace(email)
 	if email == "" {
@@ -1384,24 +1529,11 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 		stableSubID = "sub" + strings.TrimSpace(tgID)
 	}
 
-	type inboundClient struct {
-		inboundID int
-		client    Client
-	}
-	var matches []inboundClient
+	inboundIDs = normalizeInboundIDs(inboundIDs)
+	matches, err := x.findClientMatchesAcrossInbounds(inboundIDs, tgID, stableSubID)
 	var lastErr error
-	for _, inboundID := range inboundIDs {
-		clients, err := x.GetInboundById(inboundID)
-		if err != nil {
-			lastErr = err
-			log.Printf("[XRAY] scan inbound failed inbound=%d tg=%s err=%v", inboundID, tgID, err)
-			continue
-		}
-		for _, candidate := range clients {
-			if clientMatchesTelegram(candidate, tgID, stableSubID) {
-				matches = append(matches, inboundClient{inboundID: inboundID, client: candidate})
-			}
-		}
+	if err != nil {
+		lastErr = err
 	}
 
 	now := time.Now()
@@ -1426,28 +1558,64 @@ func (x *XRayClient) EnsureClientAcrossInbounds(inboundIDs []int, tgID string, e
 	}
 
 	if len(matches) > 0 {
+		canonical, _ := canonicalClientMatch(matches)
+		attachedIDs, attachStateErr := x.attachedInboundIDs(canonical, matches)
+		if attachStateErr != nil {
+			return nil, time.Time{}, attachStateErr
+		}
+		missingIDs := missingInboundIDs(inboundIDs, attachedIDs)
+		if len(missingIDs) > 0 {
+			if err := x.AttachClientToInbounds(canonical.client.Email, missingIDs); err != nil {
+				return nil, time.Time{}, fmt.Errorf("attach missing inbounds %v: %w", missingIDs, err)
+			}
+			log.Printf("[XRAY] attached missing inbounds=%v email=%s tg=%s", missingIDs, canonical.client.Email, tgID)
+		}
+
+		uniqueMatches := make([]inboundClientMatch, 0, len(matches))
+		seenEmails := make(map[string]struct{}, len(matches))
+		for _, item := range matches {
+			key := strings.ToLower(strings.TrimSpace(item.client.Email))
+			if _, ok := seenEmails[key]; ok {
+				continue
+			}
+			seenEmails[key] = struct{}{}
+			uniqueMatches = append(uniqueMatches, item)
+		}
+
+		type updateResult struct {
+			client Client
+			err    error
+		}
+		results := make(chan updateResult, len(uniqueMatches))
+		for _, item := range uniqueMatches {
+			go func(item inboundClientMatch) {
+				client := item.client
+				client.Enable = true
+				client.ExpiryTime = expireAt.UnixMilli()
+				client.TgID = strings.TrimSpace(tgID)
+				client.SubID = stableSubID
+				if strings.TrimSpace(client.Comment) == "" || strings.HasPrefix(strings.TrimSpace(client.Comment), "tg:") {
+					client.Comment = "tg:" + strings.TrimSpace(tgID)
+				}
+				if strings.TrimSpace(client.Flow) == "" {
+					client.Flow = x.defaultFlowForInbound(item.inboundID)
+				}
+				results <- updateResult{client: client, err: x.UpdateClient(item.inboundID, client)}
+			}(item)
+		}
+
 		var primary *Client
 		updated := 0
-		for _, item := range matches {
-			client := item.client
-			client.Enable = true
-			client.ExpiryTime = expireAt.UnixMilli()
-			client.TgID = strings.TrimSpace(tgID)
-			client.SubID = stableSubID
-			if strings.TrimSpace(client.Comment) == "" || strings.HasPrefix(strings.TrimSpace(client.Comment), "tg:") {
-				client.Comment = "tg:" + strings.TrimSpace(tgID)
-			}
-			if strings.TrimSpace(client.Flow) == "" {
-				client.Flow = x.defaultFlowForInbound(item.inboundID)
-			}
-			if err := x.UpdateClient(item.inboundID, client); err != nil {
-				lastErr = err
-				log.Printf("[XRAY] update duplicate failed inbound=%d email=%s tg=%s err=%v", item.inboundID, client.Email, tgID, err)
+		for range uniqueMatches {
+			result := <-results
+			if result.err != nil {
+				lastErr = result.err
+				log.Printf("[XRAY] update client failed email=%s tg=%s err=%v", result.client.Email, tgID, result.err)
 				continue
 			}
 			updated++
-			if primary == nil {
-				copyClient := client
+			if primary == nil || strings.EqualFold(result.client.Email, canonical.client.Email) {
+				copyClient := result.client
 				primary = &copyClient
 			}
 		}
