@@ -4399,6 +4399,224 @@ func handleMergedSubCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, primary
 	logAction(bot, msg.From.ID, msg.From.UserName, "/mergedsub", false)
 }
 
+func collectAllUserIDs() ([]string, error) {
+	var userIDs []string
+	if pg, ok := userStore.(interface{ GetAllUserIDs() ([]string, error) }); ok {
+		ids, err := pg.GetAllUserIDs()
+		if err != nil {
+			return nil, err
+		}
+		userIDs = append(userIDs, ids...)
+	} else if sq, ok := userStore.(interface {
+		GetAllUsers() map[string]sqlite.UserData
+	}); ok {
+		for id := range sq.GetAllUsers() {
+			userIDs = append(userIDs, id)
+		}
+	} else if sq, ok := userStore.(interface{ GetAllUsers() map[string]interface{} }); ok {
+		for id := range sq.GetAllUsers() {
+			userIDs = append(userIDs, id)
+		}
+	} else {
+		return nil, fmt.Errorf("userStore не поддерживает массовое получение id")
+	}
+	sort.Strings(userIDs)
+	return userIDs, nil
+}
+
+func handleAdminHelp(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	if !isAdmin(msg.From.ID) {
+		text := "<b>Команды</b>\n" +
+			"<code>/start</code> — меню\n" +
+			"<code>/profile</code> — профиль\n" +
+			"<code>/topup</code> — оплата\n" +
+			"<code>/vpn</code> — подключить VPN\n" +
+			"<code>/instructions</code> — инструкции\n" +
+			"<code>/referral</code> — рефералы\n" +
+			"<code>/support</code> — поддержка"
+		m := tgbotapi.NewMessage(chatID, text)
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	text := "<b>Админ-команды</b>\n\n" +
+		"<code>/help</code> — эта справка\n" +
+		"<code>/add userID days</code> — добавить дни одному пользователю\n" +
+		"<code>/remove userID days</code> — убрать дни у пользователя\n" +
+		"<code>/grant_active_days days</code> — добавить дни всем активным пользователям с балансом &gt; 0\n" +
+		"<code>/wipeuser userID confirm</code> — удалить пользователя из БД и панелей\n" +
+		"<code>/sync_inbounds</code> — синхронизировать всех пользователей по inbound\n" +
+		"<code>/sync_active_inbounds</code> — синхронизировать только активных\n" +
+		"<code>/attach_active_inbound inboundID</code> — привязать активных к inbound\n" +
+		"<code>/migrate_users</code> — миграция активных пользователей в Xray\n" +
+		"<code>/migrate_expiry_from_old</code> — перенести сроки из старой панели\n" +
+		"<code>/mergedsub</code> — тест merged-подписки, только главный админ\n" +
+		"<code>/merged_traffic_preview</code> — предпросмотр трафика БС\n" +
+		"<code>/merged_traffic_init_confirm</code> — первичная инициализация трафика БС\n" +
+		"<code>/merged_traffic_sync</code> — синхронизация трафика БС\n" +
+		"<code>/merged_attach_inbounds</code> — привязать merged-клиентов к inbound\n" +
+		"<code>/create alias</code> — создать бессрочную подписку-алиас\n" +
+		"<code>/create_promocode CODE discount hours</code> — создать промокод\n" +
+		"<code>/notify text</code> — массовая рассылка\n" +
+		"<code>/notify_test text</code> — тест рассылки себе\n" +
+		"<code>/notify_user userID text</code> — отправить одному пользователю\n" +
+		"<code>/notify_sleep</code> — рассылка спящим пользователям"
+
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = "HTML"
+	m.DisableWebPagePreview = true
+	_, _ = bot.Send(m)
+}
+
+func handleGrantActiveDays(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	chatID := msg.Chat.ID
+	if !isAdmin(msg.From.ID) {
+		m := tgbotapi.NewMessage(chatID, "⛔️ Только для админа")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) != 1 {
+		m := tgbotapi.NewMessage(chatID, "Использование: <code>/grant_active_days days</code>\nПример: <code>/grant_active_days 7</code>")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	days, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil || days <= 0 {
+		m := tgbotapi.NewMessage(chatID, "❌ Количество дней должно быть положительным числом")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+	if xrCfg == nil || xrCfg.client == nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Xray не настроен")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	userIDs, err := collectAllUserIDs()
+	if err != nil {
+		m := tgbotapi.NewMessage(chatID, "❌ Ошибка получения пользователей: "+html.EscapeString(err.Error()))
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+	if len(userIDs) == 0 {
+		m := tgbotapi.NewMessage(chatID, "❌ Пользователи не найдены")
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+		return
+	}
+
+	startText := fmt.Sprintf("Запускаю начисление <b>+%d дн.</b> активным пользователям...\nВсего в базе: <b>%d</b>", days, len(userIDs))
+	startMsg := tgbotapi.NewMessage(chatID, startText)
+	startMsg.ParseMode = "HTML"
+	sent, _ := bot.Send(startMsg)
+	logAction(bot, msg.From.ID, msg.From.UserName, fmt.Sprintf("/grant_active_days %d", days), false)
+
+	go func() {
+		const workers = 4
+		type grantResult struct {
+			status string
+			userID string
+			err    error
+		}
+
+		jobs := make(chan string)
+		results := make(chan grantResult, workers)
+		var wg sync.WaitGroup
+
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for uid := range jobs {
+					currentDays, daysErr := userStore.GetDays(uid)
+					if daysErr != nil {
+						results <- grantResult{status: "failed", userID: uid, err: daysErr}
+						continue
+					}
+					if currentDays <= 0 {
+						results <- grantResult{status: "skipped", userID: uid}
+						continue
+					}
+
+					if _, grantErr := ensureXrayAccess(xrCfg, uid, fallbackEmail(uid), days, true); grantErr != nil {
+						results <- grantResult{status: "failed", userID: uid, err: grantErr}
+						continue
+					}
+					results <- grantResult{status: "granted", userID: uid}
+					time.Sleep(40 * time.Millisecond)
+				}
+			}()
+		}
+
+		go func() {
+			for _, uid := range userIDs {
+				jobs <- uid
+			}
+			close(jobs)
+			wg.Wait()
+			close(results)
+		}()
+
+		processed, granted, skipped, failed := 0, 0, 0, 0
+		lastEdit := time.Now().Add(-time.Minute)
+		var firstErrors []string
+		for result := range results {
+			processed++
+			switch result.status {
+			case "granted":
+				granted++
+			case "skipped":
+				skipped++
+			default:
+				failed++
+				if len(firstErrors) < 5 && result.err != nil {
+					firstErrors = append(firstErrors, fmt.Sprintf("%s: %s", result.userID, result.err.Error()))
+				}
+				log.Printf("[grant_active_days] failed user=%s days=%d err=%v", result.userID, days, result.err)
+			}
+
+			if sent.MessageID != 0 && (processed%100 == 0 || time.Since(lastEdit) >= 20*time.Second) {
+				progress := fmt.Sprintf(
+					"Начисление <b>+%d дн.</b> активным пользователям...\nВсего: <b>%d</b>\nОбработано: <b>%d</b>\nНачислено: <b>%d</b>\nПропущено неактивных: <b>%d</b>\nОшибок: <b>%d</b>",
+					days, len(userIDs), processed, granted, skipped, failed,
+				)
+				edit := tgbotapi.NewEditMessageText(chatID, sent.MessageID, progress)
+				edit.ParseMode = "HTML"
+				_, _ = bot.Send(edit)
+				lastEdit = time.Now()
+			}
+		}
+
+		finalText := fmt.Sprintf(
+			"✅ <b>Начисление завершено</b>\n\nДобавлено: <b>+%d дн.</b>\nВсего в базе: <b>%d</b>\nОбработано: <b>%d</b>\nНачислено активным: <b>%d</b>\nПропущено с 0 дней: <b>%d</b>\nОшибок: <b>%d</b>",
+			days, len(userIDs), processed, granted, skipped, failed,
+		)
+		if len(firstErrors) > 0 {
+			finalText += "\n\nПервые ошибки:\n<code>" + html.EscapeString(strings.Join(firstErrors, "\n")) + "</code>"
+		}
+
+		if sent.MessageID != 0 {
+			edit := tgbotapi.NewEditMessageText(chatID, sent.MessageID, finalText)
+			edit.ParseMode = "HTML"
+			_, _ = bot.Send(edit)
+			return
+		}
+		m := tgbotapi.NewMessage(chatID, finalText)
+		m.ParseMode = "HTML"
+		_, _ = bot.Send(m)
+	}()
+}
+
 // Admin-only: sync clients across all inbounds, creating missing ones.
 func handleAddDays(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
 	chatID := msg.Chat.ID
@@ -5561,6 +5779,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		switch msg.Command() {
 		case "start":
 			handleStart(bot, msg, session, xrCfg)
+		case "help":
+			handleAdminHelp(bot, msg)
 		case "adlink":
 			handleAdLink(bot, msg)
 		case "adcheck":
@@ -5569,6 +5789,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleAddDays(bot, msg, xrCfg)
 		case "remove":
 			handleRemoveDays(bot, msg, xrCfg)
+		case "grant_active_days":
+			handleGrantActiveDays(bot, msg, xrCfg)
 		case "wipeuser":
 			handleWipeUser(bot, msg, xrCfg)
 		case "sync_inbounds":
