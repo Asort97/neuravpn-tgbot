@@ -995,6 +995,63 @@ func parseTransportParams(streamSettings string) string {
 	}
 }
 
+// GenerateVLESSLinkForInboundData generates a VLESS link from an inbound that
+// has already been loaded. This avoids another full /inbounds/list request for
+// every link in a subscription.
+func (x *XRayClient) GenerateVLESSLinkForInboundData(client *Client, inbound InboundData, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string, fingerprint string) string {
+	if client == nil {
+		return ""
+	}
+	if reality := parseRealityParams(inbound.StreamSettings, inbound.Port); reality != nil {
+		if strings.TrimSpace(reality.ServerName) != "" {
+			serverName = strings.TrimSpace(reality.ServerName)
+		}
+		if strings.TrimSpace(reality.PublicKey) != "" {
+			publicKey = strings.TrimSpace(reality.PublicKey)
+		}
+		if strings.TrimSpace(reality.ShortID) != "" {
+			shortID = strings.TrimSpace(reality.ShortID)
+		}
+		if strings.TrimSpace(reality.SpiderX) != "" {
+			spiderX = strings.TrimSpace(reality.SpiderX)
+		}
+		if strings.TrimSpace(reality.Fingerprint) != "" {
+			fingerprint = strings.TrimSpace(reality.Fingerprint)
+		}
+		if reality.ServerPort > 0 {
+			port = reality.ServerPort
+		}
+	}
+	if strings.TrimSpace(serverAddress) == "" || strings.TrimSpace(serverName) == "" || strings.TrimSpace(publicKey) == "" || strings.TrimSpace(shortID) == "" || port <= 0 {
+		return ""
+	}
+	if strings.TrimSpace(spiderX) == "" {
+		spiderX = "/"
+	}
+	if strings.TrimSpace(fingerprint) == "" {
+		fingerprint = "chrome"
+	}
+
+	link := fmt.Sprintf("vless://%s@%s:%d?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&spx=%s&%s",
+		client.ID,
+		serverAddress,
+		port,
+		url.QueryEscape(serverName),
+		fingerprint,
+		publicKey,
+		shortID,
+		url.QueryEscape(spiderX),
+		parseTransportParams(inbound.StreamSettings),
+	)
+	if client.Flow != "" {
+		link += fmt.Sprintf("&flow=%s", client.Flow)
+	}
+	if client.Email != "" {
+		link += fmt.Sprintf("#%s", url.PathEscape(client.Email))
+	}
+	return link
+}
+
 // GenerateVLESSLinkForInbound generates a VLESS link using the actual transport settings
 // read from the specified inbound, instead of hardcoding tcp.
 func (x *XRayClient) GenerateVLESSLinkForInbound(client *Client, inboundID int, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string, fingerprint string) string {

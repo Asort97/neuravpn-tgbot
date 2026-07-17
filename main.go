@@ -38,6 +38,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/google/uuid"
 	qrcode "github.com/skip2/go-qrcode"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -96,6 +97,26 @@ var lastActionKey = make(map[int64]map[string]time.Time)
 
 // in-memory cache for accessInfo (key: telegramUserID)
 var accessCache sync.Map // map[string]*accessInfo
+
+const (
+	mergedSubscriptionFreshTTL     = 2 * time.Minute
+	mergedSubscriptionStaleTTL     = 30 * time.Minute
+	mergedSubscriptionBuildTimeout = 20 * time.Second
+)
+
+type mergedSubscriptionCacheEntry struct {
+	body         []byte
+	headers      http.Header
+	statusCode   int
+	mergedStatus string
+	cachedAt     time.Time
+}
+
+var (
+	mergedSubscriptionCacheMu sync.RWMutex
+	mergedSubscriptionCache   = make(map[string]mergedSubscriptionCacheEntry)
+	mergedSubscriptionBuilds  singleflight.Group
+)
 
 func sessionAction(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, action string, isNewUser bool) {
 	now := time.Now()
@@ -718,6 +739,7 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 	}
 	accessCache.Store(telegramUser, result)
 	if addDays != 0 {
+		invalidateMergedSubscriptionCache(telegramUser)
 		if err := syncMergedAccessForUser(telegramUser); err != nil {
 			log.Printf("[merged-sync] user=%s addDays=%d err=%v", telegramUser, addDays, err)
 		}
@@ -3247,6 +3269,28 @@ func buildSubscriptionURLForUser(cfg *xraySettings, userID string) (string, stri
 	return subURL, subID, info, nil
 }
 
+// buildSubscriptionURLForMergedRequest uses the local database first. The
+// subscription endpoint only needs the stable subID; scanning every primary
+// inbound on each client refresh is both redundant and expensive.
+func buildSubscriptionURLForMergedRequest(cfg *xraySettings, userID string) (string, string, *accessInfo, error) {
+	userID = strings.TrimSpace(userID)
+	if userStore != nil && userID != "" {
+		days, daysErr := userStore.GetDays(userID)
+		subID, subErr := userStore.GetSubscriptionID(userID)
+		subID = strings.TrimSpace(subID)
+		if daysErr == nil && subErr == nil && days > 0 && subID != "" {
+			client := &xray.Client{SubID: subID, TgID: userID}
+			if subURL := generateSubscriptionURL(cfg, client); strings.TrimSpace(subURL) != "" {
+				return subURL, subID, nil, nil
+			}
+		}
+	}
+
+	// Preserve the old panel-backed lookup as a compatibility fallback for
+	// users whose local subscription metadata has not been migrated yet.
+	return buildSubscriptionURLForUser(cfg, userID)
+}
+
 // autoFillRealityFromPanel заполняет поля xraySettings (serverName, publicKey,
 // shortID, spiderX, fingerprint, serverPort) данными прямо с панели,
 // если они не были заданы вручную через env-переменные.
@@ -4166,6 +4210,116 @@ func buildMergedProviderLinksWithPrimaryInfo(cfg *xraySettings, userID, subID st
 	return links, nil
 }
 
+var errMergedProviderClientNotFound = errors.New("merged provider client not found")
+
+// buildMergedProviderLinksReadOnly reads the 3x-ui client record directly by
+// email and loads inbound settings once. It intentionally does not update the
+// client: synchronization belongs to access-grant and background sync paths,
+// not to a latency-sensitive subscription GET.
+func buildMergedProviderLinksReadOnly(cfg *xraySettings, userID, subID string) ([]string, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, fmt.Errorf("merged xray not configured")
+	}
+	userID = strings.TrimSpace(userID)
+	subID = strings.TrimSpace(subID)
+	configuredInboundIDs, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	var client *xray.Client
+	var linkedInboundIDs []int
+	email := strings.TrimSpace(fallbackEmail(userID))
+	if email != "" {
+		client, linkedInboundIDs, err = cfg.client.GetClientRecordByEmail(email)
+		if err != nil {
+			log.Printf("[merged-sub] direct client lookup failed user=%s email=%s err=%v", userID, email, err)
+			client = nil
+			linkedInboundIDs = nil
+		}
+	}
+	if client == nil {
+		var foundInboundID int
+		client, foundInboundID, err = findMergedProviderClient(cfg, userID, subID)
+		if err != nil {
+			return nil, err
+		}
+		if client == nil {
+			return nil, errMergedProviderClientNotFound
+		}
+		linkedInboundIDs = []int{foundInboundID}
+		if strings.TrimSpace(client.Email) != "" {
+			if record, recordInboundIDs, recordErr := cfg.client.GetClientRecordByEmail(client.Email); recordErr == nil && record != nil {
+				client = record
+				linkedInboundIDs = recordInboundIDs
+			}
+		}
+	}
+
+	linked := make(map[int]struct{}, len(linkedInboundIDs))
+	for _, inboundID := range linkedInboundIDs {
+		if inboundID > 0 {
+			linked[inboundID] = struct{}{}
+		}
+	}
+	var linkInboundIDs []int
+	for _, inboundID := range configuredInboundIDs {
+		if _, ok := linked[inboundID]; ok {
+			linkInboundIDs = append(linkInboundIDs, inboundID)
+		}
+	}
+	if len(linkInboundIDs) == 0 {
+		linkInboundIDs = linkedInboundIDs
+	}
+	if len(linkInboundIDs) == 0 {
+		return nil, fmt.Errorf("merged client has no linked inbounds")
+	}
+
+	inbounds, err := cfg.client.GetAllInbounds()
+	if err != nil {
+		return nil, err
+	}
+	inboundByID := make(map[int]xray.InboundData, len(inbounds))
+	for _, inbound := range inbounds {
+		inboundByID[inbound.ID] = inbound
+	}
+
+	seenLinks := make(map[string]struct{}, len(linkInboundIDs))
+	links := make([]string, 0, len(linkInboundIDs))
+	for _, inboundID := range linkInboundIDs {
+		inbound, ok := inboundByID[inboundID]
+		if !ok {
+			continue
+		}
+		link := cfg.client.GenerateVLESSLinkForInboundData(
+			client,
+			inbound,
+			strings.TrimSpace(cfg.serverAddress),
+			cfg.serverPort,
+			strings.TrimSpace(cfg.serverName),
+			strings.TrimSpace(cfg.publicKey),
+			strings.TrimSpace(cfg.shortID),
+			strings.TrimSpace(cfg.spiderX),
+			strings.TrimSpace(cfg.fingerprint),
+		)
+		if strings.TrimSpace(link) == "" {
+			continue
+		}
+		if remark := strings.TrimSpace(inbound.Remark); remark != "" {
+			link = setVLESSLinkDisplayName(link, remark)
+		}
+		if _, seen := seenLinks[link]; seen {
+			continue
+		}
+		seenLinks[link] = struct{}{}
+		links = append(links, link)
+	}
+	if len(links) == 0 {
+		return nil, fmt.Errorf("link config for merged xray is incomplete")
+	}
+	return links, nil
+}
+
 func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, error) {
 	return buildMergedProviderLinkWithPrimaryInfo(cfg, userID, subID, nil)
 }
@@ -4306,6 +4460,216 @@ func fetchSubscriptionBody(ctx context.Context, upstreamURL string, srcReq *http
 	return body, resp.Header.Clone(), resp.StatusCode, nil
 }
 
+type mergedSubscriptionRequestVariant struct {
+	rawQuery       string
+	userAgent      string
+	accept         string
+	acceptLanguage string
+}
+
+func mergedSubscriptionVariantFromRequest(r *http.Request) mergedSubscriptionRequestVariant {
+	if r == nil {
+		return mergedSubscriptionRequestVariant{}
+	}
+	return mergedSubscriptionRequestVariant{
+		rawQuery:       strings.TrimSpace(r.URL.RawQuery),
+		userAgent:      strings.TrimSpace(r.Header.Get("User-Agent")),
+		accept:         strings.TrimSpace(r.Header.Get("Accept")),
+		acceptLanguage: strings.TrimSpace(r.Header.Get("Accept-Language")),
+	}
+}
+
+func (v mergedSubscriptionRequestVariant) request(upstreamURL string) (*http.Request, error) {
+	req, err := http.NewRequest(http.MethodGet, upstreamURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	// fetchSubscriptionBody receives the upstream URL separately and only
+	// reads RawQuery from this template, so keep just the client query here.
+	req.URL.RawQuery = v.rawQuery
+	if v.userAgent != "" {
+		req.Header.Set("User-Agent", v.userAgent)
+	}
+	if v.accept != "" {
+		req.Header.Set("Accept", v.accept)
+	}
+	if v.acceptLanguage != "" {
+		req.Header.Set("Accept-Language", v.acceptLanguage)
+	}
+	return req, nil
+}
+
+func mergedSubscriptionCacheKey(userID string, variant mergedSubscriptionRequestVariant) string {
+	variantHash := sha256.Sum256([]byte(strings.Join([]string{
+		variant.rawQuery,
+		variant.userAgent,
+		variant.accept,
+		variant.acceptLanguage,
+	}, "\x00")))
+	return strings.TrimSpace(userID) + "|" + hex.EncodeToString(variantHash[:])
+}
+
+func cloneMergedSubscriptionCacheEntry(entry mergedSubscriptionCacheEntry) mergedSubscriptionCacheEntry {
+	entry.body = append([]byte(nil), entry.body...)
+	entry.headers = entry.headers.Clone()
+	return entry
+}
+
+func getMergedSubscriptionCache(key string) (mergedSubscriptionCacheEntry, bool) {
+	mergedSubscriptionCacheMu.RLock()
+	entry, ok := mergedSubscriptionCache[key]
+	mergedSubscriptionCacheMu.RUnlock()
+	if !ok {
+		return mergedSubscriptionCacheEntry{}, false
+	}
+	return cloneMergedSubscriptionCacheEntry(entry), true
+}
+
+func storeMergedSubscriptionCache(key string, entry mergedSubscriptionCacheEntry) {
+	entry.cachedAt = time.Now()
+	entry = cloneMergedSubscriptionCacheEntry(entry)
+	mergedSubscriptionCacheMu.Lock()
+	mergedSubscriptionCache[key] = entry
+	mergedSubscriptionCacheMu.Unlock()
+}
+
+func invalidateMergedSubscriptionCache(userID string) {
+	prefix := strings.TrimSpace(userID) + "|"
+	if prefix == "|" {
+		return
+	}
+	mergedSubscriptionCacheMu.Lock()
+	for key := range mergedSubscriptionCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(mergedSubscriptionCache, key)
+		}
+	}
+	mergedSubscriptionCacheMu.Unlock()
+}
+
+func mergedSubscriptionUserActive(userID string) bool {
+	if userStore == nil {
+		return false
+	}
+	days, err := userStore.GetDays(strings.TrimSpace(userID))
+	return err == nil && days > 0
+}
+
+func mergedSubscriptionEntryFresh(entry mergedSubscriptionCacheEntry, now time.Time) bool {
+	ttl := mergedSubscriptionFreshTTL
+	if !strings.HasPrefix(entry.mergedStatus, "merged:") {
+		ttl = 15 * time.Second
+	}
+	return !entry.cachedAt.IsZero() && now.Sub(entry.cachedAt) <= ttl
+}
+
+func writeMergedSubscriptionEntry(w http.ResponseWriter, entry mergedSubscriptionCacheEntry, cacheStatus string) {
+	copySubscriptionHeaders(w.Header(), entry.headers)
+	w.Header().Set("X-Merged-Subscription-Status", entry.mergedStatus)
+	w.Header().Set("X-Merged-Subscription-Cache", cacheStatus)
+	statusCode := entry.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(entry.body)
+}
+
+func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptionRequestVariant) (mergedSubscriptionCacheEntry, error) {
+	startedAt := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), mergedSubscriptionBuildTimeout)
+	defer cancel()
+
+	upstreamURL, subID, primaryInfo, err := buildSubscriptionURLForMergedRequest(xrayCfg, targetUserID)
+	if err != nil {
+		return mergedSubscriptionCacheEntry{}, fmt.Errorf("build upstream: %w", err)
+	}
+	requestTemplate, err := variant.request(upstreamURL)
+	if err != nil {
+		return mergedSubscriptionCacheEntry{}, err
+	}
+
+	type upstreamResult struct {
+		body       []byte
+		headers    http.Header
+		statusCode int
+		err        error
+	}
+	type linksResult struct {
+		links []string
+		err   error
+	}
+	upstreamCh := make(chan upstreamResult, 1)
+	linksCh := make(chan linksResult, 1)
+	go func() {
+		body, headers, statusCode, fetchErr := fetchSubscriptionBody(ctx, upstreamURL, requestTemplate)
+		upstreamCh <- upstreamResult{body: body, headers: headers, statusCode: statusCode, err: fetchErr}
+	}()
+	go func() {
+		links, linksErr := buildMergedProviderLinksReadOnly(mergedXrayCfg, targetUserID, subID)
+		if errors.Is(linksErr, errMergedProviderClientNotFound) {
+			if primaryInfo == nil {
+				_, _, primaryInfo, linksErr = buildSubscriptionURLForUser(xrayCfg, targetUserID)
+			}
+			if linksErr == nil {
+				links, linksErr = buildMergedProviderLinksWithPrimaryInfo(mergedXrayCfg, targetUserID, subID, primaryInfo)
+			}
+		}
+		linksCh <- linksResult{links: links, err: linksErr}
+	}()
+
+	upstream := <-upstreamCh
+	if upstream.err != nil {
+		return mergedSubscriptionCacheEntry{}, fmt.Errorf("fetch upstream: %w", upstream.err)
+	}
+	var links linksResult
+	select {
+	case links = <-linksCh:
+	case <-ctx.Done():
+		links.err = ctx.Err()
+	}
+	body := upstream.body
+	mergedStatus := "primary_only"
+	if links.err != nil {
+		log.Printf("[merged-sub] extra links unavailable user=%s: %v", targetUserID, links.err)
+	} else if mergedBody, mergeErr := mergeSubscriptionBody(body, links.links); mergeErr != nil {
+		log.Printf("[merged-sub] merge failed user=%s: %v", targetUserID, mergeErr)
+	} else {
+		body = mergedBody
+		mergedStatus = fmt.Sprintf("merged:%d", len(links.links))
+	}
+	log.Printf("[merged-sub] built user=%s status=%s duration=%s", targetUserID, mergedStatus, time.Since(startedAt).Round(time.Millisecond))
+	return mergedSubscriptionCacheEntry{
+		body:         body,
+		headers:      upstream.headers,
+		statusCode:   upstream.statusCode,
+		mergedStatus: mergedStatus,
+	}, nil
+}
+
+func startMergedSubscriptionBuild(key, targetUserID string, variant mergedSubscriptionRequestVariant) <-chan singleflight.Result {
+	return mergedSubscriptionBuilds.DoChan(key, func() (interface{}, error) {
+		entry, err := buildMergedSubscriptionEntry(targetUserID, variant)
+		if err != nil {
+			return nil, err
+		}
+		if entry.statusCode >= 200 && entry.statusCode < 300 {
+			storeMergedSubscriptionCache(key, entry)
+		}
+		return entry, nil
+	})
+}
+
+func refreshMergedSubscriptionAsync(key, targetUserID string, variant mergedSubscriptionRequestVariant) {
+	resultCh := startMergedSubscriptionBuild(key, targetUserID, variant)
+	go func() {
+		result := <-resultCh
+		if result.Err != nil {
+			log.Printf("[merged-sub] background refresh failed user=%s: %v", targetUserID, result.Err)
+		}
+	}()
+}
+
 func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -4332,34 +4696,44 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	upstreamURL, subID, primaryInfo, err := buildSubscriptionURLForUser(xrayCfg, targetUserID)
-	if err != nil {
-		log.Printf("[merged-sub] build upstream failed user=%s: %v", targetUserID, err)
-		http.Error(w, "subscription not found", http.StatusNotFound)
+
+	variant := mergedSubscriptionVariantFromRequest(r)
+	cacheKey := mergedSubscriptionCacheKey(targetUserID, variant)
+	now := time.Now()
+	activeForCache := mergedSubscriptionUserActive(targetUserID)
+	if cached, ok := getMergedSubscriptionCache(cacheKey); ok && activeForCache {
+		if mergedSubscriptionEntryFresh(cached, now) {
+			writeMergedSubscriptionEntry(w, cached, "hit")
+			return
+		}
+		if strings.HasPrefix(cached.mergedStatus, "merged:") && now.Sub(cached.cachedAt) <= mergedSubscriptionStaleTTL {
+			writeMergedSubscriptionEntry(w, cached, "stale")
+			refreshMergedSubscriptionAsync(cacheKey, targetUserID, variant)
+			return
+		}
+	}
+	if !activeForCache {
+		invalidateMergedSubscriptionCache(targetUserID)
+	}
+
+	resultCh := startMergedSubscriptionBuild(cacheKey, targetUserID, variant)
+	select {
+	case <-r.Context().Done():
+		log.Printf("[merged-sub] request canceled while build continues user=%s", targetUserID)
 		return
+	case result := <-resultCh:
+		if result.Err != nil {
+			log.Printf("[merged-sub] build failed user=%s: %v", targetUserID, result.Err)
+			http.Error(w, "upstream subscription unavailable", http.StatusBadGateway)
+			return
+		}
+		entry, ok := result.Val.(mergedSubscriptionCacheEntry)
+		if !ok {
+			http.Error(w, "upstream subscription unavailable", http.StatusBadGateway)
+			return
+		}
+		writeMergedSubscriptionEntry(w, entry, "miss")
 	}
-	body, headers, statusCode, err := fetchSubscriptionBody(r.Context(), upstreamURL, r)
-	if err != nil {
-		log.Printf("[merged-sub] upstream fetch failed user=%s: %v", targetUserID, err)
-		http.Error(w, "upstream subscription unavailable", http.StatusBadGateway)
-		return
-	}
-	mergedStatus := "primary_only"
-	if extraLinks, err := buildMergedProviderLinksWithPrimaryInfo(mergedXrayCfg, targetUserID, subID, primaryInfo); err != nil {
-		log.Printf("[merged-sub] extra links unavailable user=%s: %v", targetUserID, err)
-	} else if mergedBody, err := mergeSubscriptionBody(body, extraLinks); err != nil {
-		log.Printf("[merged-sub] merge failed user=%s: %v", targetUserID, err)
-	} else {
-		body = mergedBody
-		mergedStatus = fmt.Sprintf("merged:%d", len(extraLinks))
-	}
-	copySubscriptionHeaders(w.Header(), headers)
-	w.Header().Set("X-Merged-Subscription-Status", mergedStatus)
-	if statusCode == 0 {
-		statusCode = http.StatusOK
-	}
-	w.WriteHeader(statusCode)
-	_, _ = w.Write(body)
 }
 
 func handleMergedSubCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, primaryCfg *xraySettings) {
