@@ -74,6 +74,7 @@ var (
 	logSessions        = make(map[int64]*logSession) // key: userID
 	notificationLogMu  sync.Mutex
 	notificationLogs   = make(map[string]*notificationLogBatch) // key: notification type
+	compensationSends  sync.Map                                 // campaign id -> active broadcast
 )
 
 func init() {
@@ -2062,6 +2063,352 @@ func parseNotifyUserArgs(args string) (int64, string, error) {
 		text = strings.TrimSpace(strings.Join(parts[1:], " "))
 	}
 	return targetID, text, nil
+}
+
+type compensationStore interface {
+	CreateCompensationCampaign(id string, days int64, validForDays int) (*pgstore.CompensationCampaign, error)
+	SetCompensationCampaignMessage(id string, chatID int64, messageID int) error
+	GetCompensationCampaign(id string) (*pgstore.CompensationCampaign, error)
+	GetPendingCompensationRecipients(id string) ([]string, error)
+	MarkCompensationDelivered(campaignID, userID string, at time.Time) error
+	ClaimCompensation(campaignID, userID string, at time.Time) (*pgstore.CompensationClaimResult, error)
+	SetCompensationSyncResult(campaignID, userID string, synced bool, syncErr string) error
+}
+
+func normalizeCompensationID(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || len(value) > 32 {
+		return "", fmt.Errorf("ID кампании должен содержать от 1 до 32 символов")
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return "", fmt.Errorf("ID кампании может содержать только a-z, 0-9, _ и -")
+	}
+	return value, nil
+}
+
+func parseCompensationCreateArgs(args string) (string, int64, int, error) {
+	parts := strings.Fields(strings.TrimSpace(args))
+	if len(parts) != 3 {
+		return "", 0, 0, fmt.Errorf("использование: /compensation_create ID DAYS VALID_DAYS")
+	}
+	id, err := normalizeCompensationID(parts[0])
+	if err != nil {
+		return "", 0, 0, err
+	}
+	days, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || days <= 0 || days > 30 {
+		return "", 0, 0, fmt.Errorf("DAYS должно быть от 1 до 30")
+	}
+	validForDays, err := strconv.Atoi(parts[2])
+	if err != nil || validForDays <= 0 || validForDays > 30 {
+		return "", 0, 0, fmt.Errorf("VALID_DAYS должно быть от 1 до 30")
+	}
+	return id, days, validForDays, nil
+}
+
+func compensationKeyboard(campaignID string, preview bool) tgbotapi.InlineKeyboardMarkup {
+	prefix := "comp_claim:"
+	if preview {
+		prefix = "comp_preview:"
+	}
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🎁 забрать бонус", prefix+campaignID),
+		),
+	)
+}
+
+func sendCompensationCopy(bot *tgbotapi.BotAPI, targetID int64, campaign *pgstore.CompensationCampaign, preview bool) error {
+	if bot == nil || campaign == nil || campaign.SourceChatID == 0 || campaign.SourceMessageID <= 0 {
+		return fmt.Errorf("сообщение кампании не настроено")
+	}
+	copyMessage := tgbotapi.NewCopyMessage(targetID, campaign.SourceChatID, campaign.SourceMessageID)
+	copyMessage.ReplyMarkup = compensationKeyboard(campaign.ID, preview)
+	_, err := bot.Send(copyMessage)
+	return err
+}
+
+func getCompensationStore() (compensationStore, error) {
+	store, ok := userStore.(compensationStore)
+	if !ok {
+		return nil, fmt.Errorf("хранилище компенсаций недоступно")
+	}
+	return store, nil
+}
+
+func sendCompensationAdminText(bot *tgbotapi.BotAPI, chatID int64, text string) tgbotapi.Message {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	sent, err := bot.Send(msg)
+	if err != nil {
+		log.Printf("[compensation] admin message failed chat=%d err=%v", chatID, err)
+	}
+	return sent
+}
+
+func editCompensationAdminText(bot *tgbotapi.BotAPI, chatID int64, messageID int, text string) {
+	if messageID <= 0 {
+		return
+	}
+	edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
+	edit.ParseMode = "HTML"
+	if _, err := bot.Send(edit); err != nil {
+		log.Printf("[compensation] admin progress edit failed chat=%d message=%d err=%v", chatID, messageID, err)
+	}
+}
+
+func handleCompensationCreate(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	if !isAdmin(msg.From.ID) {
+		sendCompensationAdminText(bot, msg.Chat.ID, "⛔️ Только для админа")
+		return
+	}
+	id, days, validForDays, err := parseCompensationCreateArgs(msg.CommandArguments())
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ "+html.EscapeString(err.Error()))
+		return
+	}
+	store, err := getCompensationStore()
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ "+html.EscapeString(err.Error()))
+		return
+	}
+	campaign, err := store.CreateCompensationCampaign(id, days, validForDays)
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Не удалось создать кампанию: <code>"+html.EscapeString(err.Error())+"</code>")
+		return
+	}
+	text := fmt.Sprintf(
+		"✅ Кампания <code>%s</code> создана\nбонус: <b>+%d дн.</b>\nдействует до: <code>%s</code>\n\nТеперь отправьте готовый текст, ответьте на него командой:\n<code>/compensation_set_message %s</code>",
+		html.EscapeString(campaign.ID), campaign.Days, campaign.ExpiresAt.In(time.Local).Format("02.01.2006 15:04 MST"), html.EscapeString(campaign.ID),
+	)
+	sendCompensationAdminText(bot, msg.Chat.ID, text)
+}
+
+func handleCompensationSetMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	if !isAdmin(msg.From.ID) {
+		sendCompensationAdminText(bot, msg.Chat.ID, "⛔️ Только для админа")
+		return
+	}
+	id, err := normalizeCompensationID(msg.CommandArguments())
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ "+html.EscapeString(err.Error()))
+		return
+	}
+	if msg.ReplyToMessage == nil || strings.TrimSpace(msg.ReplyToMessage.Text) == "" {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Ответьте этой командой на готовое текстовое сообщение для рассылки")
+		return
+	}
+	store, err := getCompensationStore()
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ "+html.EscapeString(err.Error()))
+		return
+	}
+	if err := store.SetCompensationCampaignMessage(id, msg.ReplyToMessage.Chat.ID, msg.ReplyToMessage.MessageID); err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Не удалось сохранить сообщение: <code>"+html.EscapeString(err.Error())+"</code>")
+		return
+	}
+	sendCompensationAdminText(bot, msg.Chat.ID, fmt.Sprintf("✅ Сообщение сохранено для <code>%s</code>\n\nПроверьте его командой:\n<code>/compensation_test %s</code>", html.EscapeString(id), html.EscapeString(id)))
+}
+
+func handleCompensationTest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	if !isAdmin(msg.From.ID) {
+		sendCompensationAdminText(bot, msg.Chat.ID, "⛔️ Только для админа")
+		return
+	}
+	id, err := normalizeCompensationID(msg.CommandArguments())
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ "+html.EscapeString(err.Error()))
+		return
+	}
+	store, err := getCompensationStore()
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ "+html.EscapeString(err.Error()))
+		return
+	}
+	campaign, err := store.GetCompensationCampaign(id)
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Кампания не найдена: <code>"+html.EscapeString(err.Error())+"</code>")
+		return
+	}
+	if campaign.SourceMessageID <= 0 || campaign.SourceChatID == 0 {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Сначала задайте сообщение кампании")
+		return
+	}
+	if err := sendCompensationCopy(bot, msg.From.ID, campaign, true); err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Тестовая отправка не удалась: <code>"+html.EscapeString(err.Error())+"</code>")
+		return
+	}
+	sendCompensationAdminText(bot, msg.Chat.ID, fmt.Sprintf("✅ Тест отправлен. Тестовая кнопка ничего не начисляет.\n\nДля запуска:\n<code>/compensation_send %s confirm</code>", html.EscapeString(id)))
+}
+
+func handleCompensationSend(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	if !isAdmin(msg.From.ID) {
+		sendCompensationAdminText(bot, msg.Chat.ID, "⛔️ Только для админа")
+		return
+	}
+	parts := strings.Fields(msg.CommandArguments())
+	if len(parts) != 2 || strings.ToLower(parts[1]) != "confirm" {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Для запуска требуется подтверждение:\n<code>/compensation_send ID confirm</code>")
+		return
+	}
+	id, err := normalizeCompensationID(parts[0])
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ "+html.EscapeString(err.Error()))
+		return
+	}
+	store, err := getCompensationStore()
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ "+html.EscapeString(err.Error()))
+		return
+	}
+	campaign, err := store.GetCompensationCampaign(id)
+	if err != nil {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Кампания не найдена: <code>"+html.EscapeString(err.Error())+"</code>")
+		return
+	}
+	if campaign.SourceMessageID <= 0 || campaign.SourceChatID == 0 {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Сначала задайте сообщение кампании")
+		return
+	}
+	if !time.Now().UTC().Before(campaign.ExpiresAt.UTC()) {
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Срок кампании уже истёк")
+		return
+	}
+	if _, loaded := compensationSends.LoadOrStore(id, struct{}{}); loaded {
+		sendCompensationAdminText(bot, msg.Chat.ID, "⚠️ Эта кампания уже рассылается")
+		return
+	}
+	recipients, err := store.GetPendingCompensationRecipients(id)
+	if err != nil {
+		compensationSends.Delete(id)
+		sendCompensationAdminText(bot, msg.Chat.ID, "❌ Не удалось получить получателей: <code>"+html.EscapeString(err.Error())+"</code>")
+		return
+	}
+	if len(recipients) == 0 {
+		compensationSends.Delete(id)
+		sendCompensationAdminText(bot, msg.Chat.ID, "✅ Все доступные получатели уже обработаны")
+		return
+	}
+	progress := sendCompensationAdminText(bot, msg.Chat.ID, fmt.Sprintf("Запускаю кампанию <code>%s</code>...\nОсталось доставить: <b>%d</b>", html.EscapeString(id), len(recipients)))
+
+	go func() {
+		defer compensationSends.Delete(id)
+		delivered, failed := 0, 0
+		lastEdit := time.Now().Add(-time.Minute)
+		var firstErrors []string
+		for index, rawID := range recipients {
+			targetID, parseErr := strconv.ParseInt(rawID, 10, 64)
+			if parseErr != nil {
+				failed++
+				continue
+			}
+			if sendErr := sendCompensationCopy(bot, targetID, campaign, false); sendErr != nil {
+				failed++
+				if len(firstErrors) < 5 {
+					firstErrors = append(firstErrors, fmt.Sprintf("%s: %s", rawID, sendErr.Error()))
+				}
+				log.Printf("[compensation] delivery failed campaign=%s user=%s err=%v", id, rawID, sendErr)
+			} else if markErr := store.MarkCompensationDelivered(id, rawID, time.Now()); markErr != nil {
+				failed++
+				if len(firstErrors) < 5 {
+					firstErrors = append(firstErrors, fmt.Sprintf("%s: delivery marker: %s", rawID, markErr.Error()))
+				}
+				log.Printf("[compensation] delivery marker failed campaign=%s user=%s err=%v", id, rawID, markErr)
+			} else {
+				delivered++
+			}
+
+			processed := index + 1
+			if progress.MessageID > 0 && (processed%100 == 0 || time.Since(lastEdit) >= 15*time.Second) {
+				editCompensationAdminText(bot, msg.Chat.ID, progress.MessageID, fmt.Sprintf(
+					"Рассылка <code>%s</code>...\nОбработано: <b>%d/%d</b>\nДоставлено: <b>%d</b>\nОшибок: <b>%d</b>",
+					html.EscapeString(id), processed, len(recipients), delivered, failed,
+				))
+				lastEdit = time.Now()
+			}
+			time.Sleep(40 * time.Millisecond)
+		}
+
+		finalText := fmt.Sprintf("✅ <b>Рассылка завершена</b>\nкампания: <code>%s</code>\nобработано: <b>%d</b>\nдоставлено: <b>%d</b>\nошибок: <b>%d</b>", html.EscapeString(id), len(recipients), delivered, failed)
+		if len(firstErrors) > 0 {
+			finalText += "\n\nПервые ошибки:\n<code>" + html.EscapeString(strings.Join(firstErrors, "\n")) + "</code>"
+		}
+		if progress.MessageID > 0 {
+			editCompensationAdminText(bot, msg.Chat.ID, progress.MessageID, finalText)
+		} else {
+			sendCompensationAdminText(bot, msg.Chat.ID, finalText)
+		}
+	}()
+}
+
+func handleCompensationClaim(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession, xrCfg *xraySettings) {
+	id, err := normalizeCompensationID(strings.TrimPrefix(cq.Data, "comp_claim:"))
+	if err != nil {
+		ackCallback(bot, cq, "некорректная кампания")
+		return
+	}
+	store, err := getCompensationStore()
+	if err != nil {
+		ackCallback(bot, cq, "бонус временно недоступен")
+		return
+	}
+	userID := strconv.FormatInt(cq.From.ID, 10)
+	result, err := store.ClaimCompensation(id, userID, time.Now())
+	if err != nil {
+		log.Printf("[compensation] claim failed campaign=%s user=%s err=%v", id, userID, err)
+		ackCallback(bot, cq, "не удалось начислить бонус")
+		return
+	}
+
+	confirmation := fmt.Sprintf(
+		"<tg-emoji emoji-id=\"5346325906526868503\">✅</tg-emoji> <b>компенсация получена</b>\n\nк вашему доступу добавлен <b>+%d дн.</b>",
+		result.Days,
+	)
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("профиль", "nav_status")),
+	)
+
+	switch result.Status {
+	case "already_claimed":
+		_ = updateSessionText(bot, cq.Message.Chat.ID, session, stateMenu, confirmation, "HTML", keyboard)
+		ackCallback(bot, cq, "бонус уже получен")
+		return
+	case "expired":
+		_ = updateSessionText(bot, cq.Message.Chat.ID, session, stateMenu, "срок получения компенсации закончился.", "HTML", mainMenuInlineKeyboard())
+		ackCallback(bot, cq, "срок кампании закончился")
+		return
+	case "not_found", "ineligible":
+		_ = updateSessionText(bot, cq.Message.Chat.ID, session, stateMenu, "эта компенсация недоступна для вашего аккаунта.", "HTML", mainMenuInlineKeyboard())
+		ackCallback(bot, cq, "компенсация недоступна")
+		return
+	case "claimed":
+		// ClaimCompensation already committed the idempotent DB grant. Xray is
+		// synchronized once after that commit so repeated button presses cannot add days twice.
+		_, syncErr := ensureXrayAccess(xrCfg, userID, fallbackEmail(userID), result.Days, true)
+		if syncErr != nil {
+			_ = store.SetCompensationSyncResult(id, userID, false, syncErr.Error())
+			log.Printf("[compensation] xray sync failed campaign=%s user=%s days=%d err=%v", id, userID, result.Days, syncErr)
+			confirmation += "\n\nбонус сохранён, но обновление VPN задерживается. Если срок не изменится, обратитесь в поддержку."
+			keyboard = tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("поддержка", "nav_support")),
+				tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("профиль", "nav_status")),
+			)
+		} else if markErr := store.SetCompensationSyncResult(id, userID, true, ""); markErr != nil {
+			log.Printf("[compensation] sync marker failed campaign=%s user=%s err=%v", id, userID, markErr)
+		}
+		if err := updateSessionText(bot, cq.Message.Chat.ID, session, stateMenu, confirmation, "HTML", keyboard); err != nil {
+			log.Printf("[compensation] confirmation edit failed campaign=%s user=%s err=%v", id, userID, err)
+		}
+		sendUserNotificationAdminLog(bot, cq.From.ID, cq.From.UserName, fmt.Sprintf("компенсация %s получена: +%d дн.", id, result.Days))
+		ackCallback(bot, cq, "бонус начислен")
+		return
+	default:
+		log.Printf("[compensation] unexpected claim status campaign=%s user=%s status=%s", id, userID, result.Status)
+		ackCallback(bot, cq, "не удалось начислить бонус")
+	}
 }
 
 func parseCreateAlias(args string) (string, error) {
@@ -4836,7 +5183,11 @@ func handleAdminHelp(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"<code>/notify text</code> — массовая рассылка\n" +
 		"<code>/notify_test text</code> — тест рассылки себе\n" +
 		"<code>/notify_user userID text</code> — отправить одному пользователю\n" +
-		"<code>/notify_sleep</code> — рассылка спящим пользователям"
+		"<code>/notify_sleep</code> — рассылка спящим пользователям\n" +
+		"<code>/compensation_create ID days valid_days</code> — создать компенсацию\n" +
+		"<code>/compensation_set_message ID</code> — сохранить сообщение из reply\n" +
+		"<code>/compensation_test ID</code> — проверить сообщение без начисления\n" +
+		"<code>/compensation_send ID confirm</code> — запустить или продолжить рассылку"
 
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ParseMode = "HTML"
@@ -6165,6 +6516,14 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleRemoveDays(bot, msg, xrCfg)
 		case "grant_active_days":
 			handleGrantActiveDays(bot, msg, xrCfg)
+		case "compensation_create":
+			handleCompensationCreate(bot, msg)
+		case "compensation_set_message":
+			handleCompensationSetMessage(bot, msg)
+		case "compensation_test":
+			handleCompensationTest(bot, msg)
+		case "compensation_send":
+			handleCompensationSend(bot, msg)
 		case "wipeuser":
 			handleWipeUser(bot, msg, xrCfg)
 		case "sync_inbounds":
@@ -6611,6 +6970,12 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	}
 
 	switch {
+	case strings.HasPrefix(data, "comp_preview:"):
+		ackCallback(bot, cq, "тест: реального начисления нет")
+		return
+	case strings.HasPrefix(data, "comp_claim:"):
+		handleCompensationClaim(bot, cq, session, xrCfg)
+		return
 	case data == "nav_menu":
 		_ = showMainMenu(bot, chatID, session)
 	case data == "nav_get_vpn":
@@ -8823,6 +9188,13 @@ func sendMessageToAdmin(text string, username string, bot *tgbotapi.BotAPI, id i
 }
 
 func getActionName(data string) string {
+	if strings.HasPrefix(data, "comp_claim:") {
+		return "🎁 забрать компенсацию"
+	}
+	if strings.HasPrefix(data, "comp_preview:") {
+		return "тест кнопки компенсации"
+	}
+
 	actionMap := map[string]string{
 		"nav_menu":         "🏠 меню",
 		"nav_get_vpn":      "🔌 подключить VPN",

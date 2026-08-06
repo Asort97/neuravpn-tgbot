@@ -18,6 +18,21 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+type CompensationCampaign struct {
+	ID              string
+	Days            int64
+	ExpiresAt       time.Time
+	EligibleBefore  time.Time
+	SourceChatID    int64
+	SourceMessageID int
+	CreatedAt       time.Time
+}
+
+type CompensationClaimResult struct {
+	Days   int64
+	Status string
+}
+
 // New creates a new Postgres-backed store.
 func New(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
@@ -165,6 +180,37 @@ CREATE TABLE IF NOT EXISTS users (
 			PRIMARY KEY (user_id, code)
 		);
 		CREATE INDEX IF NOT EXISTS idx_user_promocodes_user_id ON user_promocodes(user_id);
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS compensation_campaigns (
+			id TEXT PRIMARY KEY,
+			days BIGINT NOT NULL CHECK (days > 0),
+			expires_at TIMESTAMPTZ NOT NULL,
+			eligible_before TIMESTAMPTZ NOT NULL,
+			source_chat_id BIGINT,
+			source_message_id BIGINT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE TABLE IF NOT EXISTS compensation_claims (
+			campaign_id TEXT NOT NULL REFERENCES compensation_campaigns(id) ON DELETE CASCADE,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			synced_at TIMESTAMPTZ,
+			sync_error TEXT,
+			PRIMARY KEY (campaign_id, user_id)
+		);
+		CREATE TABLE IF NOT EXISTS compensation_deliveries (
+			campaign_id TEXT NOT NULL REFERENCES compensation_campaigns(id) ON DELETE CASCADE,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			delivered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (campaign_id, user_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_compensation_campaigns_expires_at
+			ON compensation_campaigns(expires_at);
 	`)
 	return err
 }
@@ -1179,6 +1225,204 @@ func (s *Store) GetAllUserIDs() ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+func (s *Store) CreateCompensationCampaign(id string, days int64, validForDays int) (*CompensationCampaign, error) {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" || days <= 0 || validForDays <= 0 {
+		return nil, fmt.Errorf("invalid compensation campaign")
+	}
+	now := time.Now().UTC()
+	campaign := &CompensationCampaign{
+		ID:             id,
+		Days:           days,
+		ExpiresAt:      now.Add(time.Duration(validForDays) * 24 * time.Hour),
+		EligibleBefore: now,
+		CreatedAt:      now,
+	}
+	_, err := s.pool.Exec(context.Background(), `
+		INSERT INTO compensation_campaigns
+			(id, days, expires_at, eligible_before, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+	`, campaign.ID, campaign.Days, campaign.ExpiresAt, campaign.EligibleBefore, campaign.CreatedAt)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate key") {
+			return nil, fmt.Errorf("campaign %s already exists", campaign.ID)
+		}
+		return nil, err
+	}
+	return campaign, nil
+}
+
+func (s *Store) SetCompensationCampaignMessage(id string, chatID int64, messageID int) error {
+	if chatID == 0 || messageID <= 0 {
+		return fmt.Errorf("invalid source message")
+	}
+	tag, err := s.pool.Exec(context.Background(), `
+		UPDATE compensation_campaigns
+		SET source_chat_id = $2, source_message_id = $3
+		WHERE id = $1
+	`, strings.ToLower(strings.TrimSpace(id)), chatID, messageID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("campaign not found")
+	}
+	return nil
+}
+
+func (s *Store) GetCompensationCampaign(id string) (*CompensationCampaign, error) {
+	var campaign CompensationCampaign
+	var sourceChatID *int64
+	var sourceMessageID *int64
+	err := s.pool.QueryRow(context.Background(), `
+		SELECT id, days, expires_at, eligible_before, source_chat_id, source_message_id, created_at
+		FROM compensation_campaigns
+		WHERE id = $1
+	`, strings.ToLower(strings.TrimSpace(id))).Scan(
+		&campaign.ID,
+		&campaign.Days,
+		&campaign.ExpiresAt,
+		&campaign.EligibleBefore,
+		&sourceChatID,
+		&sourceMessageID,
+		&campaign.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("campaign not found")
+		}
+		return nil, err
+	}
+	if sourceChatID != nil {
+		campaign.SourceChatID = *sourceChatID
+	}
+	if sourceMessageID != nil {
+		campaign.SourceMessageID = int(*sourceMessageID)
+	}
+	return &campaign, nil
+}
+
+func (s *Store) GetPendingCompensationRecipients(id string) ([]string, error) {
+	rows, err := s.pool.Query(context.Background(), `
+		SELECT u.id
+		FROM users u
+		JOIN compensation_campaigns c ON c.id = $1
+		LEFT JOIN compensation_deliveries d
+			ON d.campaign_id = c.id AND d.user_id = u.id
+		WHERE u.created_at <= c.eligible_before
+			AND u.id ~ '^[0-9]+$'
+			AND d.user_id IS NULL
+		ORDER BY u.id
+	`, strings.ToLower(strings.TrimSpace(id)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Store) MarkCompensationDelivered(campaignID, userID string, at time.Time) error {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	_, err := s.pool.Exec(context.Background(), `
+		INSERT INTO compensation_deliveries (campaign_id, user_id, delivered_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (campaign_id, user_id) DO NOTHING
+	`, strings.ToLower(strings.TrimSpace(campaignID)), strings.TrimSpace(userID), at.UTC())
+	return err
+}
+
+func (s *Store) ClaimCompensation(campaignID, userID string, at time.Time) (*CompensationClaimResult, error) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var days int64
+	var expiresAt, eligibleBefore time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT days, expires_at, eligible_before
+		FROM compensation_campaigns
+		WHERE id = $1
+		FOR SHARE
+	`, strings.ToLower(strings.TrimSpace(campaignID))).Scan(&days, &expiresAt, &eligibleBefore)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return &CompensationClaimResult{Status: "not_found"}, nil
+		}
+		return nil, err
+	}
+	if !at.UTC().Before(expiresAt.UTC()) {
+		return &CompensationClaimResult{Days: days, Status: "expired"}, nil
+	}
+
+	var createdAt time.Time
+	err = tx.QueryRow(ctx, `SELECT created_at FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&createdAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return &CompensationClaimResult{Days: days, Status: "ineligible"}, nil
+		}
+		return nil, err
+	}
+	if createdAt.After(eligibleBefore) {
+		return &CompensationClaimResult{Days: days, Status: "ineligible"}, nil
+	}
+
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO compensation_claims (campaign_id, user_id, claimed_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (campaign_id, user_id) DO NOTHING
+	`, strings.ToLower(strings.TrimSpace(campaignID)), userID, at.UTC())
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return &CompensationClaimResult{Days: days, Status: "already_claimed"}, nil
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE users
+		SET days = days + $2,
+			last_deduct = CASE WHEN days = 0 THEN NOW() ELSE last_deduct END,
+			updated_at = NOW()
+		WHERE id = $1
+	`, userID, days)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &CompensationClaimResult{Days: days, Status: "claimed"}, nil
+}
+
+func (s *Store) SetCompensationSyncResult(campaignID, userID string, synced bool, syncErr string) error {
+	var syncedAt interface{}
+	if synced {
+		syncedAt = time.Now().UTC()
+	}
+	_, err := s.pool.Exec(context.Background(), `
+		UPDATE compensation_claims
+		SET synced_at = $3, sync_error = NULLIF($4, '')
+		WHERE campaign_id = $1 AND user_id = $2
+	`, strings.ToLower(strings.TrimSpace(campaignID)), userID, syncedAt, strings.TrimSpace(syncErr))
+	return err
 }
 
 // --- Промокоды ---

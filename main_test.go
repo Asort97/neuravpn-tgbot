@@ -6,6 +6,44 @@ import (
 	"time"
 )
 
+func TestNormalizeCompensationID(t *testing.T) {
+	got, err := normalizeCompensationID(" Outage_Aug05 ")
+	if err != nil {
+		t.Fatalf("normalizeCompensationID returned error: %v", err)
+	}
+	if got != "outage_aug05" {
+		t.Fatalf("unexpected normalized id: %q", got)
+	}
+
+	for _, value := range []string{"", "campaign with spaces", "авария", "campaign/one"} {
+		if _, err := normalizeCompensationID(value); err == nil {
+			t.Fatalf("expected invalid id %q to fail", value)
+		}
+	}
+}
+
+func TestParseCompensationCreateArgs(t *testing.T) {
+	id, days, validForDays, err := parseCompensationCreateArgs("outage_aug05 1 7")
+	if err != nil {
+		t.Fatalf("parseCompensationCreateArgs returned error: %v", err)
+	}
+	if id != "outage_aug05" || days != 1 || validForDays != 7 {
+		t.Fatalf("unexpected parsed values: id=%q days=%d valid=%d", id, days, validForDays)
+	}
+
+	for _, args := range []string{
+		"outage_aug05 0 7",
+		"outage_aug05 1 0",
+		"outage_aug05 31 7",
+		"outage_aug05 1 31",
+		"outage_aug05 1",
+	} {
+		if _, _, _, err := parseCompensationCreateArgs(args); err == nil {
+			t.Fatalf("expected invalid args %q to fail", args)
+		}
+	}
+}
+
 func TestMergedSubscriptionCacheClonesMutableData(t *testing.T) {
 	key := "test-user|variant"
 	original := mergedSubscriptionCacheEntry{
