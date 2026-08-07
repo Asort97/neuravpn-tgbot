@@ -7404,13 +7404,24 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
 		if err := userStore.DisableAutopay(userIDStr); err != nil {
 			log.Printf("disable_autopay error user=%s: %v", userIDStr, err)
+			ackCallback(bot, cq, "не удалось отключить автопродление")
+			return
 		}
-		ackText = "автопродление отключено ❌"
-		if session.State == stateSettings {
-			handleProfileSettings(bot, cq, session)
-		} else {
-			handleStatus(bot, cq, session, xrCfg)
+		_, _, enabled, err := userStore.GetAutopay(userIDStr)
+		if err != nil {
+			log.Printf("disable_autopay verify error user=%s: %v", userIDStr, err)
+			ackCallback(bot, cq, "не удалось проверить автопродление")
+			return
 		}
+		if enabled {
+			log.Printf("disable_autopay verify failed user=%s: still enabled", userIDStr)
+			ackCallback(bot, cq, "автопродление не отключилось, попробуйте ещё раз")
+			return
+		}
+		log.Printf("[autopay] disabled user=%s", userIDStr)
+		ackCallback(bot, cq, "автопродление отключено ❌")
+		handleProfileSettings(bot, cq, session)
+		return
 
 	case data == "unbind_card":
 		// Показываем подтверждение: редактируем текущее сообщение
@@ -8473,7 +8484,9 @@ func handleProfileSettings(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, ses
 	})
 
 	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: kbRows}
-	_ = updateSessionTextRaw(bot, chatID, session, stateSettings, text, "HTML", kbRaw)
+	if err := updateSessionTextRaw(bot, chatID, session, stateSettings, text, "HTML", kbRaw); err != nil {
+		log.Printf("profile settings render failed user=%s: %v", userIDStr, err)
+	}
 }
 
 func mergedTrafficProfileBlock(userID string) string {
