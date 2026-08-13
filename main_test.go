@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+func TestMergedTrafficIsUnlimited(t *testing.T) {
+	if got := mergedTrafficLimitForUser("623290294"); got != 0 {
+		t.Fatalf("merged traffic limit must be unlimited (0), got %d", got)
+	}
+}
+
 func TestNormalizeCompensationID(t *testing.T) {
 	got, err := normalizeCompensationID(" Outage_Aug05 ")
 	if err != nil {

@@ -3017,22 +3017,13 @@ func trafficPackKeyboardRaw(chatID int64) rawInlineKeyboardMarkup {
 
 func handleBuyTraffic(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *UserSession) {
 	chatID := cq.Message.Chat.ID
-	userID := strconv.FormatInt(cq.From.ID, 10)
-	days, _ := userStore.GetDays(userID)
-	if days <= 0 {
-		ackCallback(bot, cq, "сначала купите доступ")
-		text := "докупка трафика доступна только при активном доступе к neuravpn.\n\nсначала перейдите в раздел «оплата» и купите подписку."
-		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
-			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
-			{rawCallbackButton("назад", "nav_status", "", "5264852846527941278")},
-		}}
-		_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, text, "HTML", kbRaw)
-		return
-	}
-
-	text := "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> докупить трафик\n\nбазовые <b>10 ГБ</b> белых списков обновляются каждый месяц.\nкупленный трафик переносится дальше, если не был потрачен."
-	_ = updateSessionTextRaw(bot, chatID, session, stateBuyTraffic, text, "HTML", trafficPackKeyboardRaw(chatID))
-	ackCallback(bot, cq, "выберите пакет")
+	text := "<tg-emoji emoji-id=\"5346325906526868503\">📶</tg-emoji> <b>трафик белых списков безлимитный</b>\n\nдокупать трафик больше не нужно."
+	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
+		{rawCallbackButton("профиль", "nav_status", "", "5343693752999383705")},
+		{rawCallbackButton("меню", "nav_menu", "", "5264852846527941278")},
+	}}
+	_ = updateSessionTextRaw(bot, chatID, session, stateStatus, text, "HTML", kbRaw)
+	ackCallback(bot, cq, "трафик теперь безлимитный")
 }
 
 const (
@@ -3820,8 +3811,8 @@ func mergedTrafficExtraForUser(userID string) int64 {
 	return extraBytes
 }
 
-func mergedTrafficLimitForUser(userID string) int64 {
-	return mergedBaseTrafficBytes + mergedTrafficExtraForUser(userID)
+func mergedTrafficLimitForUser(_ string) int64 {
+	return 0
 }
 
 func getMergedTrafficUsedBytes(cfg *xraySettings, client *xray.Client) (int64, error) {
@@ -4080,14 +4071,14 @@ func collectMergedTrafficUsers(cfg *xraySettings) (map[string]string, error) {
 	return users, nil
 }
 
-func runMergedTrafficSync(bot *tgbotapi.BotAPI, forceReset bool) (int, int, int) {
+func runMergedTrafficSync(_ *tgbotapi.BotAPI, _ bool) (int, int, int) {
 	users, err := collectMergedTrafficUsers(mergedXrayCfg)
 	if err != nil {
 		log.Printf("[merged-traffic] collect users failed: %v", err)
 		return 0, 0, 1
 	}
 	processed := 0
-	reset := 0
+	unlimited := 0
 	failed := 0
 	for userID, subID := range users {
 		if _, _, err := ensureMergedProviderClient(mergedXrayCfg, userID, subID, nil); err != nil {
@@ -4095,22 +4086,19 @@ func runMergedTrafficSync(bot *tgbotapi.BotAPI, forceReset bool) (int, int, int)
 			log.Printf("[merged-traffic] attach failed user=%s: %v", userID, err)
 			continue
 		}
-		status, err := reconcileMergedTrafficForUser(userID, forceReset)
-		if err != nil {
+		updated, updateFailed, err := updateMergedTrafficLimitForUser(mergedXrayCfg, userID, subID, false)
+		if err != nil || updateFailed > 0 {
 			failed++
-			log.Printf("[merged-traffic] sync failed user=%s: %v", userID, err)
+			log.Printf("[merged-traffic] unlimited sync failed user=%s failed=%d err=%v", userID, updateFailed, err)
 			continue
 		}
-		if status != nil && status.ClientFound {
-			processed++
-			if status.ResetDone {
-				reset++
-			}
-			maybeSendTrafficReminder(bot, status)
+		processed++
+		if updated > 0 {
+			unlimited++
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
-	return processed, reset, failed
+	return processed, unlimited, failed
 }
 
 func startMergedTrafficLoop(bot *tgbotapi.BotAPI) {
@@ -4118,13 +4106,13 @@ func startMergedTrafficLoop(bot *tgbotapi.BotAPI) {
 		return
 	}
 	go func() {
-		processed, reset, failed := runMergedTrafficSync(bot, false)
-		log.Printf("[merged-traffic] startup sync processed=%d reset=%d failed=%d", processed, reset, failed)
+		processed, unlimited, failed := runMergedTrafficSync(bot, false)
+		log.Printf("[merged-traffic] startup unlimited sync processed=%d updated=%d failed=%d", processed, unlimited, failed)
 		ticker := time.NewTicker(6 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			processed, reset, failed := runMergedTrafficSync(bot, false)
-			log.Printf("[merged-traffic] periodic sync processed=%d reset=%d failed=%d", processed, reset, failed)
+			processed, unlimited, failed := runMergedTrafficSync(bot, false)
+			log.Printf("[merged-traffic] periodic unlimited sync processed=%d updated=%d failed=%d", processed, unlimited, failed)
 		}
 	}()
 }
@@ -4174,9 +4162,9 @@ func handleMergedTrafficInitConfirm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message)
 		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "⛔️ Только для админа"))
 		return
 	}
-	_, _ = bot.Send(tgbotapi.NewMessage(chatID, "запускаю init: ставлю лимит 10ГБ + остаток и сбрасываю трафик..."))
-	processed, reset, failed := runMergedTrafficSync(bot, true)
-	text := fmt.Sprintf("merged traffic init завершён\nобработано: %d\nсброшено: %d\nошибок: %d", processed, reset, failed)
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, "выставляю безлимитный трафик всем merged-клиентам..."))
+	processed, updated, failed := runMergedTrafficSync(bot, true)
+	text := fmt.Sprintf("безлимитный трафик применён\nобработано: %d\nобновлено: %d\nошибок: %d", processed, updated, failed)
 	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
 }
 
@@ -4186,9 +4174,9 @@ func handleMergedTrafficSyncCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message)
 		_, _ = bot.Send(tgbotapi.NewMessage(chatID, "⛔️ Только для админа"))
 		return
 	}
-	_, _ = bot.Send(tgbotapi.NewMessage(chatID, "запускаю merged traffic sync..."))
-	processed, reset, failed := runMergedTrafficSync(bot, false)
-	text := fmt.Sprintf("merged traffic sync завершён\nобработано: %d\nмесячных сбросов: %d\nошибок: %d", processed, reset, failed)
+	_, _ = bot.Send(tgbotapi.NewMessage(chatID, "проверяю безлимитный трафик merged-клиентов..."))
+	processed, updated, failed := runMergedTrafficSync(bot, false)
+	text := fmt.Sprintf("проверка безлимитного трафика завершена\nобработано: %d\nобновлено: %d\nошибок: %d", processed, updated, failed)
 	_, _ = bot.Send(tgbotapi.NewMessage(chatID, text))
 }
 
@@ -5174,9 +5162,9 @@ func handleAdminHelp(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"<code>/migrate_users</code> — миграция активных пользователей в Xray\n" +
 		"<code>/migrate_expiry_from_old</code> — перенести сроки из старой панели\n" +
 		"<code>/mergedsub</code> — тест merged-подписки, только главный админ\n" +
-		"<code>/merged_traffic_preview</code> — предпросмотр трафика БС\n" +
-		"<code>/merged_traffic_init_confirm</code> — первичная инициализация трафика БС\n" +
-		"<code>/merged_traffic_sync</code> — синхронизация трафика БС\n" +
+		"<code>/merged_traffic_preview</code> — проверить текущие лимиты БС\n" +
+		"<code>/merged_traffic_init_confirm</code> — выставить безлимит всем merged-клиентам\n" +
+		"<code>/merged_traffic_sync</code> — проверить и восстановить безлимит БС\n" +
 		"<code>/merged_attach_inbounds</code> — привязать merged-клиентов к inbound\n" +
 		"<code>/create alias</code> — создать бессрочную подписку-алиас\n" +
 		"<code>/create_promocode CODE discount hours</code> — создать промокод\n" +
@@ -7298,41 +7286,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		ackCallback(bot, cq, "счёт создан")
 		return
 	case strings.HasPrefix(data, "traffic_pack_"):
-		id := strings.TrimPrefix(data, "traffic_pack_")
-		pack, ok := findTrafficPackForUser(chatID, id)
-		if !ok {
-			ackCallback(bot, cq, "пакет не найден")
-			return
-		}
-		session.PendingTrafficPackID = pack.ID
-		session.PendingPlanID = ""
-
-		userID := strconv.FormatInt(cq.From.ID, 10)
-		days, _ := userStore.GetDays(userID)
-		if days <= 0 {
-			ackCallback(bot, cq, "сначала купите доступ")
-			return
-		}
-		if email, _ := userStore.GetEmail(userID); strings.TrimSpace(email) == "" {
-			text := "📧 Для оплаты нужен e-mail для чека.\nОтправь e-mail следующим сообщением (пример: name@example.com).\n\n" +
-				"<b>Продолжи, введя e-mail.</b>"
-			kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
-				{
-					rawCallbackButton("назад", "nav_buy_traffic", "", "5264852846527941278"),
-					rawCallbackButton("меню", "nav_menu", "", "5346299917679757635"),
-				},
-			}}
-			_ = updateSessionTextRaw(bot, chatID, session, stateCollectEmail, text, "HTML", kbRaw)
-			ackCallback(bot, cq, "пришли e-mail")
-			return
-		}
-		if err := startPaymentForTrafficPack(bot, chatID, session, pack); err != nil {
-			log.Printf("startPaymentForTrafficPack error: %v", err)
-			_ = updateSessionText(bot, chatID, session, stateBuyTraffic, "Не удалось создать платёж.", "", mainMenuInlineKeyboard())
-			ackCallback(bot, cq, "ошибка оплаты")
-			return
-		}
-		ackCallback(bot, cq, "счёт создан")
+		handleBuyTraffic(bot, cq, session)
 		return
 	case strings.HasPrefix(data, "rate_"):
 		id := strings.TrimPrefix(data, "rate_")
@@ -8358,7 +8312,6 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	var accessBlock string
 	if days > 0 {
-		trafficBlock := mergedTrafficProfileBlock(userIDStr)
 		expTime := time.Time{}
 		if info != nil && !info.expireAt.IsZero() {
 			expTime = info.expireAt
@@ -8367,8 +8320,8 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 		}
 		expStr := formatExpiryUTC(expTime)
 		accessBlock = fmt.Sprintf(
-			"\n\nу вас есть доступ к neuravpn 🟢\nон активен ещё <b>%d</b> дней\nдо <code>%s</code>%s\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!",
-			days, expStr, trafficBlock,
+			"\n\nу вас есть доступ к neuravpn 🟢\nон активен ещё <b>%d</b> дней\nдо <code>%s</code>\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!",
+			days, expStr,
 		)
 	} else {
 		accessBlock = "\n\nу вас нет доступа к neuravpn 🔴\n\nесли хотите продлить доступ - переходите в раздел «оплата»\nтам все очень дешево!"
@@ -8389,7 +8342,6 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 	kbRaw := rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawCallbackButton("оплата", "nav_topup", "", "5344015205531686528")},
-			{rawCallbackButton("докупить трафик", "nav_buy_traffic", "", "5346325906526868503")},
 			{rawCallbackButton("настройки", "nav_settings", "", "5264991913274019640")},
 		},
 	}
@@ -8402,7 +8354,6 @@ func handleStatus(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *Use
 
 	kbRows := [][]tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("💰 оплата", "nav_topup")),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("📶 докупить трафик", "nav_buy_traffic")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("настройки", "nav_settings")),
 	}
 	kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("⬅️ меню", "nav_menu")))
