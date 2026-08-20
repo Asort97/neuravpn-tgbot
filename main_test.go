@@ -45,13 +45,23 @@ func TestParseMergedXrayNodeDefinitionsRejectsUnsafeNodes(t *testing.T) {
 		`[{"name":"missing-auth","host":"panel.example.com","inbound_ids":[1]}]`,
 		`[{"name":"missing-panel","api_token":"token","inbound_ids":[1]}]`,
 		`[{"name":"missing-server-address","host":"panel.example.com","api_token":"token","inbound_ids":[1]}]`,
-		`[{"name":"missing-server-port","host":"panel.example.com","api_token":"token","inbound_ids":[1],"server_address":"node.example.com"}]`,
 		`not-json`,
 	}
 	for _, raw := range tests {
 		if _, err := parseMergedXrayNodeDefinitions(raw); err == nil {
 			t.Fatalf("expected invalid config to fail: %s", raw)
 		}
+	}
+}
+
+func TestParseMergedXrayNodeDefinitionsAllowsMissingServerPort(t *testing.T) {
+	raw := `[{"name":"dynamic-ports","host":"panel.example.com","api_token":"token","inbound_ids":[443,444,445],"server_address":"node.example.com"}]`
+	nodes, err := parseMergedXrayNodeDefinitions(raw)
+	if err != nil {
+		t.Fatalf("parseMergedXrayNodeDefinitions returned error: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].ServerPort != 0 {
+		t.Fatalf("server_port must remain unset for dynamic inbound ports: %+v", nodes)
 	}
 }
 

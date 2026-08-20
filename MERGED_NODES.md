@@ -21,7 +21,12 @@ Required fields for every new node:
 - `panel_url`, or all three API fields: `host`, `port`, `web_base_path`;
 - either `api_token`, or both `username` and `password`;
 - `inbound_ids`: exact inbound IDs to bind on this panel;
-- `server_address` and `server_port`: public endpoint users must connect to.
+- `server_address`: public host or IP users must connect to.
+
+`server_port` is optional. It is only a fallback; for every Reality inbound the
+bot reads that inbound's actual listening port from 3x-ui and writes it into
+the generated VLESS link. For example, one node may use `server_port:443` as
+the fallback while its links correctly use ports `443`, `10001`, and `10002`.
 
 `server_name`, `public_key`, `short_id`, `spider_x`, and `fingerprint` are
 optional. When omitted, the bot reads Reality parameters from the first listed

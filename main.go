@@ -3259,8 +3259,8 @@ func parseMergedXrayNodeDefinitions(raw string) ([]mergedXrayNodeDefinition, err
 		if node.ServerAddress == "" {
 			return nil, fmt.Errorf("merged node %q must define server_address", node.Name)
 		}
-		if node.ServerPort <= 0 || node.ServerPort > 65535 {
-			return nil, fmt.Errorf("merged node %q must define a valid server_port", node.Name)
+		if node.ServerPort < 0 || node.ServerPort > 65535 {
+			return nil, fmt.Errorf("merged node %q has an invalid server_port", node.Name)
 		}
 		if node.APIToken == "" && (node.Username == "" || node.Password == "") {
 			return nil, fmt.Errorf("merged node %q must define api_token or username and password", node.Name)
