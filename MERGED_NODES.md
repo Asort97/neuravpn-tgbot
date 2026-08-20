@@ -7,7 +7,7 @@ To add any number of additional 3x-ui panels, set one single-line JSON array
 in the bot service environment:
 
 ```dotenv
-MERGED_XRAY_NODES_JSON=[{"name":"de","panel_url":"https://de-panel.example.com/secret/","api_token":"REPLACE_WITH_API_TOKEN","inbound_ids":[3,4],"server_address":"de.example.com","server_port":443}]
+MERGED_XRAY_NODES_JSON=[{"name":"de","panel_url":"https://de-panel.example.com/secret/","api_token":"REPLACE_WITH_API_TOKEN","inbound_ids":[3,4],"subscription_order":10,"server_address":"de.example.com","server_port":443}]
 ```
 
 Multiple nodes are separate objects in the same array:
@@ -27,6 +27,17 @@ Required fields for every new node:
 bot reads that inbound's actual listening port from 3x-ui and writes it into
 the generated VLESS link. For example, one node may use `server_port:443` as
 the fallback while its links correctly use ports `443`, `10001`, and `10002`.
+
+## Subscription order
+
+Use `subscription_order` to order complete nodes in the merged subscription:
+the lower non-zero number appears first. Nodes without this field keep their
+old order after explicitly ordered nodes. The order inside one node is exactly
+the order in `inbound_ids`.
+
+For the legacy white-list node, set `MERGED_XRAY_SUBSCRIPTION_ORDER`. For
+example, set the German node to `"subscription_order":10` and legacy white
+lists to `MERGED_XRAY_SUBSCRIPTION_ORDER=20` to show Germany first.
 
 `server_name`, `public_key`, `short_id`, `spider_x`, and `fingerprint` are
 optional. When omitted, the bot reads Reality parameters from the first listed

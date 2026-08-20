@@ -65,6 +65,23 @@ func TestParseMergedXrayNodeDefinitionsAllowsMissingServerPort(t *testing.T) {
 	}
 }
 
+func TestSortMergedProviderConfigsForSubscription(t *testing.T) {
+	configs := []*xraySettings{
+		{subscriptionOrder: 0},
+		{subscriptionOrder: 30},
+		{subscriptionOrder: 10},
+		{subscriptionOrder: 0},
+	}
+	sortMergedProviderConfigsForSubscription(configs)
+	got := []int{configs[0].subscriptionOrder, configs[1].subscriptionOrder, configs[2].subscriptionOrder, configs[3].subscriptionOrder}
+	want := []int{10, 30, 0, 0}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected subscription order: got %v, want %v", got, want)
+		}
+	}
+}
+
 func TestParseInboundIDs(t *testing.T) {
 	got := parseInboundIDs("5, 6, 5, broken, 0", 7)
 	if len(got) != 2 || got[0] != 5 || got[1] != 6 {

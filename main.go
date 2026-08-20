@@ -417,17 +417,18 @@ type notificationLogBatch struct {
 }
 
 type xraySettings struct {
-	client        *xray.XRayClient
-	inboundID     int
-	inboundIDs    []int
-	serverAddress string
-	serverPort    int
-	serverName    string
-	publicKey     string
-	shortID       string
-	spiderX       string
-	fingerprint   string
-	subBaseURL    string
+	client            *xray.XRayClient
+	inboundID         int
+	inboundIDs        []int
+	subscriptionOrder int
+	serverAddress     string
+	serverPort        int
+	serverName        string
+	publicKey         string
+	shortID           string
+	spiderX           string
+	fingerprint       string
+	subBaseURL        string
 }
 
 // mergedXrayNodeDefinition is the portable configuration for an additional
@@ -437,23 +438,24 @@ type xraySettings struct {
 // Example MERGED_XRAY_NODES_JSON value:
 // [{"name":"de","panel_url":"https://panel.example.com/secret/","api_token":"...","inbound_ids":[3,4],"server_address":"de.example.com","server_port":443}]
 type mergedXrayNodeDefinition struct {
-	Name          string `json:"name"`
-	PanelURL      string `json:"panel_url"`
-	Host          string `json:"host"`
-	Port          string `json:"port"`
-	WebBasePath   string `json:"web_base_path"`
-	Username      string `json:"username"`
-	Password      string `json:"password"`
-	APIToken      string `json:"api_token"`
-	InboundID     int    `json:"inbound_id"`
-	InboundIDs    []int  `json:"inbound_ids"`
-	ServerAddress string `json:"server_address"`
-	ServerPort    int    `json:"server_port"`
-	ServerName    string `json:"server_name"`
-	PublicKey     string `json:"public_key"`
-	ShortID       string `json:"short_id"`
-	SpiderX       string `json:"spider_x"`
-	Fingerprint   string `json:"fingerprint"`
+	Name              string `json:"name"`
+	PanelURL          string `json:"panel_url"`
+	Host              string `json:"host"`
+	Port              string `json:"port"`
+	WebBasePath       string `json:"web_base_path"`
+	Username          string `json:"username"`
+	Password          string `json:"password"`
+	APIToken          string `json:"api_token"`
+	InboundID         int    `json:"inbound_id"`
+	InboundIDs        []int  `json:"inbound_ids"`
+	SubscriptionOrder int    `json:"subscription_order"`
+	ServerAddress     string `json:"server_address"`
+	ServerPort        int    `json:"server_port"`
+	ServerName        string `json:"server_name"`
+	PublicKey         string `json:"public_key"`
+	ShortID           string `json:"short_id"`
+	SpiderX           string `json:"spider_x"`
+	Fingerprint       string `json:"fingerprint"`
 }
 
 type accessInfo struct {
@@ -3262,11 +3264,22 @@ func parseMergedXrayNodeDefinitions(raw string) ([]mergedXrayNodeDefinition, err
 		if node.ServerPort < 0 || node.ServerPort > 65535 {
 			return nil, fmt.Errorf("merged node %q has an invalid server_port", node.Name)
 		}
+		if node.SubscriptionOrder < 0 {
+			return nil, fmt.Errorf("merged node %q has an invalid subscription_order", node.Name)
+		}
 		if node.APIToken == "" && (node.Username == "" || node.Password == "") {
 			return nil, fmt.Errorf("merged node %q must define api_token or username and password", node.Name)
 		}
 	}
 	return nodes, nil
+}
+
+func parseEnvPositiveInt(key string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
 }
 
 func connectMergedXrayNode(node mergedXrayNodeDefinition, allowDynamicInbounds bool) (*xraySettings, error) {
@@ -3312,16 +3325,17 @@ func connectMergedXrayNode(node mergedXrayNodeDefinition, allowDynamicInbounds b
 	}
 
 	cfg := &xraySettings{
-		client:        client,
-		inboundID:     node.InboundID,
-		inboundIDs:    inboundIDs,
-		serverAddress: node.ServerAddress,
-		serverPort:    node.ServerPort,
-		serverName:    node.ServerName,
-		publicKey:     node.PublicKey,
-		shortID:       node.ShortID,
-		spiderX:       node.SpiderX,
-		fingerprint:   node.Fingerprint,
+		client:            client,
+		inboundID:         node.InboundID,
+		inboundIDs:        inboundIDs,
+		subscriptionOrder: node.SubscriptionOrder,
+		serverAddress:     node.ServerAddress,
+		serverPort:        node.ServerPort,
+		serverName:        node.ServerName,
+		publicKey:         node.PublicKey,
+		shortID:           node.ShortID,
+		spiderX:           node.SpiderX,
+		fingerprint:       node.Fingerprint,
 	}
 	if !testMode {
 		autoFillRealityFromPanel(cfg, inboundIDs)
@@ -3360,6 +3374,30 @@ func mergedProviderConfigs() []*xraySettings {
 		}
 	}
 	return configs
+}
+
+// mergedProviderConfigsForSubscription changes only the order in which links
+// are returned to clients. Synchronization keeps using mergedProviderConfigs.
+func mergedProviderConfigsForSubscription() []*xraySettings {
+	configs := append([]*xraySettings(nil), mergedProviderConfigs()...)
+	sortMergedProviderConfigsForSubscription(configs)
+	return configs
+}
+
+func sortMergedProviderConfigsForSubscription(configs []*xraySettings) {
+	sort.SliceStable(configs, func(i, j int) bool {
+		left, right := configs[i].subscriptionOrder, configs[j].subscriptionOrder
+		if left == right {
+			return false
+		}
+		if left == 0 {
+			return false
+		}
+		if right == 0 {
+			return true
+		}
+		return left < right
+	})
 }
 
 func main() {
@@ -3466,23 +3504,24 @@ func main() {
 	mergedInboundID, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_ID")))
 	mergedServerPort, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_PORT")))
 	legacyMergedNode := mergedXrayNodeDefinition{
-		Name:          "legacy",
-		PanelURL:      strings.TrimSpace(os.Getenv("MERGED_XRAY_PANEL_URL")),
-		Host:          strings.TrimSpace(os.Getenv("MERGED_XRAY_HOST")),
-		Port:          strings.TrimSpace(os.Getenv("MERGED_XRAY_PORT")),
-		WebBasePath:   strings.TrimSpace(os.Getenv("MERGED_XRAY_WEB_BASE_PATH")),
-		Username:      strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME")),
-		Password:      strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD")),
-		APIToken:      strings.TrimSpace(os.Getenv("MERGED_XRAY_API_TOKEN")),
-		InboundID:     mergedInboundID,
-		InboundIDs:    parseInboundIDs(os.Getenv("MERGED_XRAY_INBOUND_IDS"), mergedInboundID),
-		ServerAddress: strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_ADDRESS")),
-		ServerPort:    mergedServerPort,
-		ServerName:    strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_NAME")),
-		PublicKey:     strings.TrimSpace(os.Getenv("MERGED_XRAY_PUBLIC_KEY")),
-		ShortID:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SHORT_ID")),
-		SpiderX:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SPIDER_X")),
-		Fingerprint:   strings.TrimSpace(os.Getenv("MERGED_XRAY_FINGERPRINT")),
+		Name:              "legacy",
+		PanelURL:          strings.TrimSpace(os.Getenv("MERGED_XRAY_PANEL_URL")),
+		Host:              strings.TrimSpace(os.Getenv("MERGED_XRAY_HOST")),
+		Port:              strings.TrimSpace(os.Getenv("MERGED_XRAY_PORT")),
+		WebBasePath:       strings.TrimSpace(os.Getenv("MERGED_XRAY_WEB_BASE_PATH")),
+		Username:          strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME")),
+		Password:          strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD")),
+		APIToken:          strings.TrimSpace(os.Getenv("MERGED_XRAY_API_TOKEN")),
+		InboundID:         mergedInboundID,
+		InboundIDs:        parseInboundIDs(os.Getenv("MERGED_XRAY_INBOUND_IDS"), mergedInboundID),
+		SubscriptionOrder: parseEnvPositiveInt("MERGED_XRAY_SUBSCRIPTION_ORDER"),
+		ServerAddress:     strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_ADDRESS")),
+		ServerPort:        mergedServerPort,
+		ServerName:        strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_NAME")),
+		PublicKey:         strings.TrimSpace(os.Getenv("MERGED_XRAY_PUBLIC_KEY")),
+		ShortID:           strings.TrimSpace(os.Getenv("MERGED_XRAY_SHORT_ID")),
+		SpiderX:           strings.TrimSpace(os.Getenv("MERGED_XRAY_SPIDER_X")),
+		Fingerprint:       strings.TrimSpace(os.Getenv("MERGED_XRAY_FINGERPRINT")),
 	}
 	if legacyMergedNode.PanelURL != "" || legacyMergedNode.Host != "" {
 		cfg, err := connectMergedXrayNode(legacyMergedNode, true)
@@ -4891,7 +4930,7 @@ func appendUniqueVLESSLinks(target []string, seen map[string]struct{}, links []s
 }
 
 func buildAllMergedProviderLinks(userID, subID string, primaryInfo *accessInfo, readOnly bool) ([]string, error) {
-	configs := mergedProviderConfigs()
+	configs := mergedProviderConfigsForSubscription()
 	if len(configs) == 0 {
 		return nil, fmt.Errorf("merged xray is not configured")
 	}
