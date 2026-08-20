@@ -3929,14 +3929,20 @@ func missingInboundIDs(current []int, required []int) []int {
 			seen[id] = struct{}{}
 		}
 	}
+	missingSeen := make(map[int]struct{}, len(required))
 	var missing []int
 	for _, id := range required {
 		if id <= 0 {
 			continue
 		}
-		if _, ok := seen[id]; !ok {
-			missing = append(missing, id)
+		if _, exists := seen[id]; exists {
+			continue
 		}
+		if _, exists := missingSeen[id]; exists {
+			continue
+		}
+		missingSeen[id] = struct{}{}
+		missing = append(missing, id)
 	}
 	return missing
 }
@@ -4796,7 +4802,10 @@ func buildMergedProviderLinksWithPrimaryInfo(cfg *xraySettings, userID, subID st
 	return links, nil
 }
 
-var errMergedProviderClientNotFound = errors.New("merged provider client not found")
+var (
+	errMergedProviderClientNotFound   = errors.New("merged provider client not found")
+	errMergedProviderClientIncomplete = errors.New("merged provider client has missing inbound attachments")
+)
 
 // buildMergedProviderLinksReadOnly reads the 3x-ui client record directly by
 // email and loads inbound settings once. It intentionally does not update the
@@ -4847,6 +4856,12 @@ func buildMergedProviderLinksReadOnly(cfg *xraySettings, userID, subID string) (
 		if inboundID > 0 {
 			linked[inboundID] = struct{}{}
 		}
+	}
+	if missing := missingInboundIDs(linkedInboundIDs, configuredInboundIDs); len(missing) > 0 {
+		// The subscription endpoint is normally read-only. Signal the caller to
+		// run the existing synchronization path once, so a newly configured
+		// inbound is attached before links are returned.
+		return nil, errMergedProviderClientIncomplete
 	}
 	var linkInboundIDs []int
 	for _, inboundID := range configuredInboundIDs {
@@ -4975,7 +4990,8 @@ func buildAllMergedProviderLinks(userID, subID string, primaryInfo *accessInfo, 
 	if readOnly {
 		var missing []int
 		for index, result := range results {
-			if errors.Is(result.err, errMergedProviderClientNotFound) {
+			if errors.Is(result.err, errMergedProviderClientNotFound) ||
+				errors.Is(result.err, errMergedProviderClientIncomplete) {
 				missing = append(missing, index)
 			}
 		}

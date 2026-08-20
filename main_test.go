@@ -93,6 +93,13 @@ func TestParseInboundIDs(t *testing.T) {
 	}
 }
 
+func TestMissingInboundIDs(t *testing.T) {
+	got := missingInboundIDs([]int{1}, []int{1, 2, 2})
+	if len(got) != 1 || got[0] != 2 {
+		t.Fatalf("unexpected missing inbound IDs: %v", got)
+	}
+}
+
 func TestNormalizeCompensationID(t *testing.T) {
 	got, err := normalizeCompensationID(" Outage_Aug05 ")
 	if err != nil {
