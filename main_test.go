@@ -12,6 +12,60 @@ func TestMergedTrafficIsUnlimited(t *testing.T) {
 	}
 }
 
+func TestParseMergedXrayNodeDefinitions(t *testing.T) {
+	raw := `[
+		{
+			"name":"ru-extra",
+			"panel_url":"https://panel.example.com/secret/",
+			"api_token":"token",
+			"inbound_ids":[7,7,9],
+			"server_address":"ru.example.com",
+			"server_port":443
+		}
+	]`
+	nodes, err := parseMergedXrayNodeDefinitions(raw)
+	if err != nil {
+		t.Fatalf("parseMergedXrayNodeDefinitions returned error: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("unexpected node count: %d", len(nodes))
+	}
+	node := nodes[0]
+	if node.Name != "ru-extra" || node.ServerAddress != "ru.example.com" || node.ServerPort != 443 {
+		t.Fatalf("unexpected node: %+v", node)
+	}
+	if len(node.InboundIDs) != 2 || node.InboundIDs[0] != 7 || node.InboundIDs[1] != 9 {
+		t.Fatalf("inbound IDs were not normalized: %v", node.InboundIDs)
+	}
+}
+
+func TestParseMergedXrayNodeDefinitionsRejectsUnsafeNodes(t *testing.T) {
+	tests := []string{
+		`[{"name":"missing-inbounds","host":"panel.example.com","api_token":"token"}]`,
+		`[{"name":"missing-auth","host":"panel.example.com","inbound_ids":[1]}]`,
+		`[{"name":"missing-panel","api_token":"token","inbound_ids":[1]}]`,
+		`[{"name":"missing-server-address","host":"panel.example.com","api_token":"token","inbound_ids":[1]}]`,
+		`[{"name":"missing-server-port","host":"panel.example.com","api_token":"token","inbound_ids":[1],"server_address":"node.example.com"}]`,
+		`not-json`,
+	}
+	for _, raw := range tests {
+		if _, err := parseMergedXrayNodeDefinitions(raw); err == nil {
+			t.Fatalf("expected invalid config to fail: %s", raw)
+		}
+	}
+}
+
+func TestParseInboundIDs(t *testing.T) {
+	got := parseInboundIDs("5, 6, 5, broken, 0", 7)
+	if len(got) != 2 || got[0] != 5 || got[1] != 6 {
+		t.Fatalf("unexpected inbound IDs: %v", got)
+	}
+	fallback := parseInboundIDs("", 7)
+	if len(fallback) != 1 || fallback[0] != 7 {
+		t.Fatalf("fallback inbound ID was not used: %v", fallback)
+	}
+}
+
 func TestNormalizeCompensationID(t *testing.T) {
 	got, err := normalizeCompensationID(" Outage_Aug05 ")
 	if err != nil {

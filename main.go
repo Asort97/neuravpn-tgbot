@@ -430,6 +430,32 @@ type xraySettings struct {
 	subBaseURL    string
 }
 
+// mergedXrayNodeDefinition is the portable configuration for an additional
+// 3x-ui panel. It is intentionally separate from xraySettings so production
+// credentials only live in environment configuration, not in Go code.
+//
+// Example MERGED_XRAY_NODES_JSON value:
+// [{"name":"de","panel_url":"https://panel.example.com/secret/","api_token":"...","inbound_ids":[3,4],"server_address":"de.example.com","server_port":443}]
+type mergedXrayNodeDefinition struct {
+	Name          string `json:"name"`
+	PanelURL      string `json:"panel_url"`
+	Host          string `json:"host"`
+	Port          string `json:"port"`
+	WebBasePath   string `json:"web_base_path"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	APIToken      string `json:"api_token"`
+	InboundID     int    `json:"inbound_id"`
+	InboundIDs    []int  `json:"inbound_ids"`
+	ServerAddress string `json:"server_address"`
+	ServerPort    int    `json:"server_port"`
+	ServerName    string `json:"server_name"`
+	PublicKey     string `json:"public_key"`
+	ShortID       string `json:"short_id"`
+	SpiderX       string `json:"spider_x"`
+	Fingerprint   string `json:"fingerprint"`
+}
+
 type accessInfo struct {
 	client   *xray.Client
 	expireAt time.Time
@@ -442,6 +468,7 @@ var (
 	userStore              DataStore
 	xrayCfg                *xraySettings
 	mergedXrayCfg          *xraySettings
+	mergedXrayCfgs         []*xraySettings
 	oldXrayCfg             *xraySettings
 	privacyURL             string
 	adminIDs               []int64
@@ -833,10 +860,8 @@ func createInfiniteAccessForAlias(cfg *xraySettings, alias string) (string, stri
 		return "", "", fmt.Errorf("клиент создан, но не найден при повторной проверке")
 	}
 
-	if mergedXrayCfg != nil && mergedXrayCfg.client != nil {
-		if _, _, err := ensureMergedProviderClient(mergedXrayCfg, alias, strings.TrimSpace(info.client.SubID), info); err != nil {
-			return "", "", err
-		}
+	if err := syncMergedAccessForUser(alias); err != nil {
+		return "", "", err
 	}
 
 	subURL := publicSubscriptionURLForUser(cfg, alias, info)
@@ -3158,6 +3183,185 @@ func createStarsInvoiceLink(bot *tgbotapi.BotAPI, plan RatePlan) (string, error)
 	return link, nil
 }
 
+func parseInboundIDs(raw string, fallback int) []int {
+	var ids []int
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		id, err := strconv.Atoi(value)
+		if err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 && fallback > 0 {
+		ids = append(ids, fallback)
+	}
+	return uniqueInboundIDs(ids)
+}
+
+func uniqueInboundIDs(ids []int) []int {
+	seen := make(map[int]struct{}, len(ids))
+	result := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func parseMergedXrayNodeDefinitions(raw string) ([]mergedXrayNodeDefinition, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	var nodes []mergedXrayNodeDefinition
+	if err := json.Unmarshal([]byte(raw), &nodes); err != nil {
+		return nil, fmt.Errorf("MERGED_XRAY_NODES_JSON must be a JSON array: %w", err)
+	}
+	for i := range nodes {
+		node := &nodes[i]
+		node.Name = strings.TrimSpace(node.Name)
+		if node.Name == "" {
+			node.Name = fmt.Sprintf("node-%d", i+1)
+		}
+		node.PanelURL = strings.TrimSpace(node.PanelURL)
+		node.Host = strings.TrimSpace(node.Host)
+		node.Port = strings.TrimSpace(node.Port)
+		node.WebBasePath = strings.TrimSpace(node.WebBasePath)
+		node.Username = strings.TrimSpace(node.Username)
+		node.Password = strings.TrimSpace(node.Password)
+		node.APIToken = strings.TrimSpace(node.APIToken)
+		node.ServerAddress = strings.TrimSpace(node.ServerAddress)
+		node.ServerName = strings.TrimSpace(node.ServerName)
+		node.PublicKey = strings.TrimSpace(node.PublicKey)
+		node.ShortID = strings.TrimSpace(node.ShortID)
+		node.SpiderX = strings.TrimSpace(node.SpiderX)
+		node.Fingerprint = strings.TrimSpace(node.Fingerprint)
+		node.InboundIDs = uniqueInboundIDs(node.InboundIDs)
+		if len(node.InboundIDs) == 0 && node.InboundID > 0 {
+			node.InboundIDs = []int{node.InboundID}
+		}
+		if len(node.InboundIDs) == 0 {
+			return nil, fmt.Errorf("merged node %q must define inbound_ids", node.Name)
+		}
+		if node.PanelURL == "" && node.Host == "" {
+			return nil, fmt.Errorf("merged node %q must define panel_url or host", node.Name)
+		}
+		if node.ServerAddress == "" {
+			return nil, fmt.Errorf("merged node %q must define server_address", node.Name)
+		}
+		if node.ServerPort <= 0 || node.ServerPort > 65535 {
+			return nil, fmt.Errorf("merged node %q must define a valid server_port", node.Name)
+		}
+		if node.APIToken == "" && (node.Username == "" || node.Password == "") {
+			return nil, fmt.Errorf("merged node %q must define api_token or username and password", node.Name)
+		}
+	}
+	return nodes, nil
+}
+
+func connectMergedXrayNode(node mergedXrayNodeDefinition, allowDynamicInbounds bool) (*xraySettings, error) {
+	host := strings.TrimSpace(node.Host)
+	port := strings.TrimSpace(node.Port)
+	basePath := strings.TrimSpace(node.WebBasePath)
+	if panelURL := strings.TrimSpace(node.PanelURL); panelURL != "" {
+		parsedHost, parsedPort, parsedBasePath, err := parseXrayPanelURL(panelURL)
+		if err != nil {
+			return nil, err
+		}
+		if host == "" {
+			host = parsedHost
+		}
+		if port == "" {
+			port = parsedPort
+		}
+		if basePath == "" {
+			basePath = parsedBasePath
+		}
+	}
+	if host == "" {
+		return nil, fmt.Errorf("panel host is empty")
+	}
+	if node.APIToken == "" && (node.Username == "" || node.Password == "") {
+		return nil, fmt.Errorf("panel credentials are incomplete")
+	}
+
+	inboundIDs := uniqueInboundIDs(node.InboundIDs)
+	if len(inboundIDs) == 0 && node.InboundID > 0 {
+		inboundIDs = []int{node.InboundID}
+	}
+	if len(inboundIDs) == 0 && !allowDynamicInbounds {
+		return nil, fmt.Errorf("inbound_ids are empty")
+	}
+
+	client := xray.New(node.Username, node.Password, host, port, basePath)
+	client.SetAPIToken(node.APIToken)
+	if !testMode {
+		if err := client.LoginToServer(); err != nil {
+			return nil, err
+		}
+	}
+
+	cfg := &xraySettings{
+		client:        client,
+		inboundID:     node.InboundID,
+		inboundIDs:    inboundIDs,
+		serverAddress: node.ServerAddress,
+		serverPort:    node.ServerPort,
+		serverName:    node.ServerName,
+		publicKey:     node.PublicKey,
+		shortID:       node.ShortID,
+		spiderX:       node.SpiderX,
+		fingerprint:   node.Fingerprint,
+	}
+	if !testMode {
+		autoFillRealityFromPanel(cfg, inboundIDs)
+	}
+	return cfg, nil
+}
+
+func addMergedProviderConfig(cfg *xraySettings) {
+	if cfg == nil || cfg.client == nil {
+		return
+	}
+	for _, existing := range mergedXrayCfgs {
+		if existing == cfg {
+			return
+		}
+	}
+	mergedXrayCfgs = append(mergedXrayCfgs, cfg)
+}
+
+func mergedProviderConfigs() []*xraySettings {
+	configs := make([]*xraySettings, 0, len(mergedXrayCfgs)+1)
+	seen := make(map[*xraySettings]struct{}, len(mergedXrayCfgs)+1)
+	for _, cfg := range mergedXrayCfgs {
+		if cfg == nil || cfg.client == nil {
+			continue
+		}
+		if _, exists := seen[cfg]; exists {
+			continue
+		}
+		seen[cfg] = struct{}{}
+		configs = append(configs, cfg)
+	}
+	if mergedXrayCfg != nil && mergedXrayCfg.client != nil {
+		if _, exists := seen[mergedXrayCfg]; !exists {
+			configs = append(configs, mergedXrayCfg)
+		}
+	}
+	return configs
+}
+
 func main() {
 	yookassaApiKey := os.Getenv("YOOKASSA_API_KEY")
 	yookassaStoreID := os.Getenv("YOOKASSA_STORE_ID")
@@ -3259,75 +3463,55 @@ func main() {
 
 	mergedSubSecret = strings.TrimSpace(os.Getenv("MERGED_SUB_SECRET"))
 	mergedSubPublicBaseURL = strings.TrimSpace(os.Getenv("MERGED_SUB_PUBLIC_BASE_URL"))
-	mergedXrayPanelURL := strings.TrimSpace(os.Getenv("MERGED_XRAY_PANEL_URL"))
-	mergedXrayHost := strings.TrimSpace(os.Getenv("MERGED_XRAY_HOST"))
-	mergedXrayPort := strings.TrimSpace(os.Getenv("MERGED_XRAY_PORT"))
-	mergedXrayBasePath := strings.TrimSpace(os.Getenv("MERGED_XRAY_WEB_BASE_PATH"))
-	if mergedXrayPanelURL != "" {
-		parsedHost, parsedPort, parsedBasePath, err := parseXrayPanelURL(mergedXrayPanelURL)
-		if err != nil {
-			log.Printf("⚠️ merged xray panel url parse failed: %v", err)
-		} else {
-			if mergedXrayHost == "" {
-				mergedXrayHost = parsedHost
-			}
-			if mergedXrayPort == "" {
-				mergedXrayPort = parsedPort
-			}
-			if mergedXrayBasePath == "" {
-				mergedXrayBasePath = parsedBasePath
-			}
-		}
-	}
-	mergedXrayUser := strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME"))
-	mergedXrayPass := strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD"))
-	mergedXrayToken := strings.TrimSpace(os.Getenv("MERGED_XRAY_API_TOKEN"))
 	mergedInboundID, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_ID")))
-	mergedInboundIDsStr := strings.TrimSpace(os.Getenv("MERGED_XRAY_INBOUND_IDS"))
-	var mergedInboundIDs []int
-	if mergedInboundIDsStr != "" {
-		for _, p := range strings.Split(mergedInboundIDsStr, ",") {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			if id, err := strconv.Atoi(p); err == nil {
-				mergedInboundIDs = append(mergedInboundIDs, id)
-			}
-		}
-	} else if mergedInboundID > 0 {
-		mergedInboundIDs = append(mergedInboundIDs, mergedInboundID)
-	}
 	mergedServerPort, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_PORT")))
-	if mergedXrayHost != "" && ((mergedXrayUser != "" && mergedXrayPass != "") || mergedXrayToken != "") {
-		mergedClient := xray.New(mergedXrayUser, mergedXrayPass, mergedXrayHost, mergedXrayPort, mergedXrayBasePath)
-		mergedClient.SetAPIToken(mergedXrayToken)
-		if !testMode {
-			if err := mergedClient.LoginToServer(); err != nil {
-				log.Printf("⚠️ merged xray login failed: %v", err)
-			} else {
-				cfg := &xraySettings{
-					client:        mergedClient,
-					inboundID:     mergedInboundID,
-					inboundIDs:    mergedInboundIDs,
-					serverAddress: strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_ADDRESS")),
-					serverPort:    mergedServerPort,
-					serverName:    strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_NAME")),
-					publicKey:     strings.TrimSpace(os.Getenv("MERGED_XRAY_PUBLIC_KEY")),
-					shortID:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SHORT_ID")),
-					spiderX:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SPIDER_X")),
-					fingerprint:   strings.TrimSpace(os.Getenv("MERGED_XRAY_FINGERPRINT")),
-				}
-				// Автоматически подтягиваем Reality-параметры прямо с панели,
-				// если они не заданы вручную в env.
-				autoFillRealityFromPanel(cfg, mergedInboundIDs)
-				mergedXrayCfg = cfg
-				log.Println("✅ Merged Xray server connected")
-			}
+	legacyMergedNode := mergedXrayNodeDefinition{
+		Name:          "legacy",
+		PanelURL:      strings.TrimSpace(os.Getenv("MERGED_XRAY_PANEL_URL")),
+		Host:          strings.TrimSpace(os.Getenv("MERGED_XRAY_HOST")),
+		Port:          strings.TrimSpace(os.Getenv("MERGED_XRAY_PORT")),
+		WebBasePath:   strings.TrimSpace(os.Getenv("MERGED_XRAY_WEB_BASE_PATH")),
+		Username:      strings.TrimSpace(os.Getenv("MERGED_XRAY_USERNAME")),
+		Password:      strings.TrimSpace(os.Getenv("MERGED_XRAY_PASSWORD")),
+		APIToken:      strings.TrimSpace(os.Getenv("MERGED_XRAY_API_TOKEN")),
+		InboundID:     mergedInboundID,
+		InboundIDs:    parseInboundIDs(os.Getenv("MERGED_XRAY_INBOUND_IDS"), mergedInboundID),
+		ServerAddress: strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_ADDRESS")),
+		ServerPort:    mergedServerPort,
+		ServerName:    strings.TrimSpace(os.Getenv("MERGED_XRAY_SERVER_NAME")),
+		PublicKey:     strings.TrimSpace(os.Getenv("MERGED_XRAY_PUBLIC_KEY")),
+		ShortID:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SHORT_ID")),
+		SpiderX:       strings.TrimSpace(os.Getenv("MERGED_XRAY_SPIDER_X")),
+		Fingerprint:   strings.TrimSpace(os.Getenv("MERGED_XRAY_FINGERPRINT")),
+	}
+	if legacyMergedNode.PanelURL != "" || legacyMergedNode.Host != "" {
+		cfg, err := connectMergedXrayNode(legacyMergedNode, true)
+		if err != nil {
+			log.Printf("⚠️ merged xray legacy node unavailable: %v", err)
 		} else {
-			mergedXrayCfg = &xraySettings{client: mergedClient, inboundID: mergedInboundID, inboundIDs: mergedInboundIDs}
-			log.Println("🧪 Skipping merged xray login in test mode")
+			mergedXrayCfg = cfg // Keeps all existing merged-traffic behaviour unchanged.
+			addMergedProviderConfig(cfg)
+			log.Println("✅ Merged Xray legacy server connected")
 		}
+	}
+
+	extraMergedNodes, err := parseMergedXrayNodeDefinitions(os.Getenv("MERGED_XRAY_NODES_JSON"))
+	if err != nil {
+		log.Printf("⚠️ merged xray nodes config ignored: %v", err)
+	}
+	for _, node := range extraMergedNodes {
+		cfg, connectErr := connectMergedXrayNode(node, false)
+		if connectErr != nil {
+			log.Printf("⚠️ merged xray node %q unavailable: %v", node.Name, connectErr)
+			continue
+		}
+		addMergedProviderConfig(cfg)
+		log.Printf("✅ Merged Xray node connected: %s inbounds=%v", node.Name, cfg.inboundIDs)
+	}
+	if mergedXrayCfg == nil && len(mergedXrayCfgs) > 0 {
+		// A JSON-only setup remains fully functional. The first node is used by
+		// legacy traffic methods, while access and subscriptions use every node.
+		mergedXrayCfg = mergedXrayCfgs[0]
 	}
 
 	// Setup old Xray connection for migration
@@ -3420,17 +3604,19 @@ func main() {
 		}
 	}()
 
-	if mergedXrayCfg != nil && mergedXrayCfg.client != nil {
-		go func() {
+	if configs := mergedProviderConfigs(); len(configs) > 0 {
+		go func(nodes []*xraySettings) {
 			for {
 				time.Sleep(1 * time.Hour)
-				if err := mergedXrayCfg.client.LoginToServer(); err != nil {
-					log.Printf("[MERGED XRAY] re-login failed: %v", err)
-				} else {
-					log.Printf("[MERGED XRAY] re-login success")
+				for index, cfg := range nodes {
+					if err := cfg.client.LoginToServer(); err != nil {
+						log.Printf("[MERGED XRAY] node=%d re-login failed: %v", index+1, err)
+					} else {
+						log.Printf("[MERGED XRAY] node=%d re-login success", index+1)
+					}
 				}
 			}
-		}()
+		}(configs)
 	}
 
 	// YooKassa webhook server
@@ -4425,7 +4611,11 @@ func disableMergedProviderClient(cfg *xraySettings, userID, subID string) error 
 
 func syncMergedAccessForUser(userID string) error {
 	userID = strings.TrimSpace(userID)
-	if userID == "" || mergedXrayCfg == nil || mergedXrayCfg.client == nil || xrayCfg == nil {
+	if userID == "" || xrayCfg == nil {
+		return nil
+	}
+	configs := mergedProviderConfigs()
+	if len(configs) == 0 {
 		return nil
 	}
 	info, err := ensureXrayAccessFresh(xrayCfg, userID, fallbackEmail(userID), 0, false)
@@ -4442,11 +4632,33 @@ func syncMergedAccessForUser(userID string) error {
 			subID = strings.TrimSpace(storedSubID)
 		}
 	}
-	if info == nil || info.client == nil {
-		return disableMergedProviderClient(mergedXrayCfg, userID, subID)
+	type syncResult struct {
+		index int
+		err   error
 	}
-	_, _, err = ensureMergedProviderClient(mergedXrayCfg, userID, subID, info)
-	return err
+	results := make(chan syncResult, len(configs))
+	for index, cfg := range configs {
+		go func(index int, cfg *xraySettings) {
+			if info == nil || info.client == nil {
+				results <- syncResult{index: index, err: disableMergedProviderClient(cfg, userID, subID)}
+				return
+			}
+			_, _, ensureErr := ensureMergedProviderClient(cfg, userID, subID, info)
+			results <- syncResult{index: index, err: ensureErr}
+		}(index, cfg)
+	}
+
+	var failures []string
+	for range configs {
+		result := <-results
+		if result.err != nil {
+			failures = append(failures, fmt.Sprintf("node %d: %v", result.index+1, result.err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("merged nodes sync failed: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func buildMergedProviderLinkWithPrimaryInfo(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (string, error) {
@@ -4661,6 +4873,120 @@ func buildMergedProviderLink(cfg *xraySettings, userID, subID string) (string, e
 
 func buildMergedProviderLinks(cfg *xraySettings, userID, subID string) ([]string, error) {
 	return buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, nil)
+}
+
+func appendUniqueVLESSLinks(target []string, seen map[string]struct{}, links []string) []string {
+	for _, link := range links {
+		link = strings.TrimSpace(link)
+		if link == "" {
+			continue
+		}
+		if _, exists := seen[link]; exists {
+			continue
+		}
+		seen[link] = struct{}{}
+		target = append(target, link)
+	}
+	return target
+}
+
+func buildAllMergedProviderLinks(userID, subID string, primaryInfo *accessInfo, readOnly bool) ([]string, error) {
+	configs := mergedProviderConfigs()
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("merged xray is not configured")
+	}
+
+	if !readOnly && primaryInfo == nil && xrayCfg != nil {
+		info, err := ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 0, false)
+		if err != nil {
+			return nil, err
+		}
+		primaryInfo = info
+	}
+
+	type nodeResult struct {
+		links []string
+		err   error
+	}
+	results := make([]nodeResult, len(configs))
+	resultCh := make(chan struct {
+		index int
+		value nodeResult
+	}, len(configs))
+	for index, cfg := range configs {
+		go func(index int, cfg *xraySettings) {
+			var links []string
+			var err error
+			if readOnly {
+				links, err = buildMergedProviderLinksReadOnly(cfg, userID, subID)
+			} else {
+				links, err = buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, primaryInfo)
+			}
+			resultCh <- struct {
+				index int
+				value nodeResult
+			}{index: index, value: nodeResult{links: links, err: err}}
+		}(index, cfg)
+	}
+	for range configs {
+		result := <-resultCh
+		results[result.index] = result.value
+	}
+
+	if readOnly {
+		var missing []int
+		for index, result := range results {
+			if errors.Is(result.err, errMergedProviderClientNotFound) {
+				missing = append(missing, index)
+			}
+		}
+		if len(missing) > 0 {
+			if primaryInfo == nil && xrayCfg != nil {
+				_, _, primaryInfo, _ = buildSubscriptionURLForUser(xrayCfg, userID)
+			}
+			if primaryInfo == nil || primaryInfo.client == nil {
+				for _, index := range missing {
+					results[index].err = fmt.Errorf("основная нода пользователя не найдена")
+				}
+			} else {
+				for _, index := range missing {
+					cfg := configs[index]
+					go func(index int, cfg *xraySettings) {
+						links, err := buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, primaryInfo)
+						resultCh <- struct {
+							index int
+							value nodeResult
+						}{index: index, value: nodeResult{links: links, err: err}}
+					}(index, cfg)
+				}
+				for range missing {
+					result := <-resultCh
+					results[result.index] = result.value
+				}
+			}
+		}
+	}
+
+	seen := make(map[string]struct{})
+	var allLinks []string
+	var failures []string
+	for index, result := range results {
+		if result.err != nil {
+			failures = append(failures, fmt.Sprintf("node %d: %v", index+1, result.err))
+			continue
+		}
+		allLinks = appendUniqueVLESSLinks(allLinks, seen, result.links)
+	}
+	if len(allLinks) > 0 {
+		if len(failures) > 0 {
+			log.Printf("[merged-sub] partial node failure user=%s: %s", userID, strings.Join(failures, "; "))
+		}
+		return allLinks, nil
+	}
+	if len(failures) == 0 {
+		return nil, fmt.Errorf("no merged links generated")
+	}
+	return nil, fmt.Errorf("all merged nodes unavailable: %s", strings.Join(failures, "; "))
 }
 
 func looksLikeSubscriptionText(s string) bool {
@@ -4941,15 +5267,7 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 		upstreamCh <- upstreamResult{body: body, headers: headers, statusCode: statusCode, err: fetchErr}
 	}()
 	go func() {
-		links, linksErr := buildMergedProviderLinksReadOnly(mergedXrayCfg, targetUserID, subID)
-		if errors.Is(linksErr, errMergedProviderClientNotFound) {
-			if primaryInfo == nil {
-				_, _, primaryInfo, linksErr = buildSubscriptionURLForUser(xrayCfg, targetUserID)
-			}
-			if linksErr == nil {
-				links, linksErr = buildMergedProviderLinksWithPrimaryInfo(mergedXrayCfg, targetUserID, subID, primaryInfo)
-			}
-		}
+		links, linksErr := buildAllMergedProviderLinks(targetUserID, subID, primaryInfo, true)
 		linksCh <- linksResult{links: links, err: linksErr}
 	}()
 
@@ -5087,9 +5405,9 @@ func handleMergedSubCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, primary
 		_, _ = bot.Send(m)
 		return
 	}
-	links, err := buildMergedProviderLinks(mergedXrayCfg, userID, subID)
+	links, err := buildAllMergedProviderLinks(userID, subID, nil, false)
 	if err != nil {
-		m := tgbotapi.NewMessage(chatID, "❌ Не удалось получить ноду второго сервера: "+html.EscapeString(err.Error()))
+		m := tgbotapi.NewMessage(chatID, "❌ Не удалось получить merged-ноды: "+html.EscapeString(err.Error()))
 		m.ParseMode = "HTML"
 		_, _ = bot.Send(m)
 		return
@@ -5491,8 +5809,8 @@ func handleWipeUser(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySett
 	} else {
 		report = append(report, wipeUserFromXray("основная панель", xrCfg, targetUserID)...)
 	}
-	if mergedXrayCfg != nil && mergedXrayCfg.client != nil {
-		report = append(report, wipeUserFromXray("merged панель", mergedXrayCfg, targetUserID)...)
+	for index, cfg := range mergedProviderConfigs() {
+		report = append(report, wipeUserFromXray(fmt.Sprintf("merged панель %d", index+1), cfg, targetUserID)...)
 	}
 
 	text := fmt.Sprintf("<b>wipe user <code>%s</code></b>\n\n%s", html.EscapeString(targetUserID), strings.Join(report, "\n"))
