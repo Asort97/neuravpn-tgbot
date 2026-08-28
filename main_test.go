@@ -182,7 +182,7 @@ func TestMergedSubscriptionCacheClonesMutableData(t *testing.T) {
 
 func TestMergedSubscriptionEntryFreshUsesShortTTLForPrimaryOnly(t *testing.T) {
 	now := time.Now()
-	merged := mergedSubscriptionCacheEntry{mergedStatus: "merged:2", cachedAt: now.Add(-time.Minute)}
+	merged := mergedSubscriptionCacheEntry{mergedStatus: "merged:2", cachedAt: now.Add(-14 * time.Second)}
 	if !mergedSubscriptionEntryFresh(merged, now) {
 		t.Fatal("merged entry should still be fresh")
 	}

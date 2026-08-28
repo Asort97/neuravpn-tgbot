@@ -100,7 +100,7 @@ var lastActionKey = make(map[int64]map[string]time.Time)
 var accessCache sync.Map // map[string]*accessInfo
 
 const (
-	mergedSubscriptionFreshTTL     = 2 * time.Minute
+	mergedSubscriptionFreshTTL     = 15 * time.Second
 	mergedSubscriptionStaleTTL     = 30 * time.Minute
 	mergedSubscriptionBuildTimeout = 20 * time.Second
 )
