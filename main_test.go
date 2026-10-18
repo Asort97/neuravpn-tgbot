@@ -1,10 +1,59 @@
 package main
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestMergedSubscriptionForwardsDeviceIdentity(t *testing.T) {
+	clientReq := httptest.NewRequest(http.MethodGet, "https://merged.example/sub?format=raw", nil)
+	want := map[string]string{
+		"X-HWID": "phone-123", "X-Device-OS": "Android", "X-Ver-OS": "16",
+		"X-Device-Model": "Pixel", "User-Agent": "Happ/test",
+	}
+	for key, value := range want {
+		clientReq.Header.Set(key, value)
+	}
+	clientReq.Header.Set("Authorization", "Bearer must-not-be-forwarded")
+	clientReq.Header.Set("Cookie", "private=must-not-be-forwarded")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for key, value := range want {
+			if got := r.Header.Get(key); got != value {
+				t.Errorf("header %s = %q, want %q", key, got, value)
+			}
+		}
+		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			t.Error("private authentication headers leaked to upstream")
+		}
+		if r.URL.Query().Get("format") != "raw" {
+			t.Error("subscription format query was lost")
+		}
+		w.Header().Set("X-Hwid-Active", "true")
+		_, _ = w.Write([]byte("subscription"))
+	}))
+	defer upstream.Close()
+	variant := mergedSubscriptionVariantFromRequest(clientReq)
+	template, err := variant.request(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, headers, status, err := fetchSubscriptionBody(context.Background(), upstream.URL, template)
+	if err != nil || status != http.StatusOK || string(body) != "subscription" || headers.Get("X-Hwid-Active") != "true" {
+		t.Fatalf("unexpected subscription response: status=%d body=%q headers=%v err=%v", status, body, headers, err)
+	}
+	firstKey := mergedSubscriptionCacheKey("same-user", variant)
+	clientReq.Header.Set("X-HWID", "phone-456")
+	if firstKey == mergedSubscriptionCacheKey("same-user", mergedSubscriptionVariantFromRequest(clientReq)) {
+		t.Fatal("different devices must not share cached subscriptions or in-flight builds")
+	}
+	clientReq.Header.Del("X-HWID")
+	if firstKey == mergedSubscriptionCacheKey("same-user", mergedSubscriptionVariantFromRequest(clientReq)) {
+		t.Fatal("requests without HWID must not share a device's subscription cache")
+	}
+}
 
 func TestMergedTrafficIsUnlimited(t *testing.T) {
 	if got := mergedTrafficLimitForUser("623290294"); got != 0 {

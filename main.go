@@ -5145,6 +5145,8 @@ func copySubscriptionHeaders(dst, src http.Header) {
 	}
 }
 
+var subscriptionDeviceHeaders = [...]string{"X-HWID", "X-Device-OS", "X-Ver-OS", "X-Device-Model"}
+
 func fetchSubscriptionBody(ctx context.Context, upstreamURL string, srcReq *http.Request) ([]byte, http.Header, int, error) {
 	if srcReq != nil && strings.TrimSpace(srcReq.URL.RawQuery) != "" {
 		sep := "?"
@@ -5159,6 +5161,11 @@ func fetchSubscriptionBody(ctx context.Context, upstreamURL string, srcReq *http
 	}
 	if srcReq != nil {
 		for _, key := range []string{"User-Agent", "Accept", "Accept-Language"} {
+			if value := strings.TrimSpace(srcReq.Header.Get(key)); value != "" {
+				req.Header.Set(key, value)
+			}
+		}
+		for _, key := range subscriptionDeviceHeaders {
 			if value := strings.TrimSpace(srcReq.Header.Get(key)); value != "" {
 				req.Header.Set(key, value)
 			}
@@ -5181,18 +5188,23 @@ type mergedSubscriptionRequestVariant struct {
 	userAgent      string
 	accept         string
 	acceptLanguage string
+	deviceHeaders  [len(subscriptionDeviceHeaders)]string
 }
 
 func mergedSubscriptionVariantFromRequest(r *http.Request) mergedSubscriptionRequestVariant {
 	if r == nil {
 		return mergedSubscriptionRequestVariant{}
 	}
-	return mergedSubscriptionRequestVariant{
+	variant := mergedSubscriptionRequestVariant{
 		rawQuery:       strings.TrimSpace(r.URL.RawQuery),
 		userAgent:      strings.TrimSpace(r.Header.Get("User-Agent")),
 		accept:         strings.TrimSpace(r.Header.Get("Accept")),
 		acceptLanguage: strings.TrimSpace(r.Header.Get("Accept-Language")),
 	}
+	for i, key := range subscriptionDeviceHeaders {
+		variant.deviceHeaders[i] = strings.TrimSpace(r.Header.Get(key))
+	}
+	return variant
 }
 
 func (v mergedSubscriptionRequestVariant) request(upstreamURL string) (*http.Request, error) {
@@ -5212,16 +5224,23 @@ func (v mergedSubscriptionRequestVariant) request(upstreamURL string) (*http.Req
 	if v.acceptLanguage != "" {
 		req.Header.Set("Accept-Language", v.acceptLanguage)
 	}
+	for i, key := range subscriptionDeviceHeaders {
+		if v.deviceHeaders[i] != "" {
+			req.Header.Set(key, v.deviceHeaders[i])
+		}
+	}
 	return req, nil
 }
 
 func mergedSubscriptionCacheKey(userID string, variant mergedSubscriptionRequestVariant) string {
-	variantHash := sha256.Sum256([]byte(strings.Join([]string{
+	parts := []string{
 		variant.rawQuery,
 		variant.userAgent,
 		variant.accept,
 		variant.acceptLanguage,
-	}, "\x00")))
+	}
+	parts = append(parts, variant.deviceHeaders[:]...)
+	variantHash := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return strings.TrimSpace(userID) + "|" + hex.EncodeToString(variantHash[:])
 }
 
