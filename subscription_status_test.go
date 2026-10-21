@@ -52,7 +52,7 @@ func TestSubscriptionStatusEndpointReadsPanelInsteadOfAccessCache(t *testing.T) 
 			t.Errorf("unexpected panel request: %s", r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "obj": []any{map[string]any{
-			"client":     map[string]any{"uuid": "test-client", "email": "42@happycat", "tgId": "42", "enable": true, "expiryTime": expiry},
+			"client":     map[string]any{"id": 123, "uuid": "test-client", "email": "42@happycat", "tgId": 42, "enable": true, "expiryTime": expiry},
 			"inboundIds": []int{1},
 		}}})
 	}))

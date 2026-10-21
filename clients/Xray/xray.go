@@ -572,7 +572,14 @@ func (x *XRayClient) GetSubscriptionClient(ctx context.Context, tgID string, inb
 		var response struct {
 			Success bool `json:"success"`
 			Obj     []struct {
-				Client Client `json:"client"`
+				Client struct {
+					UUID       string      `json:"uuid"`
+					Email      string      `json:"email"`
+					Enable     bool        `json:"enable"`
+					ExpiryTime int64       `json:"expiryTime"`
+					SubID      string      `json:"subId"`
+					TgID       interface{} `json:"tgId"`
+				} `json:"client"`
 			} `json:"obj"`
 		}
 		if err := json.Unmarshal(body, &response); err != nil {
@@ -582,7 +589,14 @@ func (x *XRayClient) GetSubscriptionClient(ctx context.Context, tgID string, inb
 			return nil, fmt.Errorf("invalid subscription client response")
 		}
 		for _, record := range response.Obj {
-			clients = append(clients, record.Client)
+			clients = append(clients, Client{
+				ID:         record.Client.UUID,
+				Email:      record.Client.Email,
+				Enable:     record.Client.Enable,
+				ExpiryTime: record.Client.ExpiryTime,
+				SubID:      record.Client.SubID,
+				TgID:       normalizeTgID(record.Client.TgID),
+			})
 		}
 	}
 	var best *Client
