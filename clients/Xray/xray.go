@@ -2,6 +2,7 @@ package xray
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -290,7 +291,17 @@ func (x *XRayClient) hasAPIToken() bool {
 
 // LoginToServer must be called before any other API calls.
 func (x *XRayClient) LoginToServer() error {
-	x.authMu.Lock()
+	return x.loginWithContext(context.Background())
+}
+
+func (x *XRayClient) loginWithContext(ctx context.Context) error {
+	for !x.authMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	defer x.authMu.Unlock()
 
 	if x.hasAPIToken() {
@@ -299,7 +310,7 @@ func (x *XRayClient) LoginToServer() error {
 
 	// 1. Fetch CSRF token for 3x-ui v3.0.0+
 	csrfUrl := fmt.Sprintf("%s/csrf-token", x.serverURL)
-	csrfReq, err := http.NewRequest("GET", csrfUrl, nil)
+	csrfReq, err := http.NewRequestWithContext(ctx, "GET", csrfUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -341,7 +352,7 @@ func (x *XRayClient) LoginToServer() error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		colorfulprint.PrintError("Request failed", err)
 		return err
@@ -434,12 +445,16 @@ func (x *XRayClient) doAPIRequest(method, url string, payload []byte, headers ma
 }
 
 func (x *XRayClient) doAPIRequestOnce(method, url string, payload []byte, headers map[string]string, allowRetry bool) (int, []byte, error) {
+	return x.doAPIRequestContext(context.Background(), method, url, payload, headers, allowRetry)
+}
+
+func (x *XRayClient) doAPIRequestContext(ctx context.Context, method, url string, payload []byte, headers map[string]string, allowRetry bool) (int, []byte, error) {
 	var bodyReader io.Reader
 	if payload != nil {
 		bodyReader = bytes.NewReader(payload)
 	}
 
-	req, err := http.NewRequest(method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -467,10 +482,10 @@ func (x *XRayClient) doAPIRequestOnce(method, url string, payload []byte, header
 
 	if allowRetry && shouldRetryAfterRelogin(resp.StatusCode, body) {
 		log.Printf("[XRAY] retry after re-login method=%s url=%s status=%d body=%s", method, url, resp.StatusCode, responseSnippet(body))
-		if err := x.LoginToServer(); err != nil {
+		if err := x.loginWithContext(ctx); err != nil {
 			return resp.StatusCode, body, fmt.Errorf("xray relogin failed: %w", err)
 		}
-		return x.doAPIRequestOnce(method, url, payload, headers, false)
+		return x.doAPIRequestContext(ctx, method, url, payload, headers, false)
 	}
 
 	return resp.StatusCode, body, nil
@@ -515,11 +530,80 @@ func (x *XRayClient) GetInboundById(id int) ([]Client, error) {
 	return settings.Clients, nil
 }
 
+// GetSubscriptionClient reads fresh panel state without downloading each inbound separately.
+// Older panels without the Telegram-ID endpoint fall back to one inbounds list request.
+func (x *XRayClient) GetSubscriptionClient(ctx context.Context, tgID string, inboundIDs []int) (*Client, error) {
+	if _, err := strconv.ParseInt(tgID, 10, 64); err != nil {
+		return nil, fmt.Errorf("invalid Telegram ID")
+	}
+	endpoint := fmt.Sprintf("%s/panel/api/clients/get/tgId/%s", x.serverURL, url.PathEscape(tgID))
+	code, body, err := x.doAPIRequestContext(ctx, http.MethodGet, endpoint, nil, map[string]string{"Accept": "application/json"}, true)
+	if err != nil {
+		return nil, err
+	}
+	var clients []Client
+	if isEndpointUnsupported(code) {
+		inbounds, err := x.getAllInboundsContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, inbound := range inbounds {
+			if len(inboundIDs) > 0 {
+				allowed := false
+				for _, id := range inboundIDs {
+					allowed = allowed || inbound.ID == id
+				}
+				if !allowed {
+					continue
+				}
+			} else if !inbound.Enable || inbound.Protocol != "vless" {
+				continue
+			}
+			var settings InboundSettings
+			if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+				return nil, fmt.Errorf("invalid inbound %d settings: %w", inbound.ID, err)
+			}
+			clients = append(clients, settings.Clients...)
+		}
+	} else {
+		if err := checkAPISuccess("get subscription client", code, body); err != nil {
+			return nil, err
+		}
+		var response struct {
+			Success bool `json:"success"`
+			Obj     []struct {
+				Client Client `json:"client"`
+			} `json:"obj"`
+		}
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, err
+		}
+		if !response.Success {
+			return nil, fmt.Errorf("invalid subscription client response")
+		}
+		for _, record := range response.Obj {
+			clients = append(clients, record.Client)
+		}
+	}
+	var best *Client
+	for i := range clients {
+		candidate := &clients[i]
+		if candidate.TgID == tgID && (best == nil || candidate.ExpiryTime > best.ExpiryTime) {
+			best = candidate
+		}
+	}
+	return best, nil
+}
+
 // GetAllInbounds retrieves all inbound objects from 3X-UI.
 func (x *XRayClient) GetAllInbounds() ([]InboundData, error) {
+	return x.getAllInboundsContext(context.Background())
+}
+
+func (x *XRayClient) getAllInboundsContext(ctx context.Context) ([]InboundData, error) {
 	url := fmt.Sprintf("%s/panel/api/inbounds/list", x.serverURL)
 
-	statusCode, body, err := x.doAPIRequest("GET", url, nil, map[string]string{"Accept": "application/json"})
+	statusCode, body, err := x.doAPIRequestContext(ctx, "GET", url, nil, map[string]string{"Accept": "application/json"}, true)
 	if err != nil {
 		colorfulprint.PrintError("Failed response", err)
 		return nil, err

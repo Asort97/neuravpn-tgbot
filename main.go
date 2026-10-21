@@ -5426,40 +5426,23 @@ func subscriptionStatusForClient(client *xray.Client, now time.Time) subscriptio
 }
 
 // Read fresh primary-panel state; users.days is a snapshot, not an expiry date.
-func readPrimarySubscriptionClient(cfg *xraySettings, userID string) (*xray.Client, error) {
+func readPrimarySubscriptionClient(ctx context.Context, cfg *xraySettings, userID string) (*xray.Client, error) {
 	if cfg == nil || cfg.client == nil {
 		return nil, errors.New("primary panel is not configured")
 	}
-	var subID string
-	if userStore != nil {
-		subID, _ = userStore.GetSubscriptionID(userID)
+	ids := cfg.inboundIDs
+	if len(ids) == 0 && cfg.inboundID > 0 {
+		ids = []int{cfg.inboundID}
 	}
-	client, _, err := cfg.client.GetClientRecordByEmail(fallbackEmail(userID))
-	if err == nil && client != nil && (client.TgID == userID || subID != "" && client.SubID == subID) {
-		return client, nil
-	}
-	ids, err := mergedInboundIDs(cfg)
-	if err != nil {
-		return nil, err
-	}
-	var best *xray.Client
-	for _, id := range ids {
-		candidate, scanErr := cfg.client.GetClientByTelegram(id, userID)
-		if scanErr != nil {
-			// A failed scan cannot establish that access expired or is absent.
-			return nil, scanErr
-		}
-		if candidate != nil && (best == nil || candidate.ExpiryTime > best.ExpiryTime) {
-			best = candidate
-		}
-	}
-	return best, nil
+	return cfg.client.GetSubscriptionClient(ctx, userID, ids)
 }
 
 func handleSubscriptionStatus(w http.ResponseWriter, r *http.Request, userID string) {
 	w.Header().Set("Cache-Control", "no-store, private")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	client, err := readPrimarySubscriptionClient(xrayCfg, userID)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	client, err := readPrimarySubscriptionClient(ctx, xrayCfg, userID)
 	if err != nil {
 		log.Printf("[subscription-status] primary lookup failed user=%s: %v", userID, err)
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -5481,8 +5464,9 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
 	parts := strings.Split(rest, "/")
-	statusRequest := len(parts) == 3 && parts[2] == "status"
-	if len(parts) != 2 && !statusRequest {
+	statusPath := len(parts) == 3 && parts[2] == "status"
+	statusRequest := statusPath || len(parts) == 2 && r.URL.Query().Get("status") == "1"
+	if len(parts) != 2 && !statusPath {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}

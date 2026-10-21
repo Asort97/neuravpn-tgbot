@@ -48,13 +48,13 @@ func TestSubscriptionStatusEndpointReadsPanelInsteadOfAccessCache(t *testing.T) 
 	mergedSubSecret = "test-status-secret"
 	expiry := time.Now().Add(-24 * time.Hour).UnixMilli()
 	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/panel/api/clients/get/42@happycat" {
+		if r.URL.Path != "/panel/api/clients/get/tgId/42" {
 			t.Errorf("unexpected panel request: %s", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "obj": map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "obj": []any{map[string]any{
 			"client":     map[string]any{"uuid": "test-client", "email": "42@happycat", "tgId": "42", "enable": true, "expiryTime": expiry},
 			"inboundIds": []int{1},
-		}})
+		}}})
 	}))
 	defer panel.Close()
 	u, _ := url.Parse(panel.URL)
@@ -68,6 +68,16 @@ func TestSubscriptionStatusEndpointReadsPanelInsteadOfAccessCache(t *testing.T) 
 	}
 	if w.Header().Get("Cache-Control") != "no-store, private" {
 		t.Fatal("status must not be cached")
+	}
+	w = httptest.NewRecorder()
+	handleMergedSubscription(w, httptest.NewRequest(http.MethodGet, "/merged-sub/42/"+mergedSubscriptionToken("42")+"?status=1", nil))
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil || got.Active {
+		t.Fatalf("query status route failed: %d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	handleMergedSubscription(w, httptest.NewRequest(http.MethodGet, "/merged-sub/42/wrong?status=1", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatal("query status requires a signed token")
 	}
 	w = httptest.NewRecorder()
 	handleMergedSubscription(w, httptest.NewRequest(http.MethodGet, "/merged-sub/42/wrong/status", nil))
