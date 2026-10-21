@@ -5393,6 +5393,82 @@ func refreshMergedSubscriptionAsync(key, targetUserID string, variant mergedSubs
 	}()
 }
 
+type subscriptionAccessStatus struct {
+	Days              int64      `json:"days"`
+	Active            bool       `json:"active"`
+	Unlimited         bool       `json:"unlimited"`
+	PendingActivation bool       `json:"pending_activation"`
+	ExpiresAt         *time.Time `json:"expires_at"`
+	CheckedAt         time.Time  `json:"checked_at"`
+}
+
+func subscriptionStatusForClient(client *xray.Client, now time.Time) subscriptionAccessStatus {
+	status := subscriptionAccessStatus{CheckedAt: now.UTC()}
+	if client == nil {
+		return status
+	}
+	if client.ExpiryTime > 0 {
+		expiry := time.UnixMilli(client.ExpiryTime).UTC()
+		status.ExpiresAt = &expiry
+		status.Active = client.Enable && expiry.After(now)
+		if status.Active {
+			status.Days = int64(math.Ceil(expiry.Sub(now).Hours() / 24))
+		}
+	} else if client.Enable {
+		status.Active = true
+		status.Unlimited = client.ExpiryTime == 0
+		status.PendingActivation = client.ExpiryTime < 0
+		if status.PendingActivation {
+			status.Days = int64(math.Ceil(-float64(client.ExpiryTime) / float64(24*time.Hour/time.Millisecond)))
+		}
+	}
+	return status
+}
+
+// Read fresh primary-panel state; users.days is a snapshot, not an expiry date.
+func readPrimarySubscriptionClient(cfg *xraySettings, userID string) (*xray.Client, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, errors.New("primary panel is not configured")
+	}
+	var subID string
+	if userStore != nil {
+		subID, _ = userStore.GetSubscriptionID(userID)
+	}
+	client, _, err := cfg.client.GetClientRecordByEmail(fallbackEmail(userID))
+	if err == nil && client != nil && (client.TgID == userID || subID != "" && client.SubID == subID) {
+		return client, nil
+	}
+	ids, err := mergedInboundIDs(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var best *xray.Client
+	for _, id := range ids {
+		candidate, scanErr := cfg.client.GetClientByTelegram(id, userID)
+		if scanErr != nil {
+			// A failed scan cannot establish that access expired or is absent.
+			return nil, scanErr
+		}
+		if candidate != nil && (best == nil || candidate.ExpiryTime > best.ExpiryTime) {
+			best = candidate
+		}
+	}
+	return best, nil
+}
+
+func handleSubscriptionStatus(w http.ResponseWriter, r *http.Request, userID string) {
+	w.Header().Set("Cache-Control", "no-store, private")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	client, err := readPrimarySubscriptionClient(xrayCfg, userID)
+	if err != nil {
+		log.Printf("[subscription-status] primary lookup failed user=%s: %v", userID, err)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "subscription status unavailable"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(subscriptionStatusForClient(client, time.Now()))
+}
+
 func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -5405,7 +5481,8 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
 	parts := strings.Split(rest, "/")
-	if len(parts) != 2 {
+	statusRequest := len(parts) == 3 && parts[2] == "status"
+	if len(parts) != 2 && !statusRequest {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -5417,6 +5494,10 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSpace(parts[1])
 	if !isValidMergedSubscriptionToken(targetUserID, token) {
 		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if statusRequest {
+		handleSubscriptionStatus(w, r, targetUserID)
 		return
 	}
 
