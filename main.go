@@ -169,6 +169,7 @@ const (
 	stateEnterPromo   SessionState = "enter_promo"
 	stateBuyTraffic   SessionState = "buy_traffic"
 	stateSettings     SessionState = "settings"
+	stateDevices      SessionState = "devices"
 )
 
 type RatePlan struct {
@@ -374,6 +375,8 @@ const (
 )
 
 type UserSession struct {
+	DevicesMu              sync.Mutex
+	DeviceButtons          map[string]deviceSelection
 	MessageID              int
 	State                  SessionState
 	ContentType            string
@@ -475,7 +478,8 @@ var (
 	privacyURL             string
 	adminIDs               []int64
 	logChatID              int64 = -1003334019708
-	userSessions                 = make(map[int64]*UserSession)
+	userSessionsMu         sync.Mutex
+	userSessions           = make(map[int64]*UserSession)
 	testMode               bool
 	smtpHost               string
 	smtpPort               string
@@ -549,6 +553,8 @@ func canProceedKey(userID int64, key string, interval time.Duration) bool {
 }
 
 func getSession(chatID int64) *UserSession {
+	userSessionsMu.Lock()
+	defer userSessionsMu.Unlock()
 	if s, ok := userSessions[chatID]; ok {
 		return s
 	}
@@ -2862,6 +2868,314 @@ func updateSessionTextRaw(bot *tgbotapi.BotAPI, chatID int64, session *UserSessi
 	return nil
 }
 
+const devicesPageSize = 8
+
+type deviceSelection struct {
+	Key       string
+	Page      int
+	ExpiresAt time.Time
+}
+
+type ownedHWIDDevice struct {
+	Config *xraySettings
+	Email  string
+	SubID  string
+	Device xray.HWIDDevice
+}
+
+type subscriptionDevice struct {
+	Key     string
+	Info    xray.HWIDDevice
+	Records []ownedHWIDDevice
+}
+
+type subscriptionDevices struct {
+	Devices     []subscriptionDevice
+	Panels      int
+	Unavailable int
+	Unsupported int
+}
+
+func deviceProviderConfigs(primary *xraySettings) []*xraySettings {
+	var result []*xraySettings
+	seen := make(map[string]bool)
+	for _, cfg := range append([]*xraySettings{primary}, mergedProviderConfigs()...) {
+		if cfg == nil || cfg.client == nil {
+			continue
+		}
+		key := cfg.client.PanelIdentity()
+		if !seen[key] {
+			result = append(result, cfg)
+			seen[key] = true
+		}
+	}
+	return result
+}
+
+func readPanelDevices(ctx context.Context, cfg *xraySettings, userID string) ([]ownedHWIDDevice, error) {
+	ids := cfg.inboundIDs
+	if len(ids) == 0 && cfg.inboundID > 0 {
+		ids = []int{cfg.inboundID}
+	}
+	clients, err := cfg.client.GetSubscriptionClients(ctx, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var result []ownedHWIDDevice
+	for _, client := range clients {
+		if client.TgID != userID || client.SubID == "" || seen[client.SubID] {
+			continue
+		}
+		seen[client.SubID] = true
+		devices, err := cfg.client.ListHWIDDevices(ctx, client.Email)
+		if err != nil {
+			return result, err
+		}
+		for _, device := range devices {
+			if device.ID <= 0 {
+				return result, errors.New("invalid HWID device ID")
+			}
+			result = append(result, ownedHWIDDevice{Config: cfg, Email: client.Email, SubID: client.SubID, Device: device})
+		}
+	}
+	return result, nil
+}
+
+func groupSubscriptionDevices(records []ownedHWIDDevice) []subscriptionDevice {
+	groups := make(map[string]*subscriptionDevice)
+	seen := make(map[string]bool)
+	for _, record := range records {
+		identity := record.Config.client.PanelIdentity() + "\x00" + record.SubID + "\x00" + strconv.Itoa(record.Device.ID)
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		fingerprint := strings.ToLower(strings.TrimSpace(record.Device.Fingerprint))
+		_, fingerprintErr := hex.DecodeString(fingerprint)
+		key := "hwid:" + fingerprint
+		if fingerprintErr != nil || len(fingerprint) < 12 {
+			// Without a common fingerprint, matching model/OS is not evidence of identity.
+			sum := sha256.Sum256([]byte(identity))
+			key = "record:" + hex.EncodeToString(sum[:])
+		}
+		group := groups[key]
+		if group == nil {
+			group = &subscriptionDevice{Key: key, Info: record.Device}
+			groups[key] = group
+		}
+		if record.Device.LastSeen > group.Info.LastSeen {
+			group.Info = record.Device
+		}
+		group.Records = append(group.Records, record)
+	}
+	result := make([]subscriptionDevice, 0, len(groups))
+	for _, group := range groups {
+		result = append(result, *group)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Info.LastSeen != result[j].Info.LastSeen {
+			return result[i].Info.LastSeen > result[j].Info.LastSeen
+		}
+		return result[i].Key < result[j].Key
+	})
+	return result
+}
+
+func readSubscriptionDevices(ctx context.Context, configs []*xraySettings, userID string) subscriptionDevices {
+	type panelResult struct {
+		records []ownedHWIDDevice
+		err     error
+	}
+	results := make(chan panelResult, len(configs))
+	slots := make(chan struct{}, 4)
+	for _, cfg := range configs {
+		go func(cfg *xraySettings) {
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done():
+				results <- panelResult{err: ctx.Err()}
+				return
+			}
+			records, err := readPanelDevices(ctx, cfg, userID)
+			results <- panelResult{records: records, err: err}
+		}(cfg)
+	}
+	view := subscriptionDevices{Panels: len(configs)}
+	var records []ownedHWIDDevice
+	for range configs {
+		result := <-results
+		records = append(records, result.records...)
+		if errors.Is(result.err, xray.ErrHWIDUnsupported) {
+			view.Unsupported++
+		} else if result.err != nil {
+			view.Unavailable++
+		}
+	}
+	view.Devices = groupSubscriptionDevices(records)
+	return view
+}
+
+func deviceLabel(device xray.HWIDDevice) string {
+	model, osName := strings.TrimSpace(device.DeviceModel), strings.TrimSpace(device.DeviceOS)
+	label := model
+	if osName != "" && !strings.EqualFold(model, osName) {
+		if label != "" {
+			label += " · "
+		}
+		label += osName
+	}
+	if label == "" {
+		label = strings.TrimSpace(device.UserAgent)
+		if pos := strings.IndexAny(label, "/ "); pos > 0 {
+			label = label[:pos]
+		}
+	}
+	if label == "" {
+		label = "неизвестное устройство"
+	}
+	label = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, label)
+	runes := []rune(label)
+	if len(runes) > 38 {
+		label = string(runes[:37]) + "…"
+	}
+	return label
+}
+
+func devicesScreen(view subscriptionDevices, page int, notice string) (string, tgbotapi.InlineKeyboardMarkup, map[string]deviceSelection) {
+	pages := max(1, (len(view.Devices)+devicesPageSize-1)/devicesPageSize)
+	page = min(max(page, 0), pages-1)
+	var text strings.Builder
+	if view.Panels == 0 || view.Unavailable+view.Unsupported > 0 {
+		fmt.Fprintf(&text, "<b>найдено устройств: %d</b>\n", len(view.Devices))
+	} else {
+		fmt.Fprintf(&text, "<b>ваши устройства: %d</b>\n", len(view.Devices))
+	}
+	if notice != "" {
+		fmt.Fprintf(&text, "\n%s\n", html.EscapeString(notice))
+	}
+	if view.Panels == 0 || view.Unavailable+view.Unsupported > 0 {
+		text.WriteString("\nсписок неполный: ")
+		if view.Panels == 0 {
+			text.WriteString("панели не настроены.")
+		} else {
+			fmt.Fprintf(&text, "недоступно панелей: %d; без поддержки HWID API: %d.", view.Unavailable, view.Unsupported)
+		}
+	}
+	text.WriteString("\nэто зарегистрированные HWID, не подключения онлайн.\nудаление записи не отключает VPN: устройство может появиться снова после обновления подписки.\n")
+	if len(view.Devices) == 0 {
+		if view.Panels > 0 && view.Unavailable+view.Unsupported == 0 {
+			text.WriteString("\nустройства пока не зарегистрированы. не все приложения передают HWID.\n")
+		}
+	}
+	var rows [][]tgbotapi.InlineKeyboardButton
+	buttons := make(map[string]deviceSelection)
+	for i := page * devicesPageSize; i < min(len(view.Devices), (page+1)*devicesPageSize); i++ {
+		device := view.Devices[i]
+		label := deviceLabel(device.Info)
+		fmt.Fprintf(&text, "\n%d. %s", i+1, html.EscapeString(label))
+		if device.Info.LastSeen > 0 {
+			fmt.Fprintf(&text, "\nпоследнее обновление подписки: %s UTC", time.UnixMilli(device.Info.LastSeen).UTC().Format("02.01.2006 15:04"))
+		}
+		text.WriteString("\n")
+		token := uuid.NewString()
+		buttons[token] = deviceSelection{Key: device.Key, Page: page, ExpiresAt: time.Now().Add(30 * time.Minute)}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("удалить · %d. %s", i+1, label), "devices_del:"+token)))
+	}
+	if pages > 1 {
+		var navigation []tgbotapi.InlineKeyboardButton
+		if page > 0 {
+			navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData("←", "devices_page:"+strconv.Itoa(page-1)))
+		}
+		navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d / %d", page+1, pages), "devices_page:"+strconv.Itoa(page)))
+		if page+1 < pages {
+			navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData("→", "devices_page:"+strconv.Itoa(page+1)))
+		}
+		rows = append(rows, navigation)
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("обновить", "devices_page:"+strconv.Itoa(page))), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("назад", "nav_menu")))
+	return text.String(), tgbotapi.NewInlineKeyboardMarkup(rows...), buttons
+}
+
+func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, primary *xraySettings) {
+	if cq.From == nil || cq.Message == nil || cq.Message.Chat == nil || !cq.Message.Chat.IsPrivate() || cq.From.ID != cq.Message.Chat.ID {
+		ackCallback(bot, cq, "управление устройствами доступно только в личном чате с ботом")
+		return
+	}
+	session := getSession(cq.Message.Chat.ID)
+	if !session.DevicesMu.TryLock() {
+		ackCallback(bot, cq, "предыдущий запрос ещё выполняется")
+		return
+	}
+	defer session.DevicesMu.Unlock()
+	ackCallback(bot, cq, "")
+	bindSessionToCallbackMessage(session, cq)
+	page, notice := 0, ""
+	var selection deviceSelection
+	deleting := strings.HasPrefix(cq.Data, "devices_del:")
+	if deleting {
+		token := strings.TrimPrefix(cq.Data, "devices_del:")
+		var exists bool
+		selection, exists = session.DeviceButtons[token]
+		delete(session.DeviceButtons, token)
+		if !exists || time.Now().After(selection.ExpiresAt) {
+			deleting = false
+			notice = "эта кнопка устарела. список обновлён."
+		} else {
+			page = selection.Page
+		}
+	} else if strings.HasPrefix(cq.Data, "devices_page:") {
+		value, err := strconv.Atoi(strings.TrimPrefix(cq.Data, "devices_page:"))
+		if err != nil || value < 0 {
+			notice = "список обновлён."
+		} else {
+			page = value
+		}
+	}
+	configs := deviceProviderConfigs(primary)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	view := readSubscriptionDevices(ctx, configs, strconv.FormatInt(cq.From.ID, 10))
+	cancel()
+	if deleting {
+		matched := false
+		failed := view.Unavailable+view.Unsupported > 0 || view.Panels == 0
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		for _, device := range view.Devices {
+			if device.Key != selection.Key {
+				continue
+			}
+			matched = true
+			// Every target is freshly resolved through the caller's Telegram ID.
+			for _, record := range device.Records {
+				if err := record.Config.client.DeleteHWIDDevice(ctx, record.Email, record.Device.ID); err != nil {
+					failed = true
+				}
+			}
+		}
+		cancel()
+		switch {
+		case failed:
+			notice = "не удалось подтвердить удаление на всех панелях. обновите список и повторите при необходимости."
+		case !matched:
+			notice = "запись устройства уже отсутствует. список обновлён."
+		default:
+			notice = "запись устройства удалена со всех доступных панелей."
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		view = readSubscriptionDevices(ctx, configs, strconv.FormatInt(cq.From.ID, 10))
+		cancel()
+	}
+	text, keyboard, buttons := devicesScreen(view, page, notice)
+	session.DeviceButtons = buttons
+	_ = updateSessionText(bot, cq.Message.Chat.ID, session, stateDevices, text, "HTML", keyboard)
+}
+
 func mainMenuInlineKeyboardRaw() rawInlineKeyboardMarkup {
 	return rawInlineKeyboardMarkup{
 		InlineKeyboard: [][]rawInlineKeyboardButton{
@@ -2874,6 +3188,7 @@ func mainMenuInlineKeyboardRaw() rawInlineKeyboardMarkup {
 				rawCallbackButton("поддержка", "nav_support", "", "5346123042336573193"),
 			},
 			{
+				rawCallbackButton("устройства", "nav_devices", "", ""),
 				rawWebAppButton("личный кабинет", miniAppURL(), "5343693752999383705"),
 			},
 		},
@@ -2889,6 +3204,9 @@ func mainMenuInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🎁 +15 дней", "nav_referral"),
 			tgbotapi.NewInlineKeyboardButtonData("📞 поддержка", "nav_support"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("устройства", "nav_devices"),
 		),
 	)
 }
@@ -7390,6 +7708,10 @@ func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 }
 
 func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xraySettings) {
+	if cq != nil && (cq.Data == "nav_devices" || strings.HasPrefix(cq.Data, "devices_")) {
+		handleDevicesCallback(bot, cq, xrCfg)
+		return
+	}
 	chatID := cq.Message.Chat.ID
 	session := getSession(chatID)
 	bindSessionToCallbackMessage(session, cq)

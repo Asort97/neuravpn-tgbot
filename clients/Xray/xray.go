@@ -533,6 +533,21 @@ func (x *XRayClient) GetInboundById(id int) ([]Client, error) {
 // GetSubscriptionClient reads fresh panel state without downloading each inbound separately.
 // Older panels without the Telegram-ID endpoint fall back to one inbounds list request.
 func (x *XRayClient) GetSubscriptionClient(ctx context.Context, tgID string, inboundIDs []int) (*Client, error) {
+	clients, err := x.GetSubscriptionClients(ctx, tgID, inboundIDs)
+	if err != nil {
+		return nil, err
+	}
+	var best *Client
+	for i := range clients {
+		if best == nil || clients[i].ExpiryTime > best.ExpiryTime {
+			best = &clients[i]
+		}
+	}
+	return best, nil
+}
+
+// GetSubscriptionClients preserves all records owned by a Telegram account.
+func (x *XRayClient) GetSubscriptionClients(ctx context.Context, tgID string, inboundIDs []int) ([]Client, error) {
 	if _, err := strconv.ParseInt(tgID, 10, 64); err != nil {
 		return nil, fmt.Errorf("invalid Telegram ID")
 	}
@@ -599,14 +614,14 @@ func (x *XRayClient) GetSubscriptionClient(ctx context.Context, tgID string, inb
 			})
 		}
 	}
-	var best *Client
+	var owned []Client
 	for i := range clients {
 		candidate := &clients[i]
-		if candidate.TgID == tgID && (best == nil || candidate.ExpiryTime > best.ExpiryTime) {
-			best = candidate
+		if candidate.TgID == tgID {
+			owned = append(owned, *candidate)
 		}
 	}
-	return best, nil
+	return owned, nil
 }
 
 // GetAllInbounds retrieves all inbound objects from 3X-UI.
