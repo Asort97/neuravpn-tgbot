@@ -103,6 +103,7 @@ const (
 	mergedSubscriptionFreshTTL     = 10 * time.Second
 	mergedSubscriptionStaleTTL     = 0 * time.Second
 	mergedSubscriptionBuildTimeout = 20 * time.Second
+	mergedSubscriptionNodesTimeout = 8 * time.Second
 )
 
 type mergedSubscriptionCacheEntry struct {
@@ -5263,80 +5264,125 @@ func appendUniqueVLESSLinks(target []string, seen map[string]struct{}, links []s
 }
 
 func buildAllMergedProviderLinks(userID, subID string, primaryInfo *accessInfo, readOnly bool) ([]string, error) {
+	return buildAllMergedProviderLinksContext(context.Background(), userID, subID, primaryInfo, readOnly)
+}
+
+func buildAllMergedProviderLinksContext(ctx context.Context, userID, subID string, primaryInfo *accessInfo, readOnly bool) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, mergedSubscriptionNodesTimeout)
+	defer cancel()
 	configs := mergedProviderConfigsForSubscription()
 	if len(configs) == 0 {
 		return nil, fmt.Errorf("merged xray is not configured")
 	}
 
 	if !readOnly && primaryInfo == nil && xrayCfg != nil {
-		info, err := ensureXrayAccess(xrayCfg, userID, fallbackEmail(userID), 0, false)
+		primaryCfg, err := scopedXraySettings(ctx, xrayCfg)
+		if err != nil {
+			return nil, err
+		}
+		info, err := ensureXrayAccess(primaryCfg, userID, fallbackEmail(userID), 0, false)
 		if err != nil {
 			return nil, err
 		}
 		primaryInfo = info
 	}
 
+	var primaryOnce sync.Once
+	var repairInfo *accessInfo
+	var repairErr error
+	return collectMergedProviderLinks(ctx, userID, len(configs), func(ctx context.Context, index int) ([]string, error) {
+		cfg, err := scopedXraySettings(ctx, configs[index])
+		if err != nil {
+			return nil, err
+		}
+		if !readOnly {
+			return buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, primaryInfo)
+		}
+		links, err := buildMergedProviderLinksReadOnly(cfg, userID, subID)
+		if !errors.Is(err, errMergedProviderClientNotFound) && !errors.Is(err, errMergedProviderClientIncomplete) {
+			return links, err
+		}
+		// Repair this node immediately, rather than waiting for unrelated nodes.
+		primaryOnce.Do(func() {
+			repairInfo = primaryInfo
+			if repairInfo == nil && xrayCfg != nil {
+				var primaryCfg *xraySettings
+				primaryCfg, repairErr = scopedXraySettings(ctx, xrayCfg)
+				if repairErr == nil {
+					_, _, repairInfo, repairErr = buildSubscriptionURLForUser(primaryCfg, userID)
+				}
+			}
+		})
+		if repairErr != nil {
+			return nil, repairErr
+		}
+		if repairInfo == nil || repairInfo.client == nil {
+			return nil, fmt.Errorf("основная нода пользователя не найдена")
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, repairInfo)
+	})
+}
+
+func scopedXraySettings(ctx context.Context, cfg *xraySettings) (*xraySettings, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, fmt.Errorf("xray not configured")
+	}
+	client, err := cfg.client.WithContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	scoped := *cfg
+	scoped.client = client
+	return &scoped, nil
+}
+
+func collectMergedProviderLinks(ctx context.Context, userID string, count int, build func(context.Context, int) ([]string, error)) ([]string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	type nodeResult struct {
+		index int
 		links []string
 		err   error
 	}
-	results := make([]nodeResult, len(configs))
-	resultCh := make(chan struct {
-		index int
-		value nodeResult
-	}, len(configs))
-	for index, cfg := range configs {
-		go func(index int, cfg *xraySettings) {
-			var links []string
-			var err error
-			if readOnly {
-				links, err = buildMergedProviderLinksReadOnly(cfg, userID, subID)
-			} else {
-				links, err = buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, primaryInfo)
-			}
-			resultCh <- struct {
-				index int
-				value nodeResult
-			}{index: index, value: nodeResult{links: links, err: err}}
-		}(index, cfg)
+	results := make([]nodeResult, count)
+	completed := make([]bool, count)
+	resultCh := make(chan nodeResult, count)
+	for index := 0; index < count; index++ {
+		go func(index int) {
+			links, err := build(ctx, index)
+			// A late result must not leave a worker blocked after the collector exits.
+			resultCh <- nodeResult{index: index, links: links, err: err}
+		}(index)
 	}
-	for range configs {
-		result := <-resultCh
-		results[result.index] = result.value
+	remaining := count
+	record := func(result nodeResult) {
+		results[result.index] = result
+		completed[result.index] = true
+		remaining--
 	}
-
-	if readOnly {
-		var missing []int
-		for index, result := range results {
-			if errors.Is(result.err, errMergedProviderClientNotFound) ||
-				errors.Is(result.err, errMergedProviderClientIncomplete) {
-				missing = append(missing, index)
+collect:
+	for remaining > 0 {
+		select {
+		case result := <-resultCh:
+			record(result)
+		case <-ctx.Done():
+			// Preserve results already queued when the deadline and receive race.
+			for {
+				select {
+				case result := <-resultCh:
+					record(result)
+				default:
+					break collect
+				}
 			}
 		}
-		if len(missing) > 0 {
-			if primaryInfo == nil && xrayCfg != nil {
-				_, _, primaryInfo, _ = buildSubscriptionURLForUser(xrayCfg, userID)
-			}
-			if primaryInfo == nil || primaryInfo.client == nil {
-				for _, index := range missing {
-					results[index].err = fmt.Errorf("основная нода пользователя не найдена")
-				}
-			} else {
-				for _, index := range missing {
-					cfg := configs[index]
-					go func(index int, cfg *xraySettings) {
-						links, err := buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, primaryInfo)
-						resultCh <- struct {
-							index int
-							value nodeResult
-						}{index: index, value: nodeResult{links: links, err: err}}
-					}(index, cfg)
-				}
-				for range missing {
-					result := <-resultCh
-					results[result.index] = result.value
-				}
-			}
+	}
+	for index := range results {
+		if !completed[index] {
+			results[index].err = ctx.Err()
 		}
 	}
 
@@ -5644,40 +5690,28 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 		statusCode int
 		err        error
 	}
-	type linksResult struct {
-		links []string
-		err   error
-	}
 	upstreamCh := make(chan upstreamResult, 1)
-	linksCh := make(chan linksResult, 1)
 	go func() {
 		body, headers, statusCode, fetchErr := fetchSubscriptionBody(ctx, upstreamURL, requestTemplate)
 		upstreamCh <- upstreamResult{body: body, headers: headers, statusCode: statusCode, err: fetchErr}
 	}()
-	go func() {
-		links, linksErr := buildAllMergedProviderLinks(targetUserID, subID, primaryInfo, true)
-		linksCh <- linksResult{links: links, err: linksErr}
-	}()
+	// The collector itself owns the deadline and returns successful partial
+	// results. A second select on the same deadline could discard those results.
+	links, linksErr := buildAllMergedProviderLinksContext(ctx, targetUserID, subID, primaryInfo, true)
 
 	upstream := <-upstreamCh
 	if upstream.err != nil {
 		return mergedSubscriptionCacheEntry{}, fmt.Errorf("fetch upstream: %w", upstream.err)
 	}
-	var links linksResult
-	select {
-	case links = <-linksCh:
-	case <-ctx.Done():
-		links.err = ctx.Err()
-	}
 	body := upstream.body
 	mergedStatus := "primary_only"
-	if links.err != nil {
-		log.Printf("[merged-sub] extra links unavailable user=%s: %v", targetUserID, links.err)
-	} else if mergedBody, mergeErr := mergeSubscriptionBody(body, links.links); mergeErr != nil {
+	if linksErr != nil {
+		log.Printf("[merged-sub] extra links unavailable user=%s: %v", targetUserID, linksErr)
+	} else if mergedBody, mergeErr := mergeSubscriptionBody(body, links); mergeErr != nil {
 		log.Printf("[merged-sub] merge failed user=%s: %v", targetUserID, mergeErr)
 	} else {
 		body = mergedBody
-		mergedStatus = fmt.Sprintf("merged:%d", len(links.links))
+		mergedStatus = fmt.Sprintf("merged:%d", len(links))
 	}
 	log.Printf("[merged-sub] built user=%s status=%s duration=%s", targetUserID, mergedStatus, time.Since(startedAt).Round(time.Millisecond))
 	return mergedSubscriptionCacheEntry{

@@ -239,16 +239,17 @@ type ClientTraffic struct {
 }
 
 type XRayClient struct {
-	username    string
-	password    string
-	host        string
-	port        string
-	webBasePath string
-	serverURL   string
-	apiToken    string
-	httpClient  *http.Client
-	authMu      sync.Mutex
-	csrfToken   string
+	username       string
+	password       string
+	host           string
+	port           string
+	webBasePath    string
+	serverURL      string
+	apiToken       string
+	httpClient     *http.Client
+	authMu         sync.Mutex
+	csrfToken      string
+	requestContext context.Context
 }
 
 func New(username, password, host, port, webBasePath string) *XRayClient {
@@ -291,7 +292,7 @@ func (x *XRayClient) hasAPIToken() bool {
 
 // LoginToServer must be called before any other API calls.
 func (x *XRayClient) LoginToServer() error {
-	return x.loginWithContext(context.Background())
+	return x.loginWithContext(x.defaultRequestContext())
 }
 
 func (x *XRayClient) loginWithContext(ctx context.Context) error {
@@ -445,7 +446,7 @@ func (x *XRayClient) doAPIRequest(method, url string, payload []byte, headers ma
 }
 
 func (x *XRayClient) doAPIRequestOnce(method, url string, payload []byte, headers map[string]string, allowRetry bool) (int, []byte, error) {
-	return x.doAPIRequestContext(context.Background(), method, url, payload, headers, allowRetry)
+	return x.doAPIRequestContext(x.defaultRequestContext(), method, url, payload, headers, allowRetry)
 }
 
 func (x *XRayClient) doAPIRequestContext(ctx context.Context, method, url string, payload []byte, headers map[string]string, allowRetry bool) (int, []byte, error) {
@@ -626,7 +627,7 @@ func (x *XRayClient) GetSubscriptionClients(ctx context.Context, tgID string, in
 
 // GetAllInbounds retrieves all inbound objects from 3X-UI.
 func (x *XRayClient) GetAllInbounds() ([]InboundData, error) {
-	return x.getAllInboundsContext(context.Background())
+	return x.getAllInboundsContext(x.defaultRequestContext())
 }
 
 func (x *XRayClient) getAllInboundsContext(ctx context.Context) ([]InboundData, error) {
