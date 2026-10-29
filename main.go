@@ -3986,6 +3986,7 @@ func main() {
 	if webhookSecret != "" || mergedSubSecret != "" {
 		go func() {
 			mux := http.NewServeMux()
+			mux.HandleFunc(webDevicesPath, newWebDevicesHandler(xrayCfg, bot.Token))
 			if webhookSecret != "" {
 				mux.HandleFunc("/webhook/"+webhookSecret, func(w http.ResponseWriter, r *http.Request) {
 					handleYooKassaWebhook(bot, xrayCfg, w, r)
