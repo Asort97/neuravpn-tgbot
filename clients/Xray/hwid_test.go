@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -35,6 +36,50 @@ func TestHWIDLimitPreservesRecordAndChecksOwner(t *testing.T) {
 	var c Client
 	if err != nil || json.Unmarshal(b, &c) != nil || c.LimitHwid != 7 {
 		t.Fatal("limit lost in client update")
+	}
+}
+
+func TestHWIDLimitConvertsClientRecordToUpdatePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stored any
+		want   []string
+	}{
+		{"empty storage", "", []string{}},
+		{"CSV storage", " 10.1.0.2/32, fd00::2/128, ", []string{"10.1.0.2/32", "fd00::2/128"}},
+		{"array already", []string{"10.1.0.2/32"}, []string{"10.1.0.2/32"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := hwidTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					json.NewEncoder(w).Encode(map[string]any{"success": true, "obj": map[string]any{"client": map[string]any{
+						"id": 123, "uuid": "unchanged", "email": "owned", "tgId": 42,
+						"allowedIPs": tc.stored, "forwardedPorts": "80,443", "createdAt": 1700000000000,
+						"updatedAt": 1800000000000, "reverse": map[string]string{"tag": "keep-reverse"},
+					}}})
+					return
+				}
+				var update struct {
+					ID             string            `json:"id"`
+					AllowedIPs     []string          `json:"allowedIPs"`
+					ForwardedPorts string            `json:"forwardedPorts"`
+					CreatedAt      int64             `json:"created_at"`
+					UpdatedAt      int64             `json:"updated_at"`
+					Reverse        map[string]string `json:"reverse"`
+					LimitHwid      int               `json:"limitHwid"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+					t.Fatal(err)
+				}
+				if update.ID != "unchanged" || !reflect.DeepEqual(update.AllowedIPs, tc.want) || update.ForwardedPorts != "80,443" || update.CreatedAt != 1700000000000 || update.UpdatedAt != 1800000000000 || update.Reverse["tag"] != "keep-reverse" || update.LimitHwid != 5 {
+					t.Errorf("incorrect update payload: %+v", update)
+				}
+				w.Write([]byte(`{"success":true}`))
+			})
+			if err := client.SetHWIDLimit(context.Background(), "owned", "42", 5); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

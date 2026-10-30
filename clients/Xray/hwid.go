@@ -43,6 +43,22 @@ func (x *XRayClient) SetHWIDLimit(ctx context.Context, email, userID string, lim
 	if v, ok := record["uuid"]; ok {
 		record["id"] = v
 	}
+	// The lookup returns ClientRecord, while update accepts Client: WireGuard
+	// addresses are stored as CSV and timestamps use different JSON names.
+	if csv, ok := record["allowedIPs"].(string); ok {
+		addresses := make([]string, 0)
+		for _, part := range strings.Split(csv, ",") {
+			if address := strings.TrimSpace(part); address != "" {
+				addresses = append(addresses, address)
+			}
+		}
+		record["allowedIPs"] = addresses
+	}
+	for _, field := range []struct{ from, to string }{{"createdAt", "created_at"}, {"updatedAt", "updated_at"}} {
+		if value, ok := record[field.from]; ok {
+			record[field.to] = value
+		}
+	}
 	record["limitHwid"] = limit
 	data, err := json.Marshal(record)
 	if err != nil {
