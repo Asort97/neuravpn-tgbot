@@ -212,7 +212,10 @@ CREATE TABLE IF NOT EXISTS users (
 		CREATE INDEX IF NOT EXISTS idx_compensation_campaigns_expires_at
 			ON compensation_campaigns(expires_at);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.initDevicePlans(ctx)
 }
 
 // Close releases the underlying pool.

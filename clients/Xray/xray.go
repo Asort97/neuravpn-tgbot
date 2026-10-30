@@ -27,6 +27,7 @@ type Client struct {
 	Enable     bool   `json:"enable"`
 	Flow       string `json:"flow"`
 	LimitIP    int    `json:"limitIp"`
+	LimitHwid  int    `json:"limitHwid"`
 	TotalGB    int64  `json:"totalGB"`
 	ExpiryTime int64  `json:"expiryTime"`
 	SubID      string `json:"subId"`
@@ -44,6 +45,7 @@ type clientDTO struct {
 	Enable     bool        `json:"enable"`
 	Flow       string      `json:"flow"`
 	LimitIP    int         `json:"limitIp"`
+	LimitHwid  int         `json:"limitHwid"`
 	TotalGB    int64       `json:"totalGB"`
 	ExpiryTime int64       `json:"expiryTime"`
 	SubID      string      `json:"subId"`
@@ -66,6 +68,7 @@ func (c *Client) UnmarshalJSON(data []byte) error {
 		Enable:     dto.Enable,
 		Flow:       dto.Flow,
 		LimitIP:    dto.LimitIP,
+		LimitHwid:  dto.LimitHwid,
 		TotalGB:    dto.TotalGB,
 		ExpiryTime: dto.ExpiryTime,
 		SubID:      dto.SubID,
@@ -85,6 +88,7 @@ func (c Client) MarshalJSON() ([]byte, error) {
 		Enable:     c.Enable,
 		Flow:       c.Flow,
 		LimitIP:    c.LimitIP,
+		LimitHwid:  c.LimitHwid,
 		TotalGB:    c.TotalGB,
 		ExpiryTime: c.ExpiryTime,
 		SubID:      c.SubID,
@@ -593,6 +597,7 @@ func (x *XRayClient) GetSubscriptionClients(ctx context.Context, tgID string, in
 					Email      string      `json:"email"`
 					Enable     bool        `json:"enable"`
 					ExpiryTime int64       `json:"expiryTime"`
+					LimitHwid  int         `json:"limitHwid"`
 					SubID      string      `json:"subId"`
 					TgID       interface{} `json:"tgId"`
 				} `json:"client"`
@@ -610,6 +615,7 @@ func (x *XRayClient) GetSubscriptionClients(ctx context.Context, tgID string, in
 				Email:      record.Client.Email,
 				Enable:     record.Client.Enable,
 				ExpiryTime: record.Client.ExpiryTime,
+				LimitHwid:  record.Client.LimitHwid,
 				SubID:      record.Client.SubID,
 				TgID:       normalizeTgID(record.Client.TgID),
 			})
@@ -1390,6 +1396,7 @@ func (x *XRayClient) GetClientRecordByEmail(email string) (*Client, []int, error
 				Enable     bool        `json:"enable"`
 				Flow       string      `json:"flow"`
 				LimitIP    int         `json:"limitIp"`
+				LimitHwid  int         `json:"limitHwid"`
 				TotalGB    int64       `json:"totalGB"`
 				ExpiryTime int64       `json:"expiryTime"`
 				SubID      string      `json:"subId"`
@@ -1414,6 +1421,7 @@ func (x *XRayClient) GetClientRecordByEmail(email string) (*Client, []int, error
 		Enable:     raw.Obj.Client.Enable,
 		Flow:       raw.Obj.Client.Flow,
 		LimitIP:    raw.Obj.Client.LimitIP,
+		LimitHwid:  raw.Obj.Client.LimitHwid,
 		TotalGB:    raw.Obj.Client.TotalGB,
 		ExpiryTime: raw.Obj.Client.ExpiryTime,
 		SubID:      raw.Obj.Client.SubID,

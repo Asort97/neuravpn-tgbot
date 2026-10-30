@@ -2,6 +2,7 @@ package xray
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,33 @@ import (
 	"testing"
 	"time"
 )
+
+func TestHWIDLimitPreservesRecordAndChecksOwner(t *testing.T) {
+	posts := 0
+	client := hwidTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.Write([]byte(`{"success":true,"obj":{"client":{"uuid":"keep-uuid","email":"owned","tgId":42,"limitHwid":0,"enable":true,"expiryTime":123456,"unknown":{"keep":true}}}}`))
+			return
+		}
+		posts++
+		var v map[string]any
+		if json.NewDecoder(r.Body).Decode(&v) != nil || v["id"] != "keep-uuid" || v["expiryTime"] != float64(123456) || v["limitHwid"] != float64(5) || v["unknown"] == nil {
+			t.Error("client settings overwritten")
+		}
+		w.Write([]byte(`{"success":true}`))
+	})
+	if err := client.SetHWIDLimit(context.Background(), "owned", "99", 5); err == nil || posts != 0 {
+		t.Fatal("foreign limit changed")
+	}
+	if err := client.SetHWIDLimit(context.Background(), "owned", "42", 5); err != nil || posts != 1 {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(Client{LimitHwid: 7})
+	var c Client
+	if err != nil || json.Unmarshal(b, &c) != nil || c.LimitHwid != 7 {
+		t.Fatal("limit lost in client update")
+	}
+}
 
 func hwidTestClient(t *testing.T, handler http.HandlerFunc) *XRayClient {
 	t.Helper()

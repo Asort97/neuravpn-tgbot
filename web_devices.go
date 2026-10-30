@@ -78,7 +78,7 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			return
 		}
 		uid, err := strconv.ParseInt(req.UserID, 10, 64)
-		if err != nil || uid <= 0 || strconv.FormatInt(uid, 10) != req.UserID || (req.Action != "list" && req.Action != "delete") || (req.Action == "delete" && len(req.ID) != 64) {
+		if err != nil || uid <= 0 || strconv.FormatInt(uid, 10) != req.UserID || (req.Action != "list" && req.Action != "delete" && req.Action != "purchase" && req.Action != "check" && req.Action != "reduce") || (req.Action == "delete" && len(req.ID) != 64) || (req.Action == "check" && len(req.ID) != 36) {
 			fail(http.StatusBadRequest, "bad request")
 			return
 		}
@@ -88,6 +88,39 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			return
 		}
 		defer session.DevicesMu.Unlock()
+		if req.Action == "reduce" {
+			if err := reduceDeviceSlots(req.UserID); err != nil {
+				fail(409, "Не удалось убрать место. Сначала удалите лишнее устройство и обновите список.")
+				return
+			}
+		}
+		if req.Action == "purchase" {
+			order, err := createDeviceSlotPayment(req.UserID)
+			if err != nil {
+				fail(409, "Не удалось создать платёж. Проверьте срок подписки и доступность докупки мест.")
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"devices": []any{}, "order": order})
+			return
+		}
+		if req.Action == "check" {
+			s, ok := userStore.(devicePlanStore)
+			if !ok {
+				fail(503, "Оплата недоступна")
+				return
+			}
+			o, err := s.GetDeviceSlotOrder(req.ID, req.UserID)
+			if err != nil {
+				fail(404, "Платёж не найден")
+				return
+			}
+			if !o.Applied && o.PaymentID != "" {
+				_, _ = applyDeviceSlotPayment(o.ID, req.UserID, o.PaymentID)
+				o, _ = s.GetDeviceSlotOrder(req.ID, req.UserID)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"devices": []any{}, "order": o})
+			return
+		}
 		configs := deviceProviderConfigs(primary)
 		read := func() subscriptionDevices {
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -114,6 +147,7 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 				}
 			}
 			cancel()
+			invalidateMergedSubscriptionCache(req.UserID)
 			if failed {
 				result = "partial"
 			}
@@ -125,10 +159,16 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			Name     string `json:"name"`
 			LastSeen int64  `json:"last_seen"`
 		}
+		view = filterLimitedDeviceView(view, primary, req.UserID)
 		devices := make([]deviceJSON, 0, len(view.Devices))
 		for _, device := range view.Devices {
 			devices = append(devices, deviceJSON{ID: idFor(device.Key), Name: deviceLabel(device.Info), LastSeen: device.Info.LastSeen})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices, "partial": partial, "result": result})
+		plan, planErr := currentDevicePlan(req.UserID)
+		if planErr != nil {
+			fail(503, "Не удалось проверить лимит устройств")
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices, "partial": partial, "result": result, "device_plan": plan})
 	}
 }

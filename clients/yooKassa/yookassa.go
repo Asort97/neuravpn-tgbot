@@ -88,6 +88,10 @@ func New(shopID, apiKey string) *YooKassaClient {
 }
 
 func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description string, chatID int64, product string, extraMeta map[string]interface{}, userEmail string, saveCard bool) (*YooKassaPaymentResponse, error) {
+	return y.CreatePaymentWithKey(amount, description, chatID, product, extraMeta, userEmail, saveCard, fmt.Sprintf("%d", time.Now().UnixNano()))
+}
+
+func (y *YooKassaClient) CreatePaymentWithKey(amount float64, description string, chatID int64, product string, extraMeta map[string]interface{}, userEmail string, saveCard bool, idempotencyKey string) (*YooKassaPaymentResponse, error) {
 	paymentReq := YooKassaPaymentRequest{}
 
 	paymentReq.Amount.Value = fmt.Sprintf("%.2f", amount)
@@ -102,6 +106,11 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	paymentReq.Description = description
 	paymentReq.SavePaymentMethod = saveCard
 	paymentReq.ExpiresAt = time.Now().UTC().Add(20 * time.Minute).Format(time.RFC3339)
+	if product == "device_slot" {
+		// A persisted order can retry after an uncertain response. Keep the
+		// idempotent payload stable instead of generating a new expiration.
+		paymentReq.ExpiresAt = ""
+	}
 
 	paymentReq.Metadata = map[string]interface{}{
 		"chat_id":  chatID,
@@ -151,7 +160,7 @@ func (y *YooKassaClient) CreateYooKassaPayment(amount float64, description strin
 	auth := fmt.Sprintf("%s:%s", y.yookassaShopID, y.yookassaSecretKey)
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotence-Key", fmt.Sprintf("%d", time.Now().UnixNano()))
+	req.Header.Set("Idempotence-Key", idempotencyKey)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -193,6 +202,9 @@ func (y *YooKassaClient) GetYooKassaPaymentStatus(paymentID string) (*YooKassaPa
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("payment lookup HTTP %d", resp.StatusCode)
+	}
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {

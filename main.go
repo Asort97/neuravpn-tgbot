@@ -174,10 +174,11 @@ const (
 )
 
 type RatePlan struct {
-	ID     string
-	Title  string
-	Amount float64
-	Days   int
+	ID          string
+	Title       string
+	Amount      float64
+	Days        int
+	DeviceExtra int
 }
 
 type TrafficPack struct {
@@ -1729,6 +1730,12 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 			log.Printf("autopay unknown plan %q for user %s", u.PlanID, u.UserID)
 			continue
 		}
+		surcharge, priceErr := deviceSurcharge(u.UserID)
+		if priceErr != nil {
+			log.Printf("autopay device price unavailable user=%s", u.UserID)
+			continue
+		}
+		plan.Amount += float64(surcharge)
 
 		info, err := ensureXrayAccess(cfg, u.UserID, fallbackEmail(u.UserID), 0, false)
 		if err != nil || info == nil {
@@ -1773,12 +1780,21 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 
 		email := fallbackEmail(u.UserID)
 		meta := map[string]interface{}{
-			"chat_id":   chatID,
-			"plan_id":   plan.ID,
-			"plan_days": plan.Days,
-			"autopay":   true,
+			"chat_id":            chatID,
+			"plan_id":            plan.ID,
+			"plan_days":          plan.Days,
+			"plan_amount":        plan.Amount,
+			"device_extra_slots": surcharge / 50,
+			"autopay":            true,
 		}
 
+		// Slot purchases disable autopay; do not charge a stale candidate or a
+		// price changed while the subscription was being checked.
+		method, savedPlan, enabled, checkErr := userStore.GetAutopay(u.UserID)
+		latestSurcharge, priceErr := deviceSurcharge(u.UserID)
+		if checkErr != nil || priceErr != nil || !enabled || method != u.MethodID || savedPlan != plan.ID || latestSurcharge != surcharge {
+			continue
+		}
 		payment, err := yookassaClient.CreateAutoPayment(u.MethodID, plan.Amount, "Автопродление "+plan.Title, email, meta)
 		if err != nil {
 			log.Printf("autopay charge failed user=%s plan=%s: %v", u.UserID, plan.ID, err)
@@ -3160,6 +3176,7 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 			}
 		}
 		cancel()
+		invalidateMergedSubscriptionCache(strconv.FormatInt(cq.From.ID, 10))
 		switch {
 		case failed:
 			notice = "не удалось подтвердить удаление на всех панелях. обновите список и повторите при необходимости."
@@ -3172,7 +3189,13 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 		view = readSubscriptionDevices(ctx, configs, strconv.FormatInt(cq.From.ID, 10))
 		cancel()
 	}
+	view = filterLimitedDeviceView(view, primary, strconv.FormatInt(cq.From.ID, 10))
 	text, keyboard, buttons := devicesScreen(view, page, notice)
+	summary, devicePlan := devicePlanSummary(strconv.FormatInt(cq.From.ID, 10))
+	text += summary
+	if devicePlan.Enabled {
+		keyboard.InlineKeyboard = append([][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Дополнительные места · 50 ₽", "device_plan:show"))}, keyboard.InlineKeyboard...)
+	}
 	session.DeviceButtons = buttons
 	_ = updateSessionText(bot, cq.Message.Chat.ID, session, stateDevices, text, "HTML", keyboard)
 }
@@ -3390,7 +3413,7 @@ func minutesLabel(mins int) string {
 }
 
 func starsAmountForPlan(plan RatePlan) int {
-	n := int(math.Round(plan.Amount * 0.9))
+	n := int(math.Round(plan.Amount*0.9)) + plan.DeviceExtra*50
 	if n < 1 {
 		n = 1
 	}
@@ -3417,10 +3440,11 @@ func getActivePromoDiscount(userID string) (discountPct int, ok bool) {
 
 func choosePayKeyboardRaw(plan RatePlan, discountPct int) rawInlineKeyboardMarkup {
 	stars := starsAmountForPlan(plan)
-	cardLabel := fmt.Sprintf("💳 картой с автопродлением (%.0f ₽)", plan.Amount)
-	anyLabel := fmt.Sprintf("💲 любым способом (%.0f ₽)", plan.Amount)
+	total := plan.Amount + float64(plan.DeviceExtra*50)
+	cardLabel := fmt.Sprintf("💳 картой с автопродлением (%.0f ₽)", total)
+	anyLabel := fmt.Sprintf("💲 любым способом (%.0f ₽)", total)
 	if discountPct > 0 {
-		discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100) / 100
+		discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100)/100 + float64(plan.DeviceExtra*50)
 		cardLabel = fmt.Sprintf("💳 картой с автопродлением (%.0f ₽ −%d%%)", discounted, discountPct)
 		anyLabel = fmt.Sprintf("💲 любым способом (%.0f ₽ −%d%%)", discounted, discountPct)
 	}
@@ -3442,7 +3466,7 @@ func sendStarsInvoice(bot *tgbotapi.BotAPI, chatID int64, plan RatePlan) error {
 		{Label: plan.Title, Amount: stars},
 	}
 
-	payload := starsPayloadPrefix + plan.ID
+	payload := starsPlanPayload(plan)
 	startParam := "neuravpn_" + plan.ID
 	inv := tgbotapi.NewInvoice(
 		chatID,
@@ -3467,7 +3491,7 @@ func createStarsInvoiceLink(bot *tgbotapi.BotAPI, plan RatePlan) (string, error)
 		{Label: plan.Title, Amount: stars},
 	}
 
-	payload := starsPayloadPrefix + plan.ID
+	payload := starsPlanPayload(plan)
 	startParam := "neuravpn_" + plan.ID
 
 	pricesBytes, err := json.Marshal(prices)
@@ -3941,6 +3965,7 @@ func main() {
 	loadOnboardingFollowupState()
 	startExpiryReminder(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
+	startDevicePlanWorker()
 	startMergedTrafficLoop(bot)
 	startOnboardingFollowupLoop(bot, xrayCfg)
 	startTrialPaymentReminderLoop(bot)
@@ -5660,6 +5685,10 @@ func mergedSubscriptionEntryFresh(entry mergedSubscriptionCacheEntry, now time.T
 }
 
 func writeMergedSubscriptionEntry(w http.ResponseWriter, entry mergedSubscriptionCacheEntry, cacheStatus string) {
+	if title := hwidDenial(entry.headers); title != "" {
+		limitPlaceholder(w, title)
+		return
+	}
 	copySubscriptionHeaders(w.Header(), entry.headers)
 	w.Header().Set("X-Merged-Subscription-Status", entry.mergedStatus)
 	w.Header().Set("X-Merged-Subscription-Cache", cacheStatus)
@@ -5703,6 +5732,9 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 	upstream := <-upstreamCh
 	if upstream.err != nil {
 		return mergedSubscriptionCacheEntry{}, fmt.Errorf("fetch upstream: %w", upstream.err)
+	}
+	if upstream.statusCode < 200 || upstream.statusCode >= 300 {
+		return mergedSubscriptionCacheEntry{body: upstream.body, headers: upstream.headers, statusCode: upstream.statusCode, mergedStatus: "denied"}, nil
 	}
 	body := upstream.body
 	mergedStatus := "primary_only"
@@ -5835,6 +5867,9 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	if statusRequest {
 		handleSubscriptionStatus(w, r, targetUserID)
+		return
+	}
+	if !gateDeviceSubscription(w, r, targetUserID) {
 		return
 	}
 
@@ -7245,7 +7280,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		if payload := strings.TrimSpace(msg.SuccessfulPayment.InvoicePayload); strings.HasPrefix(payload, starsPayloadPrefix) {
 			planID = strings.TrimPrefix(payload, starsPayloadPrefix)
 		}
-		plan, ok := ratePlanByID[planID]
+		plan, ok := parseStarsPlan(planID)
 		if !ok {
 			_ = updateSessionText(bot, chatID, session, stateTopUp, "Платёж есть, но тариф не ясен. Напиши в поддержку.", "", mainMenuInlineKeyboard())
 			return
@@ -7279,7 +7314,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			return
 		}
 
-		marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "stars", plan.ID, float64(starsAmountForPlan(plan)), starsCurrency, time.Now())
+		marked, err := userStore.MarkPaymentApplied(userIDStr, paymentKey, "stars", plan.ID, float64(msg.SuccessfulPayment.TotalAmount), starsCurrency, time.Now())
 		if err != nil {
 			log.Printf("stars MarkPaymentApplied error: %v", err)
 			sendPaymentAlert(bot, "access issued but mark applied failed", msg.From.ID, msg.From.UserName, paymentKey, plan.ID, err.Error())
@@ -7743,6 +7778,13 @@ func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 }
 
 func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xraySettings) {
+	if cq == nil {
+		return
+	}
+	if strings.HasPrefix(cq.Data, "device_plan:") {
+		handleDevicePlanCallback(bot, cq)
+		return
+	}
 	if cq != nil && (cq.Data == "nav_devices" || strings.HasPrefix(cq.Data, "devices_")) {
 		handleDevicesCallback(bot, cq, xrCfg)
 		return
@@ -8006,6 +8048,12 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			ackCallback(bot, cq, "тариф не найден")
 			return
 		}
+		surcharge, err := deviceSurcharge(strconv.FormatInt(cq.From.ID, 10))
+		if err != nil {
+			ackCallback(bot, cq, "не удалось проверить цену")
+			return
+		}
+		p.DeviceExtra = surcharge / 50
 		session.PendingPlanID = p.ID
 		link, err := createStarsInvoiceLink(bot, p)
 		if err != nil {
@@ -8016,7 +8064,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		stars := starsAmountForPlan(p)
 		text := fmt.Sprintf(
 			"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %.0f ₽ или %d ⭐\n\nнажми «оплатить ⭐».",
-			p.Days, p.Amount, stars,
+			p.Days, p.Amount+float64(surcharge), stars,
 		)
 		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 			{rawURLButton("оплатить ⭐", link, "")},
@@ -8135,18 +8183,44 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 		}
 		ackCallback(bot, cq, "")
 
-	case data == "enable_autopay":
+	case data == "enable_autopay" || strings.HasPrefix(data, "enable_autopay:"):
 		userIDStr := strconv.FormatInt(int64(cq.From.ID), 10)
+		devicePlan, priceErr := currentDevicePlan(userIDStr)
+		if priceErr != nil {
+			ackText = "Не удалось проверить цену"
+			break
+		}
+		methodID, planID, _, _ := userStore.GetAutopay(userIDStr)
+		apPlan, validPlan := ratePlanByID[planID]
+		if methodID == "" || !validPlan {
+			ackText = "Сначала сохраните карту при оплате"
+			break
+		}
+		if data == "enable_autopay" {
+			text := fmt.Sprintf("Включить автопродление?\n\n%s: %.0f ₽ за каждое продление, включая %d дополнительных мест. Списание ближе к окончанию подписки.", apPlan.Title, apPlan.Amount+float64(devicePlan.ExtraSlots*50), devicePlan.ExtraSlots)
+			kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Подтвердить", "enable_autopay:"+strconv.Itoa(devicePlan.ExtraSlots)), tgbotapi.NewInlineKeyboardButtonData("Отмена", "nav_status")))
+			_ = updateSessionText(bot, chatID, session, stateSettings, text, "", kb)
+			break
+		}
+		expected, parseErr := strconv.Atoi(strings.TrimPrefix(data, "enable_autopay:"))
+		if parseErr != nil || expected != devicePlan.ExtraSlots {
+			ackText = "Цена изменилась. Откройте настройки заново"
+			break
+		}
 		if session.AutopayProposalMsgID > 0 {
 			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, session.AutopayProposalMsgID))
 			session.AutopayProposalMsgID = 0
 		}
 		// Включаем автопродление (работает и из proposal, и из профиля)
-		methodID, planID, _, _ := userStore.GetAutopay(userIDStr)
-		if methodID != "" && planID != "" {
-			if err := userStore.SetAutopay(userIDStr, methodID, planID); err != nil {
-				log.Printf("enable_autopay error user=%s: %v", userIDStr, err)
-			}
+		var enableErr error
+		if s, ok := userStore.(devicePlanStore); ok {
+			enableErr = s.EnableAutopayWithDevices(userIDStr, expected)
+		} else {
+			enableErr = userStore.SetAutopay(userIDStr, methodID, planID)
+		}
+		if enableErr != nil {
+			ackText = "Не удалось включить автопродление. Обновите настройки"
+			break
 		}
 		ackText = "автопродление включено ✅"
 		if session.State == stateSettings {
@@ -8606,19 +8680,28 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 	session.PendingPlanID = ""
 	session.PendingTrafficPackID = ""
 	discountPct, hasDiscount := getActivePromoDiscount(userID)
+	surcharge, priceErr := deviceSurcharge(userID)
+	if priceErr != nil {
+		ackCallback(bot, cq, "не удалось проверить стоимость")
+		return
+	}
 	var builder strings.Builder
 	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nоплата ⭐ звездами - <b>скидка 10%.</b>\n\nтарифы:\n")
 	for _, plan := range ratePlans {
+		plan.DeviceExtra = surcharge / 50
 		stars := starsAmountForPlan(plan)
 		if hasDiscount {
-			discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100) / 100
-			builder.WriteString(fmt.Sprintf("• %d дней — <s>%.0f ₽</s> %.0f ₽ (-%d%%) или %d⭐\n", plan.Days, plan.Amount, discounted, discountPct, stars))
+			discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100)/100 + float64(surcharge)
+			builder.WriteString(fmt.Sprintf("• %d дней — <s>%.0f ₽</s> %.0f ₽ (-%d%% на тариф) или %d⭐\n", plan.Days, plan.Amount+float64(surcharge), discounted, discountPct, stars))
 		} else {
-			builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount, stars))
+			builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount+float64(surcharge), stars))
 		}
 	}
 	if isAdmin(chatID) {
 		builder.WriteString(fmt.Sprintf("• %s — %.0f ₽ (тест)\n", testPlan.Title, testPlan.Amount))
+	}
+	if surcharge > 0 {
+		fmt.Fprintf(&builder, "\nВ ценах учтено дополнительных мест: %d (+%d ₽ за выбранный срок).\n", surcharge/50, surcharge)
 	}
 	header := strings.TrimSuffix(builder.String(), "\n")
 	_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboardRaw(chatID))
@@ -8628,13 +8711,19 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 	userID := strconv.FormatInt(chatID, 10)
 	session.PendingPlanID = plan.ID
 	session.PendingTrafficPackID = ""
+	surcharge, priceErr := deviceSurcharge(userID)
+	if priceErr != nil {
+		ackCallback(bot, cq, "не удалось проверить стоимость")
+		return
+	}
+	plan.DeviceExtra = surcharge / 50
 
 	stars := starsAmountForPlan(plan)
 	discountPct, hasDiscount := getActivePromoDiscount(userID)
-	priceStr := fmt.Sprintf("%.0f ₽", plan.Amount)
+	priceStr := fmt.Sprintf("%.0f ₽", plan.Amount+float64(surcharge))
 	if hasDiscount {
-		discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100) / 100
-		priceStr = fmt.Sprintf("%.0f ₽ (−%d%%, итого %.0f ₽)", plan.Amount, discountPct, discounted)
+		discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100)/100 + float64(surcharge)
+		priceStr = fmt.Sprintf("%.0f ₽ (−%d%% на тариф, итого %.0f ₽)", plan.Amount+float64(surcharge), discountPct, discounted)
 	}
 	text := fmt.Sprintf(
 		"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %s или %d ⭐\n\nвыберите способ оплаты:",
@@ -8646,6 +8735,10 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan, saveCard bool) error {
 	userID := strconv.FormatInt(chatID, 10)
 	finalAmount := plan.Amount
+	surcharge, priceErr := deviceSurcharge(userID)
+	if priceErr != nil {
+		return fmt.Errorf("device price unavailable: %w", priceErr)
+	}
 
 	// Применяем скидку по активному промокоду
 	if pg, ok := userStore.(interface {
@@ -8660,11 +8753,13 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 		}
 	}
 
+	finalAmount += float64(surcharge)
 	metadata := map[string]interface{}{
-		"plan_id":     plan.ID,
-		"plan_title":  plan.Title,
-		"plan_days":   plan.Days,
-		"plan_amount": finalAmount,
+		"plan_id":            plan.ID,
+		"plan_title":         plan.Title,
+		"plan_days":          plan.Days,
+		"plan_amount":        finalAmount,
+		"device_extra_slots": surcharge / 50,
 	}
 
 	email, _ := userStore.GetEmail(userID)
@@ -8675,6 +8770,9 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 
 	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">💳</tg-emoji> <b>%s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.0f ₽</b>\n\nспособы оплаты:\n• SberPay\n• T-Pay\n• СБП\n• ЮMoney\n• MirPay\n• Банковская карта\n\nнажмите «оплатить», чтобы открыть страницу оплаты.",
 		plan.Title, finalAmount)
+	if surcharge > 0 {
+		text += fmt.Sprintf("\n\nВключено дополнительных мест: %d · %d ₽ за выбранный срок.", surcharge/50, surcharge)
+	}
 	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawURLButton("оплатить", confirmationURL, "5344015205531686528")},
 		{rawCallbackButton("я оплатил", "check_payment", "", "5345823764720426390")},
@@ -9019,12 +9117,18 @@ func handlePreCheckout(bot *tgbotapi.BotAPI, pcq *tgbotapi.PreCheckoutQuery) {
 	errMsg := ""
 	if payload := strings.TrimSpace(pcq.InvoicePayload); strings.HasPrefix(payload, starsPayloadPrefix) {
 		id := strings.TrimPrefix(payload, starsPayloadPrefix)
-		if _, exists := ratePlanByID[id]; !exists {
+		plan, exists := parseStarsPlan(id)
+		if !exists {
 			ok = false
 			errMsg = "тариф не найден"
 		} else if strings.TrimSpace(pcq.Currency) != starsCurrency {
 			ok = false
 			errMsg = "неверная валюта"
+		}
+		surcharge, err := deviceSurcharge(strconv.FormatInt(pcq.From.ID, 10))
+		if err != nil || plan.DeviceExtra*50 != surcharge || pcq.TotalAmount != starsAmountForPlan(plan) {
+			ok = false
+			errMsg = "Цена или число устройств изменились. Создайте новый счёт в боте."
 		}
 	}
 	ans := tgbotapi.PreCheckoutConfig{
@@ -9195,7 +9299,12 @@ func handleProfileSettings(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, ses
 	autopayStatus := "выключено"
 	if apEnabled {
 		if apPlan, ok := ratePlanByID[apPlanID]; ok {
-			autopayStatus = fmt.Sprintf("включено (%s, %.0f ₽)", apPlan.Title, apPlan.Amount)
+			surcharge, err := deviceSurcharge(userIDStr)
+			if err == nil {
+				autopayStatus = fmt.Sprintf("включено (%s, %.0f ₽)", apPlan.Title, apPlan.Amount+float64(surcharge))
+			} else {
+				autopayStatus = "включено, цена временно недоступна"
+			}
 		} else {
 			autopayStatus = "включено"
 		}
@@ -9737,6 +9846,21 @@ func handleYooKassaWebhook(bot *tgbotapi.BotAPI, xrCfg *xraySettings, w http.Res
 	if err := json.Unmarshal(body, &notification); err != nil {
 		log.Printf("[webhook] unmarshal error: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if fmt.Sprint(notification.Object.Metadata["product_type"]) == "device_slot" {
+		if notification.Event != "payment.succeeded" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		p := notification.Object
+		_, err := applyDeviceSlotPayment(fmt.Sprint(p.Metadata["device_order_id"]), paymentUserID(p.Metadata["chat_id"]), p.ID)
+		if err != nil {
+			log.Printf("[devices] payment confirmation failed id=%s", p.ID)
+			http.Error(w, "payment verification pending", 503)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 

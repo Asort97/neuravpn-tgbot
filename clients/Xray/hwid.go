@@ -13,6 +13,48 @@ import (
 
 var ErrHWIDUnsupported = errors.New("panel does not support HWID API")
 
+// Preserve the complete client record, including panel fields unknown to this
+// bot. Changing a slot limit must not reset transport/authentication settings.
+func (x *XRayClient) SetHWIDLimit(ctx context.Context, email, userID string, limit int) error {
+	if email == "" || userID == "" || limit < 0 || limit > 100 {
+		return errors.New("invalid HWID limit target")
+	}
+	endpoint := x.PanelIdentity() + "/panel/api/clients/"
+	code, body, err := x.doAPIRequestContext(ctx, http.MethodGet, endpoint+"get/"+url.PathEscape(email), nil, map[string]string{"Accept": "application/json"}, true)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("client lookup HTTP %d", code)
+	}
+	var payload struct {
+		Success bool `json:"success"`
+		Obj     struct {
+			Client map[string]any `json:"client"`
+		} `json:"obj"`
+	}
+	if json.Unmarshal(body, &payload) != nil || !payload.Success || payload.Obj.Client == nil {
+		return errors.New("invalid client record")
+	}
+	record := payload.Obj.Client
+	if normalizeTgID(record["tgId"]) != userID {
+		return errors.New("device limit ownership mismatch")
+	}
+	if v, ok := record["uuid"]; ok {
+		record["id"] = v
+	}
+	record["limitHwid"] = limit
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	code, body, err = x.doAPIRequestContext(ctx, http.MethodPost, endpoint+"update/"+url.PathEscape(email), data, map[string]string{"Accept": "application/json", "Content-Type": "application/json"}, false)
+	if err != nil {
+		return err
+	}
+	return checkAPISuccess("set HWID limit", code, body)
+}
+
 type HWIDDevice struct {
 	ID          int    `json:"id"`
 	FirstSeen   int64  `json:"firstSeen"`
