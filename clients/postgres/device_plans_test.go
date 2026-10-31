@@ -43,7 +43,7 @@ func TestDevicePlansIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 	s := &Store{pool: pool}
-	_, err = pool.Exec(ctx, `CREATE TABLE users(id TEXT PRIMARY KEY,autopay_enabled BOOLEAN DEFAULT TRUE,autopay_method_id TEXT DEFAULT 'saved',autopay_plan_id TEXT DEFAULT '90d',updated_at TIMESTAMPTZ);
+	_, err = pool.Exec(ctx, `CREATE TABLE users(id TEXT PRIMARY KEY,subscription_id TEXT,autopay_enabled BOOLEAN DEFAULT TRUE,autopay_method_id TEXT DEFAULT 'saved',autopay_plan_id TEXT DEFAULT '90d',updated_at TIMESTAMPTZ);
  CREATE TABLE applied_payments(payment_id TEXT PRIMARY KEY,user_id TEXT,provider TEXT,plan_id TEXT,amount_value NUMERIC,currency TEXT);
  INSERT INTO users(id) VALUES('42'),('43');`)
 	if err != nil {
@@ -172,5 +172,14 @@ func TestDevicePlansIntegration(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("stale sync acknowledged new slot count")
+	}
+	if err = s.CompareAndSwapSubscriptionID(ctx, "43", "", "current"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.CompareAndSwapSubscriptionID(ctx, "43", "", "stale"); err != nil {
+		t.Fatal(err)
+	}
+	if sub, err := s.GetSubscriptionID("43"); err != nil || sub != "current" {
+		t.Fatal("subscription metadata repair overwrote a newer ID", err)
 	}
 }

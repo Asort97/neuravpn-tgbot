@@ -200,7 +200,7 @@ func gateDeviceSubscription(w http.ResponseWriter, r *http.Request, userID strin
 	request.Header = r.Header.Clone()
 	request.Header.Set("Accept", "text/plain")
 	request.Header.Set("User-Agent", "v2rayNG/1.10")
-	_, headers, code, err := fetchSubscriptionBody(ctx, upstream, request)
+	_, headers, code, err := fetchPrimarySubscriptionBody(ctx, xrayCfg, userID, upstream, request)
 	if err != nil {
 		http.Error(w, "device verification unavailable", 503)
 		return false
@@ -212,7 +212,7 @@ func gateDeviceSubscription(w http.ResponseWriter, r *http.Request, userID strin
 			http.Error(w, "device verification unavailable", 503)
 			return false
 		}
-		_, headers, code, err = fetchSubscriptionBody(ctx, upstream, request)
+		_, headers, code, err = fetchPrimarySubscriptionBody(ctx, xrayCfg, userID, upstream, request)
 		if err != nil {
 			http.Error(w, "device verification unavailable", 503)
 			return false

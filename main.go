@@ -5713,7 +5713,7 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 	}
 	upstreamCh := make(chan upstreamResult, 1)
 	go func() {
-		body, headers, statusCode, fetchErr := fetchSubscriptionBody(ctx, upstreamURL, requestTemplate)
+		body, headers, statusCode, fetchErr := fetchPrimarySubscriptionBody(ctx, xrayCfg, targetUserID, upstreamURL, requestTemplate)
 		upstreamCh <- upstreamResult{body: body, headers: headers, statusCode: statusCode, err: fetchErr}
 	}()
 	// The collector itself owns the deadline and returns successful partial
