@@ -101,8 +101,22 @@ func TestDevicesUnsupportedPanelIsNotAnEmptySuccess(t *testing.T) {
 	fb.unsupported = true
 	view := readSubscriptionDevices(context.Background(), []*xraySettings{a, b}, "42")
 	text, _, _ := devicesScreen(view, 0, "")
-	if view.Unsupported != 1 || len(view.Devices) != 1 || !strings.Contains(text, "список неполный") {
-		t.Fatalf("partial results hidden: %s", text)
+	if view.Unsupported != 1 || len(view.Devices) != 1 || !strings.Contains(text, "найдено устройств: 1") {
+		t.Fatalf("partial results misreported: %s", text)
+	}
+}
+
+func TestDevicesScreenOmitsTechnicalFooter(t *testing.T) {
+	for _, view := range []subscriptionDevices{{}, {Panels: 1}, {Panels: 2, Unavailable: 1}, {Panels: 2, Unsupported: 1}} {
+		text, _, _ := devicesScreen(view, 0, "устройство удалено")
+		for _, unwanted := range []string{"список неполный", "недоступно панелей", "без поддержки HWID API", "зарегистрированные HWID", "не подключения онлайн", "удаление записи не отключает VPN"} {
+			if strings.Contains(text, unwanted) {
+				t.Fatalf("technical footer remains: %s", unwanted)
+			}
+		}
+		if !strings.Contains(text, "устройство удалено") {
+			t.Fatal("action notice removed")
+		}
 	}
 }
 

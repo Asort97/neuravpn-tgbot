@@ -3077,15 +3077,6 @@ func devicesScreen(view subscriptionDevices, page int, notice string) (string, t
 	if notice != "" {
 		fmt.Fprintf(&text, "\n%s\n", html.EscapeString(notice))
 	}
-	if view.Panels == 0 || view.Unavailable+view.Unsupported > 0 {
-		text.WriteString("\nсписок неполный: ")
-		if view.Panels == 0 {
-			text.WriteString("панели не настроены.")
-		} else {
-			fmt.Fprintf(&text, "недоступно панелей: %d; без поддержки HWID API: %d.", view.Unavailable, view.Unsupported)
-		}
-	}
-	text.WriteString("\nэто зарегистрированные HWID, не подключения онлайн.\nудаление записи не отключает VPN: устройство может появиться снова после обновления подписки.\n")
 	if len(view.Devices) == 0 {
 		if view.Panels > 0 && view.Unavailable+view.Unsupported == 0 {
 			text.WriteString("\nустройства пока не зарегистрированы. не все приложения передают HWID.\n")
