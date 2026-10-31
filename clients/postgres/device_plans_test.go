@@ -135,4 +135,42 @@ func TestDevicePlansIntegration(t *testing.T) {
 	if p.Enabled || p.ExtraSlots != 0 {
 		t.Fatal("another account modified")
 	}
+	if _, err = pool.Exec(ctx, `UPDATE device_limit_policy SET enabled=TRUE; INSERT INTO users(id) VALUES('44');`); err != nil {
+		t.Fatal(err)
+	}
+	p, err = s.GetDevicePlan("44")
+	if err != nil || !p.Enabled || p.ExtraSlots != 0 {
+		t.Fatal("new account not enrolled", p, err)
+	}
+	p, _ = s.GetDevicePlan("43")
+	if p.Enabled {
+		t.Fatal("policy unexpectedly changes existing accounts")
+	}
+	if err = s.MarkDevicePlanSynced("44", 0); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := s.GetEnabledDevicePlans()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range queued {
+		if id == "44" {
+			t.Fatal("already synced account rechecked immediately")
+		}
+	}
+	pool.Exec(ctx, `UPDATE device_plans SET extra_slots=1 WHERE user_id='44'`)
+	if err = s.MarkDevicePlanSynced("44", 0); err != nil {
+		t.Fatal(err)
+	}
+	queued, err = s.GetEnabledDevicePlans()
+	if err != nil || len(queued) == 0 {
+		t.Fatal("pending slot change not queued", err)
+	}
+	found := false
+	for _, id := range queued {
+		found = found || id == "44"
+	}
+	if !found {
+		t.Fatal("stale sync acknowledged new slot count")
+	}
 }

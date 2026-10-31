@@ -43,6 +43,24 @@ CREATE TABLE IF NOT EXISTS device_slot_orders (
  applied_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS device_slot_orders_user ON device_slot_orders(user_id,created_at);
+ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS synced_extra_slots INTEGER;
+ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS device_limit_policy (
+ singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+ enabled BOOLEAN NOT NULL DEFAULT FALSE
+);
+INSERT INTO device_limit_policy(singleton,enabled) VALUES(TRUE,FALSE) ON CONFLICT DO NOTHING;
+CREATE OR REPLACE FUNCTION enroll_device_limit_plan() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.id ~ '^[1-9][0-9]*$' AND EXISTS(SELECT 1 FROM device_limit_policy WHERE singleton AND enabled) THEN
+  INSERT INTO device_plans(user_id,enabled) VALUES(NEW.id,TRUE) ON CONFLICT DO NOTHING;
+ END IF;
+ RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS enroll_device_limit_plan ON users;
+CREATE TRIGGER enroll_device_limit_plan AFTER INSERT ON users
+FOR EACH ROW EXECUTE FUNCTION enroll_device_limit_plan();
 `)
 	return err
 }
@@ -178,7 +196,9 @@ func (s *Store) RemoveExtraDeviceSlot(userID string, expected int) error {
 func (s *Store) GetEnabledDevicePlans() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	rows, err := s.pool.Query(ctx, `SELECT user_id FROM device_plans WHERE enabled`)
+	rows, err := s.pool.Query(ctx, `SELECT user_id FROM device_plans WHERE enabled
+ AND (synced_extra_slots IS DISTINCT FROM extra_slots OR last_synced_at IS NULL OR last_synced_at < NOW()-INTERVAL '1 hour')
+ ORDER BY (synced_extra_slots IS NOT DISTINCT FROM extra_slots),last_synced_at NULLS FIRST,user_id LIMIT 50`)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +212,14 @@ func (s *Store) GetEnabledDevicePlans() ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+func (s *Store) MarkDevicePlanSynced(userID string, extra int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.pool.Exec(ctx, `UPDATE device_plans SET synced_extra_slots=$2,last_synced_at=NOW()
+ WHERE user_id=$1 AND enabled AND extra_slots=$2`, userID, extra)
+	return err
 }
 
 func (s *Store) GetPendingDeviceSlotOrders() ([]DeviceSlotOrder, error) {

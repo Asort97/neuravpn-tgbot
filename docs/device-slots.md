@@ -41,10 +41,45 @@ INSERT INTO device_plans(user_id, enabled, extra_slots)
 VALUES ('623290294', TRUE, 0);
 ```
 
-The worker syncs native `limitHwid` to `5 + extra_slots` every minute, preserving
-other client fields. A payment is checked through the bot shop's YooKassa API,
+The worker checks up to 50 pending accounts each minute, prioritizing quantity
+changes. Successfully synchronized accounts are rechecked no sooner than one
+hour later. The first subscription fetch also initializes a missing native
+limit before releasing any configurations. Other client fields are preserved.
+A payment is checked through the bot shop's YooKassa API,
 then applied transactionally exactly once. Pending saved payment IDs are
 reconciled after restarts. No background job charges for slots automatically.
+
+## Global activation
+
+Deployment alone does not activate the policy. On the bot host, preview first:
+
+```bash
+sudo python3 /srv/vpnbot/deploy/enable_device_limits.py
+```
+
+At the announced activation time, run once:
+
+```bash
+sudo python3 /srv/vpnbot/deploy/enable_device_limits.py --apply
+```
+
+The command backs up PostgreSQL and the primary panel under a private
+`/root/device-rollout-*` directory, applies only `limitHwid` through the panel's
+bulk API, and keeps the most recent `last_seen` registrations (descending ID
+breaks ties). Existing paid quantities are preserved: the limit is 5 + extras.
+It also trims disabled subscriptions' excess HWIDs with the scoped delete API.
+Ambiguous/shared subscription ownership or a concurrent paid-quantity change
+stops the operation rather than overwriting data. Earlier panel batches may
+already have changed; review the backup and rerun preview before retrying.
+
+Only after panel verification does one PostgreSQL transaction enable current
+accounts and `device_limit_policy`. Its insert trigger enrolls future accounts,
+including those created by the site. No bot/site restart is required at
+activation. Merged nodes share the primary gate, not separate five-device quotas.
+This does not revoke already saved tunnel credentials or disconnect sessions.
+
+To stop future enrollment, set `device_limit_policy.enabled=FALSE`; existing
+plans and native limits are separate and are not undone by that flag.
 
 Check `device_plans`, `device_slot_orders`, and `[devices]` log lines. Never print
 subscription tokens, raw HWIDs, payment credentials, or complete panel records.
@@ -55,3 +90,4 @@ over customer changes; use the backup to restore only the affected record.
 
 Tests: `go test . ./clients/...`. PostgreSQL concurrency tests require a separate
 database whose name starts with `neuravpn_auth_test`; they refuse production DBs.
+CLI unit tests: `python -m unittest discover -s deploy -p 'test_*.py'`.

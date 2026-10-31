@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	xray "github.com/Asort97/vpnBot/clients/Xray"
 	"github.com/Asort97/vpnBot/clients/postgres"
 	yookassa "github.com/Asort97/vpnBot/clients/yooKassa"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -22,6 +24,46 @@ func (s *deviceTestStore) GetDevicePlan(id string) (postgres.DevicePlan, error) 
 }
 func (s *deviceTestStore) GetDays(string) (int64, error)            { return 10, nil }
 func (s *deviceTestStore) GetSubscriptionID(string) (string, error) { return "test-sub", nil }
+func (s *deviceTestStore) MarkDevicePlanSynced(string, int) error   { return nil }
+
+func TestFirstFetchEnablesNativeLimitBeforeServingNewSubscription(t *testing.T) {
+	oldStore, oldConfig := userStore, xrayCfg
+	t.Cleanup(func() { userStore, xrayCfg = oldStore, oldConfig })
+	userStore = &deviceTestStore{enabled: true}
+	limit, fetches := 0, 0
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/panel/api/clients/get/tgId/42":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "obj": []any{map[string]any{"client": map[string]any{"uuid": "keep", "email": "owned", "tgId": 42, "subId": "test-sub", "limitHwid": limit}}}})
+		case "/panel/api/clients/get/owned":
+			w.Write([]byte(`{"success":true,"obj":{"client":{"uuid":"keep","email":"owned","tgId":42,"subId":"test-sub","allowedIPs":""}}}`))
+		case "/panel/api/clients/update/owned":
+			var body struct {
+				Limit int `json:"limitHwid"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Limit != 5 {
+				t.Error("incorrect native limit")
+			}
+			limit = body.Limit
+			w.Write([]byte(`{"success":true}`))
+		default:
+			fetches++
+			if limit == 5 {
+				w.Header().Set("X-Hwid-Active", "true")
+			}
+			w.Write([]byte("configs-must-not-be-served-before-gate"))
+		}
+	}))
+	defer panel.Close()
+	u, _ := url.Parse(panel.URL)
+	xrayCfg = &xraySettings{client: xray.New("", "", u.Hostname(), u.Port(), ""), subBaseURL: panel.URL}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Hwid", "fresh-device")
+	w := httptest.NewRecorder()
+	if !gateDeviceSubscription(w, r, "42") || limit != 5 || fetches != 2 || w.Body.Len() != 0 {
+		t.Fatalf("first fetch bypassed initialization: limit=%d fetches=%d status=%d", limit, fetches, w.Code)
+	}
+}
 
 func TestDeviceGateBeforeCacheAndMergedLinks(t *testing.T) {
 	oldStore, oldConfig, oldSecret := userStore, xrayCfg, mergedSubSecret

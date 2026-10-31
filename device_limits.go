@@ -27,6 +27,7 @@ type devicePlanStore interface {
 	GetEnabledDevicePlans() ([]string, error)
 	GetPendingDeviceSlotOrders() ([]postgres.DeviceSlotOrder, error)
 	EnableAutopayWithDevices(string, int) error
+	MarkDevicePlanSynced(string, int) error
 }
 
 func starsPlanPayload(p RatePlan) string {
@@ -132,7 +133,12 @@ func syncPrimaryDeviceLimit(ctx context.Context, primary *xraySettings, userID s
 		return err
 	}
 	if len(clients) == 0 {
-		return errors.New("primary subscription not found")
+		// Accounts without a subscription must not starve the bounded worker.
+		// Their first subscription fetch still performs the native gate check.
+		if s, ok := userStore.(devicePlanStore); ok {
+			return s.MarkDevicePlanSynced(userID, p.ExtraSlots)
+		}
+		return nil
 	}
 	for _, c := range clients {
 		if c.TgID != userID || c.Email == "" {
@@ -143,6 +149,9 @@ func syncPrimaryDeviceLimit(ctx context.Context, primary *xraySettings, userID s
 				return err
 			}
 		}
+	}
+	if s, ok := userStore.(devicePlanStore); ok {
+		return s.MarkDevicePlanSynced(userID, p.ExtraSlots)
 	}
 	return nil
 }
@@ -195,6 +204,19 @@ func gateDeviceSubscription(w http.ResponseWriter, r *http.Request, userID strin
 	if err != nil {
 		http.Error(w, "device verification unavailable", 503)
 		return false
+	}
+	// Newly created primary clients may not have been visited by the worker yet.
+	// Never release their first configs until the native HWID gate is enabled.
+	if code == http.StatusOK && !strings.EqualFold(headers.Get("X-Hwid-Active"), "true") && hwidDenial(headers) == "" {
+		if err = syncPrimaryDeviceLimit(ctx, xrayCfg, userID); err != nil {
+			http.Error(w, "device verification unavailable", 503)
+			return false
+		}
+		_, headers, code, err = fetchSubscriptionBody(ctx, upstream, request)
+		if err != nil {
+			http.Error(w, "device verification unavailable", 503)
+			return false
+		}
 	}
 	if title := hwidDenial(headers); title != "" {
 		invalidateMergedSubscriptionCache(userID)
