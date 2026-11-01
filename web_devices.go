@@ -147,6 +147,10 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 				view = withoutDevice(view, device.Key)
 				break
 			}
+			if result == "absent" && partial {
+				fail(http.StatusServiceUnavailable, "Не удалось загрузить устройство. Попробуйте ещё раз.")
+				return
+			}
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		view, err = hidePendingDeviceDeletions(ctx, req.UserID, view)

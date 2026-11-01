@@ -112,3 +112,21 @@ func TestWebDevicesRechecksOwnership(t *testing.T) {
 		t.Fatal("ownership not rechecked")
 	}
 }
+
+func TestWebDeviceDeleteDoesNotClaimAbsentAfterLostSnapshotAndPanelFailure(t *testing.T) {
+	a, f := devicePanel(t, "a", 1, "0123456789ab")
+	setDeviceTestProviders(t)
+	h := newWebDevicesHandler(a, "test-secret")
+	w := httptest.NewRecorder()
+	h(w, deviceWebRequest(`{"user_id":"42","action":"list"}`, strings.Repeat("aa", 16)))
+	deviceSnapshots.Lock()
+	deviceSnapshots.values = make(map[string]deviceSnapshot)
+	deviceSnapshots.Unlock()
+	f.unsupported = true
+	id := webDevicesMAC("test-secret", "device\n42\nhwid:0123456789ab")
+	w = httptest.NewRecorder()
+	h(w, deviceWebRequest(`{"user_id":"42","action":"delete","id":"`+id+`"}`, strings.Repeat("bb", 16)))
+	if w.Code != 503 || strings.Contains(w.Body.String(), `"absent"`) || f.deletes != 0 {
+		t.Fatal("failed lookup reported absence", w.Code, w.Body.String())
+	}
+}

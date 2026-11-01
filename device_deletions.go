@@ -14,13 +14,18 @@ import (
 )
 
 type deviceDeletionStore interface {
-	QueueDeviceDeletion(context.Context, string, string, []string) error
-	PendingDeviceDeletions(context.Context, string) (map[string]bool, error)
+	QueueDeviceDeletion(context.Context, string, string, map[string][]postgres.DeviceDeletionTarget) error
+	PendingDeviceDeletions(context.Context, string) ([]postgres.DeviceDeletion, error)
 	ClaimDeviceDeletions(context.Context, int) ([]postgres.DeviceDeletion, error)
+	ClaimPanelDeviceDeletions(context.Context, string) ([]postgres.DeviceDeletion, error)
 	CompleteDeviceDeletion(context.Context, string) error
+	ResolveDeviceDeletionTargets(context.Context, string, []postgres.DeviceDeletionTarget) error
 }
 
-var deviceDeletionWake = make(chan struct{}, 1)
+var deviceDeletionWakes = struct {
+	sync.Mutex
+	panels map[string]chan struct{}
+}{panels: make(map[string]chan struct{})}
 
 type deviceSnapshot struct {
 	view    subscriptionDevices
@@ -74,9 +79,13 @@ func queueDeviceDeletion(ctx context.Context, configs []*xraySettings, userID st
 	if !ok {
 		return errors.New("device deletion storage unavailable")
 	}
-	panels := make([]string, 0, len(configs))
+	panels := make(map[string][]postgres.DeviceDeletionTarget, len(configs))
 	for _, cfg := range configs {
-		panels = append(panels, deletionPanelID(cfg))
+		panels[deletionPanelID(cfg)] = nil
+	}
+	for _, record := range device.Records {
+		panel := deletionPanelID(record.Config)
+		panels[panel] = append(panels[panel], deletionTarget(record))
 	}
 	if err := s.QueueDeviceDeletion(ctx, userID, device.Key, panels); err != nil {
 		return err
@@ -90,10 +99,16 @@ func queueDeviceDeletion(ctx context.Context, configs []*xraySettings, userID st
 	}
 	deviceSnapshots.Unlock()
 	invalidateMergedSubscriptionCache(userID)
-	select {
-	case deviceDeletionWake <- struct{}{}:
-	default:
+	deviceDeletionWakes.Lock()
+	for panel := range panels {
+		if wake := deviceDeletionWakes.panels[panel]; wake != nil {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		}
 	}
+	deviceDeletionWakes.Unlock()
 	return nil
 }
 
@@ -113,18 +128,40 @@ func hidePendingDeviceDeletions(ctx context.Context, userID string, view subscri
 	if !ok {
 		return view, nil
 	}
-	keys, err := s.PendingDeviceDeletions(ctx, userID)
+	jobs, err := s.PendingDeviceDeletions(ctx, userID)
 	if err != nil {
 		return view, err
 	}
-	filtered := make([]subscriptionDevice, 0, len(view.Devices))
+	var remaining []ownedHWIDDevice
 	for _, d := range view.Devices {
-		if !keys[d.Key] {
-			filtered = append(filtered, d)
+		for _, record := range d.Records {
+			hidden := false
+			for _, job := range jobs {
+				if job.DeviceKey == d.Key && job.Panel == deletionPanelID(record.Config) && (job.Targets == nil || containsDeletionTarget(job.Targets, record)) {
+					hidden = true
+					break
+				}
+			}
+			if !hidden {
+				remaining = append(remaining, record)
+			}
 		}
 	}
-	view.Devices = filtered
+	view.Devices = groupSubscriptionDevices(remaining)
 	return view, nil
+}
+
+func deletionTarget(record ownedHWIDDevice) postgres.DeviceDeletionTarget {
+	return postgres.DeviceDeletionTarget{ID: record.Device.ID, SubID: record.SubID, FirstSeen: record.Device.FirstSeen}
+}
+
+func containsDeletionTarget(targets []postgres.DeviceDeletionTarget, record ownedHWIDDevice) bool {
+	for _, target := range targets {
+		if target == deletionTarget(record) {
+			return true
+		}
+	}
+	return false
 }
 
 func executeDeviceDeletion(ctx context.Context, cfg *xraySettings, job postgres.DeviceDeletion) error {
@@ -133,13 +170,30 @@ func executeDeviceDeletion(ctx context.Context, cfg *xraySettings, job postgres.
 	if err != nil {
 		return err
 	}
+	if job.Targets == nil {
+		job.Targets = make([]postgres.DeviceDeletionTarget, 0)
+		for _, device := range groupSubscriptionDevices(records) {
+			if device.Key == job.DeviceKey {
+				for _, record := range device.Records {
+					job.Targets = append(job.Targets, deletionTarget(record))
+				}
+			}
+		}
+		s, ok := userStore.(deviceDeletionStore)
+		if !ok {
+			return errors.New("device deletion storage unavailable")
+		}
+		if err := s.ResolveDeviceDeletionTargets(ctx, job.ID, job.Targets); err != nil {
+			return err
+		}
+	}
 	for _, device := range groupSubscriptionDevices(records) {
 		if device.Key != job.DeviceKey {
 			continue
 		}
 		for _, record := range device.Records {
-			// A device explicitly registered again after this request is not an old record.
-			if record.Device.FirstSeen > job.RequestedAt.UnixMilli() {
+			// Native identity is stable across independent panel/database clocks.
+			if !containsDeletionTarget(job.Targets, record) {
 				continue
 			}
 			deleteErr := cfg.client.DeleteHWIDDevice(ctx, record.Email, record.Device.ID)
@@ -165,49 +219,45 @@ func startDeviceDeletionWorker() {
 	if !ok {
 		return
 	}
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-			case <-deviceDeletionWake:
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			jobs, err := s.ClaimDeviceDeletions(ctx, 4)
-			cancel()
-			if err != nil {
-				log.Print("[devices] deletion queue unavailable")
-				continue
-			}
-			configs := make(map[string]*xraySettings)
-			for _, cfg := range deviceProviderConfigs(xrayCfg) {
-				configs[deletionPanelID(cfg)] = cfg
-			}
-			var wg sync.WaitGroup
-			for _, job := range jobs {
-				wg.Add(1)
-				go func(job postgres.DeviceDeletion) {
-					defer wg.Done()
-					cfg := configs[job.Panel]
-					if cfg == nil {
-						log.Printf("[devices] deletion target no longer configured job=%s", job.ID)
-						return
+	for _, cfg := range deviceProviderConfigs(xrayCfg) {
+		panel := deletionPanelID(cfg)
+		wake := make(chan struct{}, 1)
+		deviceDeletionWakes.Lock()
+		deviceDeletionWakes.panels[panel] = wake
+		deviceDeletionWakes.Unlock()
+		go func(cfg *xraySettings, panel string, wake chan struct{}) {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				jobs, err := s.ClaimPanelDeviceDeletions(ctx, panel)
+				cancel()
+				if err != nil {
+					log.Print("[devices] deletion queue unavailable")
+				}
+				if err != nil || len(jobs) == 0 {
+					select {
+					case <-ticker.C:
+					case <-wake:
 					}
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					if err := executeDeviceDeletion(ctx, cfg, job); err != nil {
-						log.Printf("[devices] deletion retry scheduled job=%s", job.ID)
-						return
-					}
-					if err := s.CompleteDeviceDeletion(ctx, job.ID); err != nil {
-						log.Printf("[devices] deletion acknowledgement failed job=%s", job.ID)
-						return
-					}
-					invalidateMergedSubscriptionCache(job.UserID)
-				}(job)
+					continue
+				}
+				for _, job := range jobs {
+					func(job postgres.DeviceDeletion) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if err := executeDeviceDeletion(ctx, cfg, job); err != nil {
+							log.Printf("[devices] deletion retry scheduled job=%s", job.ID)
+							return
+						}
+						if err := s.CompleteDeviceDeletion(ctx, job.ID); err != nil {
+							log.Printf("[devices] deletion acknowledgement failed job=%s", job.ID)
+							return
+						}
+						invalidateMergedSubscriptionCache(job.UserID)
+					}(job)
+				}
 			}
-			wg.Wait()
-		}
-	}()
+		}(cfg, panel, wake)
+	}
 }

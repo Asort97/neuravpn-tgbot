@@ -3151,17 +3151,24 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 	view := deviceView(ctx, configs, strconv.FormatInt(cq.From.ID, 10), deleting)
 	cancel()
 	if deleting {
+		matched := false
 		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
 		for _, device := range view.Devices {
 			if device.Key != selection.Key {
 				continue
 			}
+			matched = true
 			if err := queueDeviceDeletion(ctx, configs, strconv.FormatInt(cq.From.ID, 10), device); err != nil {
 				notice = "не удалось сохранить изменение. попробуйте ещё раз."
 			} else {
 				view = withoutDevice(view, device.Key)
 			}
 			break
+		}
+		if !matched && (view.Panels == 0 || view.Unavailable+view.Unsupported > 0) {
+			if err := queueDeviceDeletion(ctx, configs, strconv.FormatInt(cq.From.ID, 10), subscriptionDevice{Key: selection.Key}); err != nil {
+				notice = "не удалось сохранить изменение. попробуйте ещё раз."
+			}
 		}
 		cancel()
 	}

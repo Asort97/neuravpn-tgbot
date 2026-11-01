@@ -321,3 +321,27 @@ func TestReadDevicesCancelsUnavailablePanel(t *testing.T) {
 		t.Fatal("unreachable panel must not become an empty success")
 	}
 }
+
+func TestDeviceCallbackPreservesIntentWhenSnapshotEvicted(t *testing.T) {
+	a, f := devicePanel(t, "a", 1, "0123456789ab")
+	setDeviceTestProviders(t)
+	bot, _ := deviceTestBot(t)
+	handleCallback(bot, deviceCallback("nav_devices"), a)
+	var token string
+	for key := range getSession(42).DeviceButtons {
+		token = key
+	}
+	deviceSnapshots.Lock()
+	deviceSnapshots.values = make(map[string]deviceSnapshot)
+	deviceSnapshots.Unlock()
+	f.unsupported = true
+	handleCallback(bot, deviceCallback("devices_del:"+token), a)
+	if len(userStore.(*deletionTestStore).jobs) != 1 {
+		t.Fatal("deletion intent lost with panel outage")
+	}
+	f.unsupported = false
+	drainDeviceDeletions(t, a)
+	if f.deletes != 1 {
+		t.Fatal("deferred deletion did not reach native API")
+	}
+}
