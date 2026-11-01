@@ -85,12 +85,17 @@ func TestWebDevicesDeletesMergedOwnedRecordsOnly(t *testing.T) {
 	}
 	fb.failDelete = true
 	out = call(`{"user_id":"42","action":"delete","id":"`+id+`"}`, "cd")
-	if out["result"] != "partial" || fa.deletes != 1 || fb.deletes != 0 {
-		t.Fatal("partial deletion concealed")
+	if out["result"] != "queued" || len(out["devices"].([]any)) != 0 || fa.deletes != 0 || fb.deletes != 0 {
+		t.Fatal("deletion request waited for panels")
+	}
+	drainDeviceDeletions(t, a)
+	if fa.deletes != 1 || fb.deletes != 0 || len(userStore.(*deletionTestStore).jobs) != 1 {
+		t.Fatal("native deletion retry missing")
 	}
 	fb.failDelete = false
-	out = call(`{"user_id":"42","action":"delete","id":"`+id+`"}`, "de")
-	if out["result"] != "deleted" || len(out["devices"].([]any)) != 0 || fb.deletes != 1 {
+	drainDeviceDeletions(t, a)
+	out = call(`{"user_id":"42","action":"list"}`, "de")
+	if len(out["devices"].([]any)) != 0 || fb.deletes != 1 {
 		t.Fatal("merged delete failed")
 	}
 }

@@ -215,7 +215,10 @@ CREATE TABLE IF NOT EXISTS users (
 	if err != nil {
 		return err
 	}
-	return s.initDevicePlans(ctx)
+	if err := s.initDevicePlans(ctx); err != nil {
+		return err
+	}
+	return s.initDeviceDeletions(ctx)
 }
 
 // Close releases the underlying pool.

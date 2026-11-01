@@ -18,13 +18,15 @@ import (
 )
 
 type devicePanelFixture struct {
-	mu          sync.Mutex
-	devices     []xray.HWIDDevice
-	deletes     int
-	lists       int
-	failDelete  bool
-	unsupported bool
-	foreign     bool
+	mu              sync.Mutex
+	devices         []xray.HWIDDevice
+	deletes         int
+	lists           int
+	failDelete      bool
+	unsupported     bool
+	foreign         bool
+	keepDeleted     bool
+	lostDeleteReply bool
 }
 
 func devicePanel(t *testing.T, sub string, id int, fingerprint string) (*xraySettings, *devicePanelFixture) {
@@ -58,7 +60,13 @@ func devicePanel(t *testing.T, sub string, id int, fingerprint string) (*xraySet
 				return
 			}
 			f.deletes++
-			f.devices = nil
+			if !f.keepDeleted {
+				f.devices = nil
+			}
+			if f.lostDeleteReply {
+				w.WriteHeader(502)
+				return
+			}
 			_, _ = w.Write([]byte(`{"success":true}`))
 		default:
 			t.Errorf("unexpected/foreign request %s %s", r.Method, r.URL.Path)
@@ -180,12 +188,15 @@ func deviceTestBot(t *testing.T) (*tgbotapi.BotAPI, *deviceTelegramFixture) {
 func setDeviceTestProviders(t *testing.T, configs ...*xraySettings) {
 	t.Helper()
 	old, oldSingle := mergedXrayCfgs, mergedXrayCfg
+	oldStore := userStore
+	userStore = &deletionTestStore{DataStore: oldStore}
 	mergedXrayCfgs, mergedXrayCfg = configs, nil
 	userSessionsMu.Lock()
 	oldSession := userSessions[42]
 	delete(userSessions, 42)
 	userSessionsMu.Unlock()
 	t.Cleanup(func() {
+		userStore = oldStore
 		mergedXrayCfgs, mergedXrayCfg = old, oldSingle
 		userSessionsMu.Lock()
 		delete(userSessions, 42)
@@ -215,6 +226,10 @@ func TestDeviceCallbackDeletesOnlyOwnedHWIDAcrossAllPanels(t *testing.T) {
 		token = key
 	}
 	handleCallback(bot, deviceCallback("devices_del:"+token), a)
+	if fa.deletes != 0 || fb.deletes != 0 || !strings.Contains(tg.text, "ваши устройства: 0") {
+		t.Fatal("UI waited for panel deletion")
+	}
+	drainDeviceDeletions(t, a)
 	if fa.deletes != 1 || fb.deletes != 1 || !strings.Contains(tg.text, "ваши устройства: 0") {
 		t.Fatalf("delete did not reach all panels: %d %d %s", fa.deletes, fb.deletes, tg.text)
 	}
@@ -240,7 +255,7 @@ func TestDeviceCallbackRejectsOtherUserAndForgedToken(t *testing.T) {
 	}
 }
 
-func TestDeviceCallbackDoesNotClaimSuccessOnPartialDeletion(t *testing.T) {
+func TestDeviceCallbackQueuesUnavailablePanelWithoutWarning(t *testing.T) {
 	a, fa := devicePanel(t, "a", 1, "0123456789ab")
 	b, fb := devicePanel(t, "b", 2, "0123456789ab")
 	fb.failDelete = true
@@ -252,8 +267,17 @@ func TestDeviceCallbackDoesNotClaimSuccessOnPartialDeletion(t *testing.T) {
 		token = key
 	}
 	handleCallback(bot, deviceCallback("devices_del:"+token), a)
-	if fa.deletes != 1 || fb.deletes != 0 || !strings.Contains(tg.text, "не удалось подтвердить") {
-		t.Fatalf("partial deletion hidden: %s", tg.text)
+	drainDeviceDeletions(t, a)
+	if fa.deletes != 1 || fb.deletes != 0 || strings.Contains(tg.text, "не удалось подтвердить") || !strings.Contains(tg.text, "ваши устройства: 0") {
+		t.Fatalf("queued deletion not handled: %s", tg.text)
+	}
+	if len(userStore.(*deletionTestStore).jobs) != 1 {
+		t.Fatal("failed panel was not retained for retry")
+	}
+	fb.failDelete = false
+	drainDeviceDeletions(t, a)
+	if fb.deletes != 1 || len(userStore.(*deletionTestStore).jobs) != 0 {
+		t.Fatal("retry did not delete record")
 	}
 }
 
@@ -268,6 +292,7 @@ func TestDeviceDeletionRechecksOwnershipAndExpiredButtons(t *testing.T) {
 	}
 	fa.foreign = true
 	handleCallback(bot, deviceCallback("devices_del:"+token), a)
+	drainDeviceDeletions(t, a)
 	if fa.deletes != 0 {
 		t.Fatal("device deleted after losing ownership")
 	}

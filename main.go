@@ -3148,38 +3148,31 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 	}
 	configs := deviceProviderConfigs(primary)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	view := readSubscriptionDevices(ctx, configs, strconv.FormatInt(cq.From.ID, 10))
+	view := deviceView(ctx, configs, strconv.FormatInt(cq.From.ID, 10), deleting)
 	cancel()
 	if deleting {
-		matched := false
-		failed := view.Unavailable+view.Unsupported > 0 || view.Panels == 0
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
 		for _, device := range view.Devices {
 			if device.Key != selection.Key {
 				continue
 			}
-			matched = true
-			// Every target is freshly resolved through the caller's Telegram ID.
-			for _, record := range device.Records {
-				if err := record.Config.client.DeleteHWIDDevice(ctx, record.Email, record.Device.ID); err != nil {
-					failed = true
-				}
+			if err := queueDeviceDeletion(ctx, configs, strconv.FormatInt(cq.From.ID, 10), device); err != nil {
+				notice = "не удалось сохранить изменение. попробуйте ещё раз."
+			} else {
+				view = withoutDevice(view, device.Key)
 			}
+			break
 		}
-		cancel()
-		invalidateMergedSubscriptionCache(strconv.FormatInt(cq.From.ID, 10))
-		switch {
-		case failed:
-			notice = "не удалось подтвердить удаление на всех панелях. обновите список и повторите при необходимости."
-		case !matched:
-			notice = "запись устройства уже отсутствует. список обновлён."
-		default:
-			notice = "запись устройства удалена со всех доступных панелей."
-		}
-		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
-		view = readSubscriptionDevices(ctx, configs, strconv.FormatInt(cq.From.ID, 10))
 		cancel()
 	}
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	filtered, err := hidePendingDeviceDeletions(ctx, strconv.FormatInt(cq.From.ID, 10), view)
+	cancel()
+	if err != nil {
+		log.Printf("[devices] pending deletion lookup failed user=%d", cq.From.ID)
+		return
+	}
+	view = filtered
 	view = filterLimitedDeviceView(view, primary, strconv.FormatInt(cq.From.ID, 10))
 	text, keyboard, buttons := devicesScreen(view, page, notice)
 	summary, devicePlan := devicePlanSummary(strconv.FormatInt(cq.From.ID, 10))
@@ -3957,6 +3950,7 @@ func main() {
 	startExpiryReminder(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
 	startDevicePlanWorker()
+	startDeviceDeletionWorker()
 	startMergedTrafficLoop(bot)
 	startOnboardingFollowupLoop(bot, xrayCfg)
 	startTrialPaymentReminderLoop(bot)

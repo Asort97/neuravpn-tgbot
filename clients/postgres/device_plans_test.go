@@ -52,6 +52,7 @@ func TestDevicePlansIntegration(t *testing.T) {
 	if err = s.initDevicePlans(ctx); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("durable device deletion queue", func(t *testing.T) { testDeviceDeletionQueue(t, s) })
 	p, err := s.GetDevicePlan("43")
 	if err != nil || p.Enabled || p.ExtraSlots != 0 {
 		t.Fatal("mass rollout not default off")

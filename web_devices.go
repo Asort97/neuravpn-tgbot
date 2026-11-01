@@ -125,7 +125,7 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 		read := func() subscriptionDevices {
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
-			return readSubscriptionDevices(ctx, configs, req.UserID)
+			return deviceView(ctx, configs, req.UserID, req.Action == "delete")
 		}
 		view := read()
 		partial := view.Panels == 0 || view.Unavailable+view.Unsupported > 0
@@ -133,26 +133,27 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 		result := ""
 		if req.Action == "delete" {
 			result = "absent"
-			failed := partial
-			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
 			for _, device := range view.Devices {
 				if !hmac.Equal([]byte(idFor(device.Key)), []byte(req.ID)) {
 					continue
 				}
-				result = "deleted"
-				for _, record := range device.Records {
-					if record.Config.client.DeleteHWIDDevice(ctx, record.Email, record.Device.ID) != nil {
-						failed = true
-					}
+				if err := queueDeviceDeletion(ctx, configs, req.UserID, device); err != nil {
+					fail(http.StatusServiceUnavailable, "Не удалось сохранить изменение. Попробуйте ещё раз.")
+					return
 				}
+				result = "queued"
+				view = withoutDevice(view, device.Key)
+				break
 			}
-			cancel()
-			invalidateMergedSubscriptionCache(req.UserID)
-			if failed {
-				result = "partial"
-			}
-			view = read()
-			partial = view.Panels == 0 || view.Unavailable+view.Unsupported > 0
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		view, err = hidePendingDeviceDeletions(ctx, req.UserID, view)
+		cancel()
+		if err != nil {
+			fail(http.StatusServiceUnavailable, "Не удалось загрузить устройства")
+			return
 		}
 		type deviceJSON struct {
 			ID       string `json:"id"`
