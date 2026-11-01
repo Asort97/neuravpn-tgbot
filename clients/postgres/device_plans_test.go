@@ -43,7 +43,7 @@ func TestDevicePlansIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 	s := &Store{pool: pool}
-	_, err = pool.Exec(ctx, `CREATE TABLE users(id TEXT PRIMARY KEY,subscription_id TEXT,autopay_enabled BOOLEAN DEFAULT TRUE,autopay_method_id TEXT DEFAULT 'saved',autopay_plan_id TEXT DEFAULT '90d',updated_at TIMESTAMPTZ);
+	_, err = pool.Exec(ctx, `CREATE TABLE users(id TEXT PRIMARY KEY,subscription_id TEXT,days BIGINT DEFAULT 123,autopay_enabled BOOLEAN DEFAULT TRUE,autopay_method_id TEXT DEFAULT 'saved',autopay_plan_id TEXT DEFAULT '90d',updated_at TIMESTAMPTZ);
  CREATE TABLE applied_payments(payment_id TEXT PRIMARY KEY,user_id TEXT,provider TEXT,plan_id TEXT,amount_value NUMERIC,currency TEXT);
  INSERT INTO users(id) VALUES('42'),('43');`)
 	if err != nil {
@@ -53,6 +53,7 @@ func TestDevicePlansIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Run("durable device deletion queue", func(t *testing.T) { testDeviceDeletionQueue(t, s) })
+	t.Run("subscription reissue", func(t *testing.T) { testSubscriptionReissueStore(t, s) })
 	p, err := s.GetDevicePlan("43")
 	if err != nil || p.Enabled || p.ExtraSlots != 0 {
 		t.Fatal("mass rollout not default off")

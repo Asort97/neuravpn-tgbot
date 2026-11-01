@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const webDevicesPath = "/internal/web/devices"
@@ -78,7 +80,7 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			return
 		}
 		uid, err := strconv.ParseInt(req.UserID, 10, 64)
-		if err != nil || uid <= 0 || strconv.FormatInt(uid, 10) != req.UserID || (req.Action != "list" && req.Action != "delete" && req.Action != "purchase" && req.Action != "check" && req.Action != "reduce") || (req.Action == "delete" && len(req.ID) != 64) || (req.Action == "check" && len(req.ID) != 36) {
+		if err != nil || uid <= 0 || strconv.FormatInt(uid, 10) != req.UserID || (req.Action != "list" && req.Action != "delete" && req.Action != "purchase" && req.Action != "check" && req.Action != "reduce" && req.Action != "reissue" && req.Action != "reissue_status") || (req.Action == "delete" && len(req.ID) != 64) || (req.Action == "check" && len(req.ID) != 36) {
 			fail(http.StatusBadRequest, "bad request")
 			return
 		}
@@ -88,6 +90,31 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			return
 		}
 		defer session.DevicesMu.Unlock()
+		if req.Action == "reissue" || req.Action == "reissue_status" {
+			if req.UserID != reissuePilotID {
+				fail(403, "Недоступно")
+				return
+			}
+			if req.Action == "reissue" {
+				if req.ID == "initial" {
+					req.ID = ""
+				} else if _, err := uuid.Parse(req.ID); err != nil {
+					fail(400, "Обновите подтверждение")
+					return
+				}
+				if _, err := requestSubscriptionReissue(req.UserID, req.ID); err != nil {
+					fail(503, "Не удалось запустить перевыпуск. Повторите позже.")
+					return
+				}
+			}
+			state, err := reissuePublicState(req.UserID)
+			if err != nil {
+				fail(503, "Не удалось проверить перевыпуск")
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"devices": []any{}, "reissue": state})
+			return
+		}
 		if req.Action == "reduce" {
 			if err := reduceDeviceSlots(req.UserID); err != nil {
 				fail(409, "Не удалось убрать место. Сначала удалите лишнее устройство и обновите список.")
@@ -174,6 +201,7 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			fail(503, "Не удалось проверить лимит устройств")
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices, "partial": partial, "result": result, "device_plan": plan})
+		reissue, _ := reissuePublicState(req.UserID)
+		_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices, "partial": partial, "result": result, "device_plan": plan, "reissue": reissue})
 	}
 }

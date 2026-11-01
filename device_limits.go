@@ -118,6 +118,13 @@ func filterLimitedDeviceView(view subscriptionDevices, primary *xraySettings, us
 }
 
 func syncPrimaryDeviceLimit(ctx context.Context, primary *xraySettings, userID string) error {
+	unlock := lockReissuePanel(userID, primary)
+	defer unlock()
+	if primary != nil && primary.client != nil {
+		if err := reissuePanelReady(userID, primary); err != nil {
+			return err
+		}
+	}
 	p, err := currentDevicePlan(userID)
 	if err != nil {
 		return err

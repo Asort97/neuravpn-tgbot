@@ -629,6 +629,23 @@ func isSubscribedToChannel(bot *tgbotapi.BotAPI, userID int64) (bool, error) {
 }
 
 func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addDays int64, createIfMissing bool) (*accessInfo, error) {
+	unlock := lockReissuePanel(telegramUser, cfg)
+	info, err := ensureXrayAccessUnserialized(cfg, telegramUser, email, addDays, createIfMissing)
+	unlock()
+	if err == nil && addDays != 0 && !testMode {
+		if syncErr := syncMergedAccessForUser(telegramUser); syncErr != nil {
+			log.Printf("[merged-sync] user=%s addDays=%d err=%v", telegramUser, addDays, syncErr)
+		}
+	}
+	return info, err
+}
+
+func ensureXrayAccessUnserialized(cfg *xraySettings, telegramUser string, email string, addDays int64, createIfMissing bool) (*accessInfo, error) {
+	if cfg != nil && cfg.client != nil {
+		if err := reissuePanelReady(telegramUser, cfg); err != nil {
+			return nil, err
+		}
+	}
 	// В тестовом режиме возвращаем заглушку
 	if testMode {
 		fakeExpiry := time.Now().Add(30 * 24 * time.Hour)
@@ -778,9 +795,6 @@ func ensureXrayAccess(cfg *xraySettings, telegramUser string, email string, addD
 	accessCache.Store(telegramUser, result)
 	if addDays != 0 {
 		invalidateMergedSubscriptionCache(telegramUser)
-		if err := syncMergedAccessForUser(telegramUser); err != nil {
-			log.Printf("[merged-sync] user=%s addDays=%d err=%v", telegramUser, addDays, err)
-		}
 	}
 	return result, nil
 }
@@ -3182,6 +3196,9 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 	view = filtered
 	view = filterLimitedDeviceView(view, primary, strconv.FormatInt(cq.From.ID, 10))
 	text, keyboard, buttons := devicesScreen(view, page, notice)
+	if strconv.FormatInt(cq.From.ID, 10) == reissuePilotID {
+		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Перевыпустить подписку", "reissue:show")))
+	}
 	summary, devicePlan := devicePlanSummary(strconv.FormatInt(cq.From.ID, 10))
 	text += summary
 	if devicePlan.Enabled {
@@ -3958,6 +3975,7 @@ func main() {
 	startAutopayLoop(bot, xrayCfg)
 	startDevicePlanWorker()
 	startDeviceDeletionWorker()
+	startSubscriptionReissueWorkers()
 	startMergedTrafficLoop(bot)
 	startOnboardingFollowupLoop(bot, xrayCfg)
 	startTrialPaymentReminderLoop(bot)
@@ -4111,6 +4129,14 @@ func mergedSubscriptionToken(userID string) string {
 	}
 	h := hmac.New(sha256.New, []byte(secret))
 	_, _ = h.Write([]byte(userID))
+	if r, err := currentReissue(userID); err != nil {
+		return ""
+	} else if r.Generation != "" {
+		if !r.Active {
+			return ""
+		}
+		_, _ = h.Write([]byte("\nreissue-v1\n" + r.Generation))
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -4133,6 +4159,9 @@ func buildMergedSubscriptionURL(userID string) string {
 }
 
 func publicSubscriptionURLForUser(cfg *xraySettings, userID string, info *accessInfo) string {
+	if r, err := currentReissue(userID); err != nil || (r.Generation != "" && !r.Active) {
+		return ""
+	}
 	if mergedURL := buildMergedSubscriptionURL(userID); strings.TrimSpace(mergedURL) != "" {
 		return mergedURL
 	}
@@ -4853,6 +4882,13 @@ func setVLESSLinkDisplayName(link, title string) string {
 }
 
 func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (*xray.Client, int, error) {
+	unlock := lockReissuePanel(userID, cfg)
+	defer unlock()
+	if cfg != nil && cfg.client != nil {
+		if err := reissuePanelReady(userID, cfg); err != nil {
+			return nil, 0, err
+		}
+	}
 	if cfg == nil || cfg.client == nil {
 		return nil, 0, fmt.Errorf("merged xray not configured")
 	}
@@ -5309,6 +5345,9 @@ func buildAllMergedProviderLinksContext(ctx context.Context, userID, subID strin
 	var repairInfo *accessInfo
 	var repairErr error
 	return collectMergedProviderLinks(ctx, userID, len(configs), func(ctx context.Context, index int) ([]string, error) {
+		if err := reissuePanelReady(userID, configs[index]); err != nil {
+			return nil, err
+		}
 		cfg, err := scopedXraySettings(ctx, configs[index])
 		if err != nil {
 			return nil, err
@@ -5622,6 +5661,13 @@ func mergedSubscriptionCacheKey(userID string, variant mergedSubscriptionRequest
 		variant.acceptLanguage,
 	}
 	parts = append(parts, variant.deviceHeaders[:]...)
+	if userID == reissuePilotID {
+		if r, err := currentReissue(userID); err == nil {
+			parts = append(parts, r.Generation)
+		} else {
+			parts = append(parts, "reissue-unavailable")
+		}
+	}
 	variantHash := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return strings.TrimSpace(userID) + "|" + hex.EncodeToString(variantHash[:])
 }
@@ -5867,15 +5913,18 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 
 	variant := mergedSubscriptionVariantFromRequest(r)
 	cacheKey := mergedSubscriptionCacheKey(targetUserID, variant)
+	if targetUserID == reissuePilotID {
+		cacheKey += "|" + token
+	}
 	now := time.Now()
 	activeForCache := mergedSubscriptionUserActive(targetUserID)
 	if cached, ok := getMergedSubscriptionCache(cacheKey); ok && activeForCache {
 		if mergedSubscriptionEntryFresh(cached, now) {
-			writeMergedSubscriptionEntry(w, cached, "hit")
+			writeAuthorizedSubscriptionEntry(w, cached, "hit", targetUserID, token)
 			return
 		}
 		if mergedSubscriptionStaleTTL > 0 && strings.HasPrefix(cached.mergedStatus, "merged:") && now.Sub(cached.cachedAt) <= mergedSubscriptionStaleTTL {
-			writeMergedSubscriptionEntry(w, cached, "stale")
+			writeAuthorizedSubscriptionEntry(w, cached, "stale", targetUserID, token)
 			refreshMergedSubscriptionAsync(cacheKey, targetUserID, variant)
 			return
 		}
@@ -5900,7 +5949,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "upstream subscription unavailable", http.StatusBadGateway)
 			return
 		}
-		writeMergedSubscriptionEntry(w, entry, "miss")
+		writeAuthorizedSubscriptionEntry(w, entry, "miss", targetUserID, token)
 	}
 }
 
@@ -7775,6 +7824,10 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 	}
 	if strings.HasPrefix(cq.Data, "device_plan:") {
 		handleDevicePlanCallback(bot, cq)
+		return
+	}
+	if cq != nil && strings.HasPrefix(cq.Data, "reissue:") {
+		handleReissueCallback(bot, cq)
 		return
 	}
 	if cq != nil && (cq.Data == "nav_devices" || strings.HasPrefix(cq.Data, "devices_")) {
