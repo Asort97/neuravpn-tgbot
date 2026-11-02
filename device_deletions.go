@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -87,7 +88,16 @@ func queueDeviceDeletion(ctx context.Context, configs []*xraySettings, userID st
 		panel := deletionPanelID(record.Config)
 		panels[panel] = append(panels[panel], deletionTarget(record))
 	}
-	if err := s.QueueDeviceDeletion(ctx, userID, device.Key, panels); err != nil {
+	var err error
+	if revocations, ok := userStore.(deviceRevocationStore); ok {
+		if !strings.HasPrefix(device.Key, "hwid:") {
+			return errors.New("device has no HWID fingerprint")
+		}
+		err = revocations.RevokeAndQueueDeviceDeletion(ctx, userID, device.Key, deviceLabel(device.Info), panels)
+	} else {
+		err = s.QueueDeviceDeletion(ctx, userID, device.Key, panels)
+	}
+	if err != nil {
 		return err
 	}
 	deviceSnapshots.Lock()
@@ -124,6 +134,15 @@ func withoutDevice(view subscriptionDevices, key string) subscriptionDevices {
 }
 
 func hidePendingDeviceDeletions(ctx context.Context, userID string, view subscriptionDevices) (subscriptionDevices, error) {
+	if s, ok := userStore.(deviceRevocationStore); ok {
+		deleted, err := s.RevokedDevices(ctx, userID)
+		if err != nil {
+			return view, err
+		}
+		for _, device := range deleted {
+			view = withoutDevice(view, device.DeviceKey)
+		}
+	}
 	s, ok := userStore.(deviceDeletionStore)
 	if !ok {
 		return view, nil
@@ -244,8 +263,25 @@ func startDeviceDeletionWorker() {
 				}
 				for _, job := range jobs {
 					func(job postgres.DeviceDeletion) {
+						// Serialize panel cleanup with bot/web unblock operations. A claimed
+						// job can become obsolete while waiting for this user's lock.
+						uid, err := strconv.ParseInt(job.UserID, 10, 64)
+						if err != nil {
+							return
+						}
+						session := getSession(uid)
+						session.DevicesMu.Lock()
+						defer session.DevicesMu.Unlock()
 						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 						defer cancel()
+						if checker, ok := userStore.(interface {
+							DeviceDeletionPending(context.Context, string) (bool, error)
+						}); ok {
+							pending, err := checker.DeviceDeletionPending(ctx, job.ID)
+							if err != nil || !pending {
+								return
+							}
+						}
 						if err := executeDeviceDeletion(ctx, cfg, job); err != nil {
 							log.Printf("[devices] deletion retry scheduled job=%s", job.ID)
 							return

@@ -80,7 +80,7 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			return
 		}
 		uid, err := strconv.ParseInt(req.UserID, 10, 64)
-		if err != nil || uid <= 0 || strconv.FormatInt(uid, 10) != req.UserID || (req.Action != "list" && req.Action != "delete" && req.Action != "purchase" && req.Action != "check" && req.Action != "reduce" && req.Action != "reissue" && req.Action != "reissue_status") || (req.Action == "delete" && len(req.ID) != 64) || (req.Action == "check" && len(req.ID) != 36) {
+		if err != nil || uid <= 0 || strconv.FormatInt(uid, 10) != req.UserID || (req.Action != "list" && req.Action != "delete" && req.Action != "deleted" && req.Action != "restore" && req.Action != "purchase" && req.Action != "check" && req.Action != "reduce" && req.Action != "reissue" && req.Action != "reissue_status") || ((req.Action == "delete" || req.Action == "restore") && len(req.ID) != 64) || (req.Action == "check" && len(req.ID) != 36) {
 			fail(http.StatusBadRequest, "bad request")
 			return
 		}
@@ -90,6 +90,10 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			return
 		}
 		defer session.DevicesMu.Unlock()
+		if req.Action == "deleted" || req.Action == "restore" {
+			serveRevokedDevices(w, r, secret, req.UserID, req.Action, req.ID)
+			return
+		}
 		if req.Action == "reissue" || req.Action == "reissue_status" {
 			if req.UserID != reissuePilotID {
 				fail(403, "Недоступно")

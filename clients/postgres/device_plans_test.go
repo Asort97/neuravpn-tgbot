@@ -53,6 +53,7 @@ func TestDevicePlansIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Run("durable device deletion queue", func(t *testing.T) { testDeviceDeletionQueue(t, s) })
+	t.Run("persistent device revocations", func(t *testing.T) { testDeviceRevocations(t, s) })
 	t.Run("subscription reissue", func(t *testing.T) { testSubscriptionReissueStore(t, s) })
 	p, err := s.GetDevicePlan("43")
 	if err != nil || p.Enabled || p.ExtraSlots != 0 {

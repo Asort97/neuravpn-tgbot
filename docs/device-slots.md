@@ -27,8 +27,11 @@ Merged server links are never appended to a denied primary response.
 
 This controls subscription retrieval, not active Xray connections. Existing
 copied configurations and shared/spoofed HWIDs are not revoked by this feature.
-Deleting a registration frees a slot; a device may register again if space is
-available. Per-device tunnel credentials would be a separate feature.
+Deleting through the bot or cabinet also records a persistent delivery ban for
+that HWID. It can register again after explicit unblocking in Deleted devices,
+subject to the current limit. Direct deletion in 3x-ui does not record this ban.
+See [Device revocations](device-revocations.md). Per-device tunnel credentials
+would be a separate feature.
 
 ## Operations
 

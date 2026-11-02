@@ -12,9 +12,10 @@ import (
 
 type deletionTestStore struct {
 	DataStore
-	jobs   []postgres.DeviceDeletion
-	fail   bool
-	serial int
+	jobs        []postgres.DeviceDeletion
+	fail        bool
+	serial      int
+	revocations map[string][]postgres.DeviceRevocation
 }
 
 func (s *deletionTestStore) QueueDeviceDeletion(_ context.Context, uid, key string, panels map[string][]postgres.DeviceDeletionTarget) error {
@@ -132,7 +133,7 @@ func TestDeviceDeletionVerifiesActualStateAfterAmbiguousReply(t *testing.T) {
 	}
 }
 
-func TestPendingMergedDeletionDoesNotHideNewPrimaryRegistration(t *testing.T) {
+func TestRevocationHidesReregisteredHWIDUntilExplicitRestore(t *testing.T) {
 	a, fa := devicePanel(t, "a", 1, "0123456789ab")
 	b, fb := devicePanel(t, "b", 2, "0123456789ab")
 	setDeviceTestProviders(t, b)
@@ -149,8 +150,18 @@ func TestPendingMergedDeletionDoesNotHideNewPrimaryRegistration(t *testing.T) {
 	fa.devices = append(fa.devices, old)
 	view = readSubscriptionDevices(ctx, []*xraySettings{a, b}, "42")
 	view, err := hidePendingDeviceDeletions(ctx, "42", view)
-	if err != nil || len(view.Devices) != 1 || len(view.Devices[0].Records) != 1 || view.Devices[0].Records[0].Device.ID != 3 {
-		t.Fatal("new primary device hidden by pending merged job", err)
+	if err != nil || len(view.Devices) != 0 {
+		t.Fatal("revoked HWID returned to active list", err)
+	}
+	items, _ := revokedDevices(ctx, "42")
+	if _, err := restoreDevice(ctx, "42", items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	drainDeviceDeletions(t, a)
+	view = readSubscriptionDevices(ctx, []*xraySettings{a, b}, "42")
+	view, err = hidePendingDeviceDeletions(ctx, "42", view)
+	if err != nil || len(view.Devices) != 1 || len(fa.devices) != 1 || fa.devices[0].ID != 3 {
+		t.Fatal("restore lost the newer primary registration", err)
 	}
 }
 
@@ -171,6 +182,7 @@ func TestDeviceDeletionDoesNotHideWhenQueueCommitFails(t *testing.T) {
 	if err := queueDeviceDeletion(context.Background(), []*xraySettings{cfg}, "42", view.Devices[0]); err == nil {
 		t.Fatal("unsaved command acknowledged")
 	}
+	userStore.(*deletionTestStore).fail = false
 	view, err := hidePendingDeviceDeletions(context.Background(), "42", view)
 	if err != nil || len(view.Devices) != 1 {
 		t.Fatal("device hidden without durable command")

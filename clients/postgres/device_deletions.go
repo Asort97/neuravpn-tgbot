@@ -55,13 +55,32 @@ func (s *Store) initDeviceDeletions(ctx context.Context) error {
  UNIQUE(user_id,device_key,panel)
 );
 ALTER TABLE device_deletions ADD COLUMN IF NOT EXISTS targets JSONB NOT NULL DEFAULT 'null'::jsonb;
-CREATE INDEX IF NOT EXISTS device_deletions_pending ON device_deletions(retry_at) WHERE completed_at IS NULL;`)
+CREATE INDEX IF NOT EXISTS device_deletions_pending ON device_deletions(retry_at) WHERE completed_at IS NULL;
+CREATE TABLE IF NOT EXISTS device_revocations (
+ id TEXT PRIMARY KEY,
+ user_id TEXT NOT NULL REFERENCES users(id),
+ device_key TEXT NOT NULL,
+ name TEXT NOT NULL,
+ revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ UNIQUE(user_id,device_key)
+);`)
 	return err
 }
 
 // Commit every destination before acknowledging a deletion. Retries survive
 // process restarts and do not depend on the browser or Telegram request lifetime.
 func (s *Store) QueueDeviceDeletion(ctx context.Context, userID, key string, panels map[string][]DeviceDeletionTarget) error {
+	return s.queueDeviceDeletion(ctx, userID, key, "", panels)
+}
+
+func (s *Store) RevokeAndQueueDeviceDeletion(ctx context.Context, userID, key, name string, panels map[string][]DeviceDeletionTarget) error {
+	if name == "" {
+		return errors.New("empty revoked device name")
+	}
+	return s.queueDeviceDeletion(ctx, userID, key, name, panels)
+}
+
+func (s *Store) queueDeviceDeletion(ctx context.Context, userID, key, name string, panels map[string][]DeviceDeletionTarget) error {
 	if userID == "" || key == "" || len(panels) == 0 {
 		return errors.New("invalid device deletion")
 	}
@@ -70,6 +89,17 @@ func (s *Store) QueueDeviceDeletion(ctx context.Context, userID, key string, pan
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 94012))`, userID); err != nil {
+		return err
+	}
+	if name != "" {
+		// No historical backfill: only a new explicit deletion revokes delivery.
+		_, err = tx.Exec(ctx, `INSERT INTO device_revocations(id,user_id,device_key,name) VALUES($1,$2,$3,$4)
+ON CONFLICT(user_id,device_key) DO UPDATE SET name=EXCLUDED.name`, uuid.NewString(), userID, key, name)
+		if err != nil {
+			return err
+		}
+	}
 	// Every enqueuer takes conflicting rows in the same order.
 	names := make([]string, 0, len(panels))
 	for panel := range panels {

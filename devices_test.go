@@ -27,6 +27,7 @@ type devicePanelFixture struct {
 	foreign         bool
 	keepDeleted     bool
 	lostDeleteReply bool
+	onRead          func()
 }
 
 func devicePanel(t *testing.T, sub string, id int, fingerprint string) (*xraySettings, *devicePanelFixture) {
@@ -38,6 +39,9 @@ func devicePanel(t *testing.T, sub string, id int, fingerprint string) (*xraySet
 		defer f.mu.Unlock()
 		switch {
 		case r.URL.Path == "/panel/api/clients/get/tgId/42":
+			if f.onRead != nil {
+				f.onRead()
+			}
 			if f.foreign {
 				_, _ = w.Write([]byte(`{"success":true,"obj":[]}`))
 				return
@@ -153,8 +157,9 @@ func TestDevicesPaginationAndSafeLabels(t *testing.T) {
 }
 
 type deviceTelegramFixture struct {
-	mu   sync.Mutex
-	text string
+	mu    sync.Mutex
+	text  string
+	texts []string
 }
 
 func deviceTestBot(t *testing.T) (*tgbotapi.BotAPI, *deviceTelegramFixture) {
@@ -166,6 +171,13 @@ func deviceTestBot(t *testing.T) (*tgbotapi.BotAPI, *deviceTelegramFixture) {
 		defer f.mu.Unlock()
 		if r.Form.Get("text") != "" {
 			f.text = r.Form.Get("text")
+			f.texts = append(f.texts, f.text)
+			if f.text == "получение списка устройств..." {
+				var markup tgbotapi.InlineKeyboardMarkup
+				if err := json.Unmarshal([]byte(r.Form.Get("reply_markup")), &markup); err != nil || markup.InlineKeyboard == nil || len(markup.InlineKeyboard) != 0 {
+					t.Error("loading must clear the old buttons with an empty keyboard array")
+				}
+			}
 		}
 		if strings.HasSuffix(r.URL.Path, "getMe") {
 			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Test","username":"testbot"}}`))
@@ -209,6 +221,35 @@ func setDeviceTestProviders(t *testing.T, configs ...*xraySettings) {
 
 func deviceCallback(data string) *tgbotapi.CallbackQuery {
 	return &tgbotapi.CallbackQuery{ID: "query", Data: data, From: &tgbotapi.User{ID: 42}, Message: &tgbotapi.Message{MessageID: 101, Chat: &tgbotapi.Chat{ID: 42, Type: "private"}}}
+}
+
+func TestDeviceLoadingFeedbackPrecedesPanelReadAndEndsOnFailure(t *testing.T) {
+	a, panel := devicePanel(t, "a", 1, "0123456789ab")
+	setDeviceTestProviders(t)
+	bot, tg := deviceTestBot(t)
+	panel.onRead = func() {
+		tg.mu.Lock()
+		defer tg.mu.Unlock()
+		if tg.text != "получение списка устройств..." {
+			t.Errorf("no feedback before slow read: %s", tg.text)
+		}
+	}
+	for _, action := range []string{"nav_devices", "devices_page:0", "devices_removed:0"} {
+		tg.mu.Lock()
+		tg.texts = nil
+		tg.mu.Unlock()
+		handleCallback(bot, deviceCallback(action), a)
+		tg.mu.Lock()
+		if len(tg.texts) < 2 || tg.texts[0] != "получение списка устройств..." || tg.text == tg.texts[0] {
+			t.Errorf("loading did not resolve for %s: %v", action, tg.texts)
+		}
+		tg.mu.Unlock()
+	}
+	userStore.(*deletionTestStore).fail = true
+	handleCallback(bot, deviceCallback("nav_devices"), a)
+	if !strings.Contains(tg.text, "не удалось получить список") {
+		t.Fatal("storage error left spinner stuck", tg.text)
+	}
 }
 
 func TestDeviceCallbackDeletesOnlyOwnedHWIDAcrossAllPanels(t *testing.T) {

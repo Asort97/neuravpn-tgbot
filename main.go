@@ -2903,6 +2903,8 @@ const devicesPageSize = 8
 
 type deviceSelection struct {
 	Key       string
+	Name      string
+	RestoreID string
 	Page      int
 	ExpiresAt time.Time
 }
@@ -3107,7 +3109,7 @@ func devicesScreen(view subscriptionDevices, page int, notice string) (string, t
 		}
 		text.WriteString("\n")
 		token := uuid.NewString()
-		buttons[token] = deviceSelection{Key: device.Key, Page: page, ExpiresAt: time.Now().Add(30 * time.Minute)}
+		buttons[token] = deviceSelection{Key: device.Key, Name: label, Page: page, ExpiresAt: time.Now().Add(30 * time.Minute)}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("удалить · %d. %s", i+1, label), "devices_del:"+token)))
 	}
 	if pages > 1 {
@@ -3121,7 +3123,7 @@ func devicesScreen(view subscriptionDevices, page int, notice string) (string, t
 		}
 		rows = append(rows, navigation)
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("обновить", "devices_page:"+strconv.Itoa(page))), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("назад", "nav_menu")))
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("удалённые устройства", "devices_removed:0")), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("обновить", "devices_page:"+strconv.Itoa(page))), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("назад", "nav_menu")))
 	return text.String(), tgbotapi.NewInlineKeyboardMarkup(rows...), buttons
 }
 
@@ -3138,6 +3140,11 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 	defer session.DevicesMu.Unlock()
 	ackCallback(bot, cq, "")
 	bindSessionToCallbackMessage(session, cq)
+	_ = updateSessionText(bot, cq.Message.Chat.ID, session, stateDevices, "получение списка устройств...", "", tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{}})
+	if strings.HasPrefix(cq.Data, "devices_removed:") || strings.HasPrefix(cq.Data, "devices_restore:") {
+		handleRemovedDevicesCallback(bot, cq, session)
+		return
+	}
 	page, notice := 0, ""
 	var selection deviceSelection
 	deleting := strings.HasPrefix(cq.Data, "devices_del:")
@@ -3146,7 +3153,7 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 		var exists bool
 		selection, exists = session.DeviceButtons[token]
 		delete(session.DeviceButtons, token)
-		if !exists || time.Now().After(selection.ExpiresAt) {
+		if !exists || selection.RestoreID != "" || time.Now().After(selection.ExpiresAt) {
 			deleting = false
 			notice = "эта кнопка устарела. список обновлён."
 		} else {
@@ -3180,7 +3187,7 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 			break
 		}
 		if !matched && (view.Panels == 0 || view.Unavailable+view.Unsupported > 0) {
-			if err := queueDeviceDeletion(ctx, configs, strconv.FormatInt(cq.From.ID, 10), subscriptionDevice{Key: selection.Key}); err != nil {
+			if err := queueDeviceDeletion(ctx, configs, strconv.FormatInt(cq.From.ID, 10), subscriptionDevice{Key: selection.Key, Info: xray.HWIDDevice{DeviceModel: selection.Name}}); err != nil {
 				notice = "не удалось сохранить изменение. попробуйте ещё раз."
 			}
 		}
@@ -3191,6 +3198,8 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 	cancel()
 	if err != nil {
 		log.Printf("[devices] pending deletion lookup failed user=%d", cq.From.ID)
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("повторить", "nav_devices"), tgbotapi.NewInlineKeyboardButtonData("назад", "nav_menu")))
+		_ = updateSessionText(bot, cq.Message.Chat.ID, session, stateDevices, "не удалось получить список устройств. попробуйте ещё раз.", "", keyboard)
 		return
 	}
 	view = filtered
@@ -5728,6 +5737,12 @@ func writeMergedSubscriptionEntry(w http.ResponseWriter, entry mergedSubscriptio
 		return
 	}
 	copySubscriptionHeaders(w.Header(), entry.headers)
+	// Delivery is authorized per HWID on every refresh, never by a shared HTTP cache.
+	w.Header().Set("Cache-Control", "no-store, private")
+	w.Header().Add("Vary", "X-HWID")
+	w.Header().Del("ETag")
+	w.Header().Del("Last-Modified")
+	w.Header().Del("Expires")
 	w.Header().Set("X-Merged-Subscription-Status", entry.mergedStatus)
 	w.Header().Set("X-Merged-Subscription-Cache", cacheStatus)
 	statusCode := entry.statusCode
@@ -5907,7 +5922,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 		handleSubscriptionStatus(w, r, targetUserID)
 		return
 	}
-	if !gateDeviceSubscription(w, r, targetUserID) {
+	if !gateRevokedDevice(w, r, targetUserID) || !gateDeviceSubscription(w, r, targetUserID) {
 		return
 	}
 
@@ -5920,12 +5935,13 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 	activeForCache := mergedSubscriptionUserActive(targetUserID)
 	if cached, ok := getMergedSubscriptionCache(cacheKey); ok && activeForCache {
 		if mergedSubscriptionEntryFresh(cached, now) {
-			writeAuthorizedSubscriptionEntry(w, cached, "hit", targetUserID, token)
+			writeDeviceAuthorizedSubscriptionEntry(w, r, cached, "hit", targetUserID, token)
 			return
 		}
 		if mergedSubscriptionStaleTTL > 0 && strings.HasPrefix(cached.mergedStatus, "merged:") && now.Sub(cached.cachedAt) <= mergedSubscriptionStaleTTL {
-			writeAuthorizedSubscriptionEntry(w, cached, "stale", targetUserID, token)
-			refreshMergedSubscriptionAsync(cacheKey, targetUserID, variant)
+			if writeDeviceAuthorizedSubscriptionEntry(w, r, cached, "stale", targetUserID, token) {
+				refreshMergedSubscriptionAsync(cacheKey, targetUserID, variant)
+			}
 			return
 		}
 	}
@@ -5949,7 +5965,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "upstream subscription unavailable", http.StatusBadGateway)
 			return
 		}
-		writeAuthorizedSubscriptionEntry(w, entry, "miss", targetUserID, token)
+		writeDeviceAuthorizedSubscriptionEntry(w, r, entry, "miss", targetUserID, token)
 	}
 }
 
