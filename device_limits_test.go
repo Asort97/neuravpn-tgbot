@@ -22,9 +22,9 @@ type deviceTestStore struct {
 func (s *deviceTestStore) GetDevicePlan(id string) (postgres.DevicePlan, error) {
 	return postgres.DevicePlan{Enabled: s.enabled && id == "42"}, nil
 }
-func (s *deviceTestStore) GetDays(string) (int64, error)            { return 10, nil }
-func (s *deviceTestStore) GetSubscriptionID(string) (string, error) { return "test-sub", nil }
-func (s *deviceTestStore) MarkDevicePlanSynced(string, int) error   { return nil }
+func (s *deviceTestStore) GetDays(string) (int64, error)               { return 10, nil }
+func (s *deviceTestStore) GetSubscriptionID(string) (string, error)    { return "test-sub", nil }
+func (s *deviceTestStore) MarkDevicePlanSynced(string, int, int) error { return nil }
 
 func TestFirstFetchEnablesNativeLimitBeforeServingNewSubscription(t *testing.T) {
 	oldStore, oldConfig := userStore, xrayCfg

@@ -16,7 +16,10 @@ const MaxExtraDeviceSlots = 95
 type DevicePlan struct {
 	Enabled    bool `json:"enabled"`
 	ExtraSlots int  `json:"extra_slots"`
+	BonusSlots int  `json:"bonus_slots"`
 }
+
+func (p DevicePlan) Limit() int { return 5 + p.ExtraSlots + p.BonusSlots }
 
 type DeviceSlotOrder struct {
 	ID        string `json:"id"`
@@ -45,6 +48,15 @@ CREATE TABLE IF NOT EXISTS device_slot_orders (
 CREATE INDEX IF NOT EXISTS device_slot_orders_user ON device_slot_orders(user_id,created_at);
 ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS synced_extra_slots INTEGER;
 ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
+ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS bonus_slots INTEGER NOT NULL DEFAULT 0 CHECK(bonus_slots BETWEEN 0 AND 95);
+ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS synced_bonus_slots INTEGER DEFAULT 0;
+CREATE TABLE IF NOT EXISTS device_bonus_grants (
+ request_key TEXT PRIMARY KEY,
+ admin_id TEXT NOT NULL,
+ user_ids JSONB NOT NULL,
+ slots INTEGER NOT NULL CHECK(slots BETWEEN 1 AND 95),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 CREATE TABLE IF NOT EXISTS device_limit_policy (
  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
  enabled BOOLEAN NOT NULL DEFAULT FALSE
@@ -69,7 +81,7 @@ func (s *Store) GetDevicePlan(userID string) (DevicePlan, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var p DevicePlan
-	err := s.pool.QueryRow(ctx, `SELECT enabled,extra_slots FROM device_plans WHERE user_id=$1`, userID).Scan(&p.Enabled, &p.ExtraSlots)
+	err := s.pool.QueryRow(ctx, `SELECT enabled,extra_slots,bonus_slots FROM device_plans WHERE user_id=$1`, userID).Scan(&p.Enabled, &p.ExtraSlots, &p.BonusSlots)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return p, nil
 	}
@@ -197,8 +209,8 @@ func (s *Store) GetEnabledDevicePlans() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	rows, err := s.pool.Query(ctx, `SELECT user_id FROM device_plans WHERE enabled
- AND (synced_extra_slots IS DISTINCT FROM extra_slots OR last_synced_at IS NULL OR last_synced_at < NOW()-INTERVAL '1 hour')
- ORDER BY (synced_extra_slots IS NOT DISTINCT FROM extra_slots),last_synced_at NULLS FIRST,user_id LIMIT 50`)
+ AND (synced_extra_slots IS DISTINCT FROM extra_slots OR synced_bonus_slots IS DISTINCT FROM bonus_slots OR last_synced_at IS NULL OR last_synced_at < NOW()-INTERVAL '1 hour')
+ ORDER BY (synced_extra_slots IS NOT DISTINCT FROM extra_slots AND synced_bonus_slots IS NOT DISTINCT FROM bonus_slots),last_synced_at NULLS FIRST,user_id LIMIT 50`)
 	if err != nil {
 		return nil, err
 	}
@@ -214,11 +226,11 @@ func (s *Store) GetEnabledDevicePlans() ([]string, error) {
 	return ids, rows.Err()
 }
 
-func (s *Store) MarkDevicePlanSynced(userID string, extra int) error {
+func (s *Store) MarkDevicePlanSynced(userID string, extra, bonus int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := s.pool.Exec(ctx, `UPDATE device_plans SET synced_extra_slots=$2,last_synced_at=NOW()
- WHERE user_id=$1 AND enabled AND extra_slots=$2`, userID, extra)
+	_, err := s.pool.Exec(ctx, `UPDATE device_plans SET synced_extra_slots=$2,synced_bonus_slots=$3,last_synced_at=NOW()
+ WHERE user_id=$1 AND enabled AND extra_slots=$2 AND bonus_slots=$3`, userID, extra, bonus)
 	return err
 }
 

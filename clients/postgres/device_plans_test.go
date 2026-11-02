@@ -54,6 +54,7 @@ func TestDevicePlansIntegration(t *testing.T) {
 	}
 	t.Run("durable device deletion queue", func(t *testing.T) { testDeviceDeletionQueue(t, s) })
 	t.Run("persistent device revocations", func(t *testing.T) { testDeviceRevocations(t, s) })
+	t.Run("permanent bonus slots", func(t *testing.T) { testDeviceBonus(t, s) })
 	t.Run("subscription reissue", func(t *testing.T) { testSubscriptionReissueStore(t, s) })
 	p, err := s.GetDevicePlan("43")
 	if err != nil || p.Enabled || p.ExtraSlots != 0 {
@@ -149,7 +150,7 @@ func TestDevicePlansIntegration(t *testing.T) {
 	if p.Enabled {
 		t.Fatal("policy unexpectedly changes existing accounts")
 	}
-	if err = s.MarkDevicePlanSynced("44", 0); err != nil {
+	if err = s.MarkDevicePlanSynced("44", 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	queued, err := s.GetEnabledDevicePlans()
@@ -162,7 +163,7 @@ func TestDevicePlansIntegration(t *testing.T) {
 		}
 	}
 	pool.Exec(ctx, `UPDATE device_plans SET extra_slots=1 WHERE user_id='44'`)
-	if err = s.MarkDevicePlanSynced("44", 0); err != nil {
+	if err = s.MarkDevicePlanSynced("44", 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	queued, err = s.GetEnabledDevicePlans()

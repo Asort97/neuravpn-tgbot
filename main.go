@@ -6051,6 +6051,7 @@ func handleAdminHelp(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	text := "<b>Админ-команды</b>\n\n" +
 		"<code>/help</code> — эта справка\n" +
 		"<code>/add userID days</code> — добавить дни одному пользователю\n" +
+		"<code>/addslots ID[,ID] count</code> — добавить бесплатные слоты навсегда (до 20 ID)\n" +
 		"<code>/remove userID days</code> — убрать дни у пользователя\n" +
 		"<code>/grant_active_days days</code> — добавить дни всем активным пользователям с балансом &gt; 0\n" +
 		"<code>/wipeuser userID confirm</code> — удалить пользователя из БД и панелей\n" +
@@ -7398,6 +7399,8 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			handleAdCheck(bot, msg)
 		case "add":
 			handleAddDays(bot, msg, xrCfg)
+		case "addslots":
+			handleAddDeviceSlots(bot, msg)
 		case "remove":
 			handleRemoveDays(bot, msg, xrCfg)
 		case "grant_active_days":

@@ -37,7 +37,7 @@ def sql(env, query):
 
 def accounts(env):
     raw = sql(env, """SELECT COALESCE(json_agg(json_build_object('id',u.id,
-      'extra',COALESCE(p.extra_slots,0),'enabled',COALESCE(p.enabled,FALSE))), '[]')
+      'extra',COALESCE(p.extra_slots,0),'bonus',COALESCE(p.bonus_slots,0),'enabled',COALESCE(p.enabled,FALSE))), '[]')
       FROM users u LEFT JOIN device_plans p ON p.user_id=u.id
       WHERE u.id ~ '^[1-9][0-9]*$';""")
     return {v['id']: v for v in json.loads(raw)}
@@ -125,7 +125,10 @@ def make_plan(users, clients, devices):
         extra = users[uid]['extra']
         if not isinstance(extra, int) or not 0 <= extra <= 95:
             raise RuntimeError('invalid extra slot quantity')
-        target = dict(c, target_limit=5 + extra)
+        bonus = users[uid].get('bonus', 0)
+        if not isinstance(bonus, int) or not 0 <= bonus <= 95:
+            raise RuntimeError('invalid permanent bonus quantity')
+        target = dict(c, target_limit=5 + extra + bonus)
         targets.append(target)
         subs[c['sub_id']] = target
         per_user[uid].add(c['sub_id'])
@@ -157,7 +160,7 @@ def excess_devices(subs, devices):
 
 def enrollment_sql(users, targets):
     verified = {str(c['tg_id']) for c in targets}
-    expected = json.dumps([{'id': uid, 'extra': v['extra'],
+    expected = json.dumps([{'id': uid, 'extra': v['extra'], 'bonus': v.get('bonus', 0),
                            'verified': uid in verified}
                           for uid, v in users.items()])
     expected_sql = "'" + expected.replace("'", "''") + "'::jsonb"
@@ -166,17 +169,17 @@ SET LOCAL lock_timeout='10s';
 LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE;
 LOCK TABLE device_plans IN SHARE ROW EXCLUSIVE MODE;
 CREATE TEMP TABLE rollout_expected ON COMMIT DROP AS
-SELECT id,extra,verified FROM jsonb_to_recordset(""" + expected_sql + """) AS x(id text,extra int,verified boolean);
+SELECT id,extra,bonus,verified FROM jsonb_to_recordset(""" + expected_sql + """) AS x(id text,extra int,bonus int,verified boolean);
 DO $$ BEGIN
  IF (SELECT count(*) FROM device_limit_policy WHERE singleton) <> 1 THEN
  RAISE EXCEPTION 'policy row missing'; END IF;
  IF EXISTS(SELECT 1 FROM rollout_expected e LEFT JOIN device_plans p ON p.user_id=e.id
- WHERE e.extra <> COALESCE(p.extra_slots,0)) THEN RAISE EXCEPTION 'slot quantity changed'; END IF;
+ WHERE e.extra <> COALESCE(p.extra_slots,0) OR e.bonus <> COALESCE(p.bonus_slots,0)) THEN RAISE EXCEPTION 'slot quantity changed'; END IF;
 END $$;
 INSERT INTO device_plans(user_id,enabled) SELECT id,TRUE FROM users WHERE id ~ '^[1-9][0-9]*$'
 ON CONFLICT(user_id) DO UPDATE SET enabled=TRUE,updated_at=NOW();
-UPDATE device_plans p SET synced_extra_slots=p.extra_slots,last_synced_at=NOW()
-FROM rollout_expected e WHERE p.user_id=e.id AND e.verified AND p.extra_slots=e.extra;
+UPDATE device_plans p SET synced_extra_slots=p.extra_slots,synced_bonus_slots=p.bonus_slots,last_synced_at=NOW()
+FROM rollout_expected e WHERE p.user_id=e.id AND e.verified AND p.extra_slots=e.extra AND p.bonus_slots=e.bonus;
 UPDATE device_limit_policy SET enabled=TRUE WHERE singleton;
 COMMIT;
 SELECT count(*) FROM device_plans WHERE enabled;
@@ -199,7 +202,7 @@ def main():
     if not env.get('DB_DSN'):
         env['DB_DSN'] = load_env('/opt/neuravpn-site/.env.web')['DB_DSN']
     # Refuse an older deployment before any panel mutation.
-    policy = sql(env, 'SELECT enabled FROM device_limit_policy WHERE singleton; SELECT synced_extra_slots,last_synced_at FROM device_plans LIMIT 0;')
+    policy = sql(env, 'SELECT enabled FROM device_limit_policy WHERE singleton; SELECT synced_extra_slots,synced_bonus_slots,bonus_slots,last_synced_at FROM device_plans LIMIT 0;')
     if policy not in ('t', 'f'):
         raise RuntimeError('policy row missing')
     users = accounts(env)
@@ -210,7 +213,7 @@ def main():
     if not targets:
         raise RuntimeError('no managed subscriptions found')
     print(f'accounts: {len(users)}; panel clients: {len(targets)}; excess HWID records: {removed}', flush=True)
-    print('keep: most recently used; limit: 5 + purchased slots; future accounts: enabled after successful apply', flush=True)
+    print('keep: most recently used; limit: 5 + permanent bonus + purchased slots; future accounts: enabled after successful apply', flush=True)
     if not args.apply:
         print('PREVIEW ONLY: no limits or business data changed')
         return
@@ -262,7 +265,7 @@ def main():
     # closes the concurrent signup gap; paid quantities are never reset to zero.
     enabled = sql(env, enrollment_sql(users, targets))
     print('ENABLED EXISTING AND FUTURE ACCOUNTS; enabled count:', enabled, flush=True)
-    print('HWID records removed beyond the most recently used 5 + paid slots. Saved tunnel keys are not revoked.')
+    print('HWID records removed beyond the most recently used 5 + permanent bonus + paid slots. Saved tunnel keys are not revoked.')
 
 
 if __name__ == '__main__':

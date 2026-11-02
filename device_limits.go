@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Asort97/vpnBot/clients/postgres"
@@ -27,8 +28,11 @@ type devicePlanStore interface {
 	GetEnabledDevicePlans() ([]string, error)
 	GetPendingDeviceSlotOrders() ([]postgres.DeviceSlotOrder, error)
 	EnableAutopayWithDevices(string, int) error
-	MarkDevicePlanSynced(string, int) error
+	MarkDevicePlanSynced(string, int, int) error
 }
+
+var devicePlanSyncLocks sync.Map
+var devicePlanSyncWake = make(chan struct{}, 1)
 
 func starsPlanPayload(p RatePlan) string {
 	if p.DeviceExtra == 0 {
@@ -89,7 +93,7 @@ func reduceDeviceSlots(userID string) error {
 	if view.Unavailable+view.Unsupported > 0 {
 		return errors.New("не удалось проверить число устройств")
 	}
-	if len(view.Devices) > 4+p.ExtraSlots {
+	if len(view.Devices) > p.Limit()-1 {
 		return errors.New("сначала удалите лишнее устройство из списка")
 	}
 	if err = s.RemoveExtraDeviceSlot(userID, p.ExtraSlots); err != nil {
@@ -118,6 +122,10 @@ func filterLimitedDeviceView(view subscriptionDevices, primary *xraySettings, us
 }
 
 func syncPrimaryDeviceLimit(ctx context.Context, primary *xraySettings, userID string) error {
+	lock, _ := devicePlanSyncLocks.LoadOrStore(userID, &sync.Mutex{})
+	mu := lock.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 	unlock := lockReissuePanel(userID, primary)
 	defer unlock()
 	if primary != nil && primary.client != nil {
@@ -143,7 +151,7 @@ func syncPrimaryDeviceLimit(ctx context.Context, primary *xraySettings, userID s
 		// Accounts without a subscription must not starve the bounded worker.
 		// Their first subscription fetch still performs the native gate check.
 		if s, ok := userStore.(devicePlanStore); ok {
-			return s.MarkDevicePlanSynced(userID, p.ExtraSlots)
+			return s.MarkDevicePlanSynced(userID, p.ExtraSlots, p.BonusSlots)
 		}
 		return nil
 	}
@@ -151,14 +159,14 @@ func syncPrimaryDeviceLimit(ctx context.Context, primary *xraySettings, userID s
 		if c.TgID != userID || c.Email == "" {
 			return errors.New("invalid subscription owner")
 		}
-		if c.LimitHwid != 5+p.ExtraSlots {
-			if err = primary.client.SetHWIDLimit(ctx, c.Email, userID, 5+p.ExtraSlots); err != nil {
+		if c.LimitHwid != p.Limit() {
+			if err = primary.client.SetHWIDLimit(ctx, c.Email, userID, p.Limit()); err != nil {
 				return err
 			}
 		}
 	}
 	if s, ok := userStore.(devicePlanStore); ok {
-		return s.MarkDevicePlanSynced(userID, p.ExtraSlots)
+		return s.MarkDevicePlanSynced(userID, p.ExtraSlots, p.BonusSlots)
 	}
 	return nil
 }
@@ -346,7 +354,10 @@ func startDevicePlanWorker() {
 					}
 				}
 			}
-			time.Sleep(time.Minute)
+			select {
+			case <-time.After(time.Minute):
+			case <-devicePlanSyncWake:
+			}
 		}
 	}()
 }
@@ -359,7 +370,7 @@ func devicePlanSummary(userID string) (string, postgres.DevicePlan) {
 	if !p.Enabled {
 		return "\nДля вас лимит устройств пока не включён. Доплачивать не нужно.\n", p
 	}
-	return fmt.Sprintf("\nЛимит: <b>%d устройств</b> (5 включено).\nДополнительных мест: %d · +%d ₽ при каждом продлении.\n", 5+p.ExtraSlots, p.ExtraSlots, p.ExtraSlots*50), p
+	return fmt.Sprintf("\nЛимит: <b>%d устройств</b> (5 включено).\nБесплатных мест навсегда: %d.\nПлатных мест: %d · +%d ₽ при каждом продлении.\n", p.Limit(), p.BonusSlots, p.ExtraSlots, p.ExtraSlots*50), p
 }
 
 func handleDevicePlanCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery) {

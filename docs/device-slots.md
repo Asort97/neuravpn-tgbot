@@ -35,6 +35,25 @@ would be a separate feature.
 
 ## Operations
 
+### Permanent free slots
+
+An admin can send `/addslots 123456789 3` in a private chat with the bot to add
+three free slots permanently, or `/addslots 123456789,987654321 3` for a batch.
+Up to 20 existing Telegram IDs are accepted. A single grant and the cumulative
+free bonus are limited to 95 slots; paid extras remain separately capped at 95.
+The total capacity is `5 + bonus_slots + extra_slots`. Only `extra_slots` is billed.
+The command does not change days, payment data, autopay or the user's limit flag.
+It also stores bonuses for currently unlimited accounts, for future enrollment.
+
+Each Telegram message ID is applied once, with an audit record in
+`device_bonus_grants`. Sending a NEW command intentionally adds slots again.
+Batches are transactional: unknown IDs or exceeding the cap roll back all IDs.
+The panel sync worker is woken after a grant and retries offline panels. Both
+bot and cabinet display the bonus separately. Global rollout preserves bonuses.
+Deploy the bot/schema before the site. Rolling back to older code that ignores
+bonuses can lower native limits; do not roll back after issuing real grants
+without accounting for the increased limits.
+
 Back up the primary panel database before changing limits. A smaller native
 limit can remove older registrations. Save the previous client limit as well.
 After deploying both bot and site, enable only the selected pilot account:
@@ -69,7 +88,7 @@ sudo python3 /srv/vpnbot/deploy/enable_device_limits.py --apply
 The command backs up PostgreSQL and the primary panel under a private
 `/root/device-rollout-*` directory, applies only `limitHwid` through the panel's
 bulk API, and keeps the most recent `last_seen` registrations (descending ID
-breaks ties). Existing paid quantities are preserved: the limit is 5 + extras.
+breaks ties). Paid and free quantities are preserved: the limit is 5 + bonus + extras.
 It also trims disabled subscriptions' excess HWIDs with the scoped delete API.
 Ambiguous/shared subscription ownership or a concurrent paid-quantity change
 stops the operation rather than overwriting data. Earlier panel batches may

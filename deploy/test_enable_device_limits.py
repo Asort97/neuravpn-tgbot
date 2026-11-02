@@ -11,6 +11,16 @@ def client(uid, sub, email='test@example.invalid'):
 
 
 class RolloutTests(unittest.TestCase):
+    def test_permanent_bonus_survives_rollout(self):
+        users = {'42': {'extra': 2, 'bonus': 3}}
+        targets, _, removed = make_plan(users, [client('42', 'a')], [{'sub_id': 'a'}] * 10)
+        self.assertEqual(targets[0]['target_limit'], 10)
+        self.assertEqual(removed, 0)
+        query = enrollment_sql(users, targets)
+        self.assertIn('synced_bonus_slots=p.bonus_slots', query)
+        self.assertIn('e.bonus <> COALESCE(p.bonus_slots,0)', query)
+        self.assertNotIn('SET bonus_slots=', query)
+
     def test_reads_native_wal_backup(self):
         with tempfile.TemporaryDirectory() as folder:
             path = pathlib.Path(folder) / 'source.db'
