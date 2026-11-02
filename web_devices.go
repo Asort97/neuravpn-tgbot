@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -162,6 +163,7 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 		partial := view.Panels == 0 || view.Unavailable+view.Unsupported > 0
 		idFor := func(key string) string { return webDevicesMAC(secret, "device\n"+req.UserID+"\n"+key) }
 		result := ""
+		actionDevice := ""
 		if req.Action == "delete" {
 			result = "absent"
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -175,6 +177,8 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 					return
 				}
 				result = "queued"
+				actionDevice = deviceLabel(device.Info)
+				log.Printf("[device-action] source=web user=%s action=delete result=queued", req.UserID)
 				view = withoutDevice(view, device.Key)
 				break
 			}
@@ -206,6 +210,6 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			return
 		}
 		reissue, _ := reissuePublicState(req.UserID)
-		_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices, "partial": partial, "result": result, "device_plan": plan, "reissue": reissue})
+		_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices, "partial": partial, "result": result, "action_device": actionDevice, "device_plan": plan, "reissue": reissue})
 	}
 }

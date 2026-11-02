@@ -26,7 +26,7 @@ func removedDevicesScreen(devices []postgres.DeviceRevocation, page int, notice 
 		d := devices[i]
 		text += fmt.Sprintf("\n%d. %s\nудалено: %s UTC\n", i+1, html.EscapeString(d.Name), d.RevokedAt.UTC().Format("02.01.2006 15:04"))
 		token := uuid.NewString()
-		buttons[token] = deviceSelection{RestoreID: d.ID, Page: page, ExpiresAt: time.Now().Add(30 * time.Minute)}
+		buttons[token] = deviceSelection{RestoreID: d.ID, Name: d.Name, Page: page, ExpiresAt: time.Now().Add(30 * time.Minute)}
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("разблокировать · "+d.Name, "devices_restore:"+token)))
 	}
 	if pages > 1 {
@@ -48,15 +48,22 @@ func handleRemovedDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQue
 	if strings.HasPrefix(cq.Data, "devices_restore:") {
 		token := strings.TrimPrefix(cq.Data, "devices_restore:")
 		selection, ok := session.DeviceButtons[token]
+		result := "кнопка устарела"
+		defer func() { logDeviceAction(bot, cq.From, "разблокировка", result, selection.Name) }()
 		delete(session.DeviceButtons, token)
 		if !ok || selection.RestoreID == "" || time.Now().After(selection.ExpiresAt) {
 			notice = "эта кнопка устарела. список обновлён."
 		} else {
 			page = selection.Page
-			if _, err := restoreDevice(ctx, uid, selection.RestoreID); err != nil {
+			if restored, err := restoreDevice(ctx, uid, selection.RestoreID); err != nil {
+				result = "не удалось подтвердить разблокировку"
 				notice = "не удалось разблокировать устройство. попробуйте ещё раз."
-			} else {
+			} else if restored {
+				result = "разблокировано"
 				notice = "устройство разблокировано. обновите подписку в приложении. лимит устройств продолжает действовать."
+			} else {
+				result = "запись уже отсутствует"
+				notice = "запись уже отсутствует. список обновлён."
 			}
 		}
 	} else {

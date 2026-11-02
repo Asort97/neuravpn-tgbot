@@ -222,6 +222,9 @@ func TestTelegramRemovedDevicesUnblocksAndRejectsActionConfusion(t *testing.T) {
 		token = key
 	}
 	handleCallback(bot, deviceCallback("devices_restore:"+token), nil)
+	if len(tg.logs) == 0 || !strings.Contains(tg.logs[len(tg.logs)-1], "разблокировка — разблокировано · phone") {
+		t.Fatal("restore missing from tracked logs", tg.logs)
+	}
 	if len(s.revocations["42"]) != 0 || !strings.Contains(tg.text, "разблокировано") {
 		t.Fatal(tg.text)
 	}

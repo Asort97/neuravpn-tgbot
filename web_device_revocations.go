@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 )
@@ -21,6 +22,7 @@ func serveRevokedDevices(w http.ResponseWriter, r *http.Request, secret, userID,
 		return webDevicesMAC(secret, "restore-device\n"+userID+"\n"+generation)
 	}
 	result := ""
+	actionDevice := ""
 	if action == "restore" {
 		result = "absent"
 		for _, item := range items {
@@ -34,6 +36,8 @@ func serveRevokedDevices(w http.ResponseWriter, r *http.Request, secret, userID,
 			}
 			if restored {
 				result = "restored"
+				actionDevice = item.Name
+				log.Printf("[device-action] source=web user=%s action=restore result=restored", userID)
 			}
 			break
 		}
@@ -52,5 +56,5 @@ func serveRevokedDevices(w http.ResponseWriter, r *http.Request, secret, userID,
 	for _, item := range items {
 		devices = append(devices, deviceJSON{idFor(item.ID), item.Name, item.RevokedAt.UnixMilli()})
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices, "partial": false, "result": result})
+	_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices, "partial": false, "result": result, "action_device": actionDevice})
 }

@@ -3148,6 +3148,10 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 	page, notice := 0, ""
 	var selection deviceSelection
 	deleting := strings.HasPrefix(cq.Data, "devices_del:")
+	deleteResult := "кнопка устарела"
+	if deleting {
+		defer func() { logDeviceAction(bot, cq.From, "удаление", deleteResult, selection.Name) }()
+	}
 	if deleting {
 		token := strings.TrimPrefix(cq.Data, "devices_del:")
 		var exists bool
@@ -3173,6 +3177,7 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 	cancel()
 	if deleting {
 		matched := false
+		deleteResult = "устройство уже отсутствует"
 		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
 		for _, device := range view.Devices {
 			if device.Key != selection.Key {
@@ -3180,15 +3185,20 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 			}
 			matched = true
 			if err := queueDeviceDeletion(ctx, configs, strconv.FormatInt(cq.From.ID, 10), device); err != nil {
+				deleteResult = "не удалось сохранить изменение"
 				notice = "не удалось сохранить изменение. попробуйте ещё раз."
 			} else {
+				deleteResult = "удалено; выдача подписки заблокирована"
 				view = withoutDevice(view, device.Key)
 			}
 			break
 		}
 		if !matched && (view.Panels == 0 || view.Unavailable+view.Unsupported > 0) {
 			if err := queueDeviceDeletion(ctx, configs, strconv.FormatInt(cq.From.ID, 10), subscriptionDevice{Key: selection.Key, Info: xray.HWIDDevice{DeviceModel: selection.Name}}); err != nil {
+				deleteResult = "не удалось сохранить изменение"
 				notice = "не удалось сохранить изменение. попробуйте ещё раз."
+			} else {
+				deleteResult = "удалено; выдача подписки заблокирована"
 			}
 		}
 		cancel()

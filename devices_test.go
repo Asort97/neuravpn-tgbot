@@ -160,6 +160,7 @@ type deviceTelegramFixture struct {
 	mu    sync.Mutex
 	text  string
 	texts []string
+	logs  []string
 }
 
 func deviceTestBot(t *testing.T) (*tgbotapi.BotAPI, *deviceTelegramFixture) {
@@ -169,6 +170,13 @@ func deviceTestBot(t *testing.T) (*tgbotapi.BotAPI, *deviceTelegramFixture) {
 		_ = r.ParseForm()
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if r.Form.Get("chat_id") == strconv.FormatInt(logChatID, 10) {
+			if text := r.Form.Get("text"); text != "" {
+				f.logs = append(f.logs, text)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":202}}`))
+			return
+		}
 		if r.Form.Get("text") != "" {
 			f.text = r.Form.Get("text")
 			f.texts = append(f.texts, f.text)
@@ -267,6 +275,9 @@ func TestDeviceCallbackDeletesOnlyOwnedHWIDAcrossAllPanels(t *testing.T) {
 		token = key
 	}
 	handleCallback(bot, deviceCallback("devices_del:"+token), a)
+	if len(tg.logs) == 0 || !strings.Contains(tg.logs[len(tg.logs)-1], "удалено; выдача подписки заблокирована") {
+		t.Fatal("successful removal missing from tracked logs", tg.logs)
+	}
 	if fa.deletes != 0 || fb.deletes != 0 || !strings.Contains(tg.text, "ваши устройства: 0") {
 		t.Fatal("UI waited for panel deletion")
 	}
@@ -275,6 +286,9 @@ func TestDeviceCallbackDeletesOnlyOwnedHWIDAcrossAllPanels(t *testing.T) {
 		t.Fatalf("delete did not reach all panels: %d %d %s", fa.deletes, fb.deletes, tg.text)
 	}
 	handleCallback(bot, deviceCallback("devices_del:"+token), a)
+	if !strings.Contains(tg.logs[len(tg.logs)-1], "кнопка устарела") {
+		t.Fatal("replayed button was not logged as stale")
+	}
 	if fa.deletes != 1 || fb.deletes != 1 || !strings.Contains(tg.text, "устарела") {
 		t.Fatal("stale callback reused")
 	}
