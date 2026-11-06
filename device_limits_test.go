@@ -105,7 +105,7 @@ func TestDeviceGateBeforeCacheAndMergedLinks(t *testing.T) {
 		r.Header.Set("X-Hwid", tc.hwid)
 		r.Header.Set("User-Agent", "Mozilla/5.0")
 		r.Header.Set("Accept", "text/html")
-		key := mergedSubscriptionCacheKey(tc.user, mergedSubscriptionVariantFromRequest(r))
+		key := mergedSubscriptionCacheKey(tc.user, mergedSubscriptionVariantFromRequest(r)) + "|" + mergedSubscriptionToken(tc.user)
 		storeMergedSubscriptionCache(key, mergedSubscriptionCacheEntry{body: []byte("REAL_MAIN_AND_MERGED_CONFIGS"), statusCode: 200, headers: make(http.Header)})
 		w := httptest.NewRecorder()
 		handleMergedSubscription(w, r)

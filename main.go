@@ -3215,9 +3215,7 @@ func handleDevicesCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, pri
 	view = filtered
 	view = filterLimitedDeviceView(view, primary, strconv.FormatInt(cq.From.ID, 10))
 	text, keyboard, buttons := devicesScreen(view, page, notice)
-	if strconv.FormatInt(cq.From.ID, 10) == reissuePilotID {
-		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Перевыпустить подписку", "reissue:show")))
-	}
+	keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Перевыпустить подписку", "reissue:show")))
 	summary, devicePlan := devicePlanSummary(strconv.FormatInt(cq.From.ID, 10))
 	text += summary
 	if devicePlan.Enabled {
@@ -5680,12 +5678,10 @@ func mergedSubscriptionCacheKey(userID string, variant mergedSubscriptionRequest
 		variant.acceptLanguage,
 	}
 	parts = append(parts, variant.deviceHeaders[:]...)
-	if userID == reissuePilotID {
-		if r, err := currentReissue(userID); err == nil {
-			parts = append(parts, r.Generation)
-		} else {
-			parts = append(parts, "reissue-unavailable")
-		}
+	if r, err := currentReissue(userID); err == nil {
+		parts = append(parts, r.Generation)
+	} else {
+		parts = append(parts, "reissue-unavailable")
 	}
 	variantHash := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return strings.TrimSpace(userID) + "|" + hex.EncodeToString(variantHash[:])
@@ -5938,9 +5934,7 @@ func handleMergedSubscription(w http.ResponseWriter, r *http.Request) {
 
 	variant := mergedSubscriptionVariantFromRequest(r)
 	cacheKey := mergedSubscriptionCacheKey(targetUserID, variant)
-	if targetUserID == reissuePilotID {
-		cacheKey += "|" + token
-	}
+	cacheKey += "|" + token
 	now := time.Now()
 	activeForCache := mergedSubscriptionUserActive(targetUserID)
 	if cached, ok := getMergedSubscriptionCache(cacheKey); ok && activeForCache {

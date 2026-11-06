@@ -19,11 +19,9 @@ import (
 	"github.com/google/uuid"
 )
 
-const reissuePilotID = "623290294"
-
 // A request started before rotation must not return newly issued credentials.
 func writeAuthorizedSubscriptionEntry(w http.ResponseWriter, entry mergedSubscriptionCacheEntry, cacheState, userID, token string) {
-	if userID == reissuePilotID && !isValidMergedSubscriptionToken(userID, token) {
+	if !isValidMergedSubscriptionToken(userID, token) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
@@ -33,19 +31,16 @@ func writeAuthorizedSubscriptionEntry(w http.ResponseWriter, entry mergedSubscri
 var reissuePanelLocks sync.Map
 
 func lockReissuePanel(userID string, cfg *xraySettings) func() {
-	if userID != reissuePilotID || cfg == nil || cfg.client == nil {
+	if cfg == nil || cfg.client == nil {
 		return func() {}
 	}
-	v, _ := reissuePanelLocks.LoadOrStore(deletionPanelID(cfg), &sync.Mutex{})
+	v, _ := reissuePanelLocks.LoadOrStore(userID+":"+deletionPanelID(cfg), &sync.Mutex{})
 	m := v.(*sync.Mutex)
 	m.Lock()
 	return m.Unlock
 }
 
 func reissuePublicState(userID string) (map[string]any, error) {
-	if userID != reissuePilotID {
-		return map[string]any{"allowed": false}, nil
-	}
 	r, err := currentReissue(userID)
 	if err != nil {
 		return nil, err
@@ -67,9 +62,6 @@ type reissueStore interface {
 }
 
 func currentReissue(userID string) (postgres.SubscriptionReissue, error) {
-	if userID != reissuePilotID {
-		return postgres.SubscriptionReissue{}, nil
-	}
 	s, ok := userStore.(reissueStore)
 	if !ok {
 		return postgres.SubscriptionReissue{}, nil
@@ -90,9 +82,6 @@ func reissueKey(generation, panel, email string) string {
 }
 
 func reissuePanelReady(userID string, cfg *xraySettings) error {
-	if userID != reissuePilotID {
-		return nil
-	}
 	s, ok := userStore.(reissueStore)
 	if !ok {
 		return nil
@@ -110,14 +99,30 @@ func reissuePanelReady(userID string, cfg *xraySettings) error {
 }
 
 func requestSubscriptionReissue(userID, expected string) (postgres.SubscriptionReissue, error) {
-	if userID != reissuePilotID {
-		return postgres.SubscriptionReissue{}, errors.New("reissue pilot only")
+	id, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != userID {
+		return postgres.SubscriptionReissue{}, errors.New("invalid reissue owner")
 	}
 	unlock := lockReissuePanel(userID, xrayCfg)
 	defer unlock()
 	s, ok := userStore.(reissueStore)
-	if !ok || xrayCfg == nil || mergedSubSecret == "" {
+	if !ok || xrayCfg == nil || xrayCfg.client == nil || mergedSubSecret == "" {
 		return postgres.SubscriptionReissue{}, errors.New("reissue unavailable")
+	}
+	current, err := currentReissue(userID)
+	if err != nil {
+		return current, err
+	}
+	if current.Generation != expected || (current.Generation != "" && !current.Active) {
+		return current, nil
+	}
+	// Without an existing primary client, pending rotation would block creation
+	// of the user's first subscription. Validate before invalidating any links.
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	records, err := xrayCfg.client.ReissueRecords(checkCtx, userID)
+	checkCancel()
+	if err != nil || len(records) == 0 {
+		return postgres.SubscriptionReissue{}, errors.New("primary subscription unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -219,9 +224,6 @@ func startSubscriptionReissueWorkers() {
 					continue
 				}
 				for _, r := range jobs {
-					if r.UserID != reissuePilotID {
-						continue
-					}
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 					err = executeSubscriptionReissue(ctx, cfg, r, s)
 					cancel()
@@ -235,11 +237,11 @@ func startSubscriptionReissueWorkers() {
 }
 
 func handleReissueCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery) {
-	if cq == nil || cq.From == nil || cq.Message == nil {
+	if cq == nil || cq.From == nil || cq.Message == nil || cq.Message.Chat == nil {
 		return
 	}
 	userID := strconv.FormatInt(cq.From.ID, 10)
-	if userID != reissuePilotID || cq.Message.Chat.ID != cq.From.ID {
+	if !cq.Message.Chat.IsPrivate() || cq.Message.Chat.ID != cq.From.ID {
 		_, _ = bot.Request(tgbotapi.NewCallback(cq.ID, "Недоступно"))
 		return
 	}
@@ -259,6 +261,9 @@ func handleReissueCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery) {
 		expected := strings.TrimPrefix(cq.Data, "reissue:confirm:")
 		if expected == "initial" {
 			expected = ""
+		} else if _, parseErr := uuid.Parse(expected); parseErr != nil {
+			_, _ = bot.Send(tgbotapi.NewMessage(cq.Message.Chat.ID, "Обнови подтверждение перевыпуска."))
+			return
 		}
 		r, err = requestSubscriptionReissue(userID, expected)
 		if err != nil {

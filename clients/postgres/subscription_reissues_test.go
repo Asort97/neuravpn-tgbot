@@ -14,7 +14,7 @@ func testSubscriptionReissueStore(t *testing.T, s *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.pool.Exec(ctx, `INSERT INTO device_plans(user_id,enabled,extra_slots) VALUES('reissue-test',TRUE,2)`); err != nil {
+	if _, err = s.pool.Exec(ctx, `INSERT INTO device_plans(user_id,enabled,extra_slots,bonus_slots) VALUES('reissue-test',TRUE,2,3)`); err != nil {
 		t.Fatal(err)
 	}
 	r, err := s.BeginSubscriptionReissue(ctx, "reissue-test", "", map[string]bool{"main": true, "offline": false})
@@ -40,9 +40,9 @@ func testSubscriptionReissueStore(t *testing.T, s *Store) {
 	}
 	var sub, method, plan string
 	var auto bool
-	var days, slots int
-	err = s.pool.QueryRow(ctx, `SELECT subscription_id,autopay_method_id,autopay_plan_id,autopay_enabled,days,extra_slots FROM users JOIN device_plans ON user_id=id WHERE id='reissue-test'`).Scan(&sub, &method, &plan, &auto, &days, &slots)
-	if err != nil || sub != r.SubID || method != "saved" || plan != "90d" || !auto || days != 123 || slots != 2 {
+	var days, slots, bonus int
+	err = s.pool.QueryRow(ctx, `SELECT subscription_id,autopay_method_id,autopay_plan_id,autopay_enabled,days,extra_slots,bonus_slots FROM users JOIN device_plans ON user_id=id WHERE id='reissue-test'`).Scan(&sub, &method, &plan, &auto, &days, &slots, &bonus)
+	if err != nil || sub != r.SubID || method != "saved" || plan != "90d" || !auto || days != 123 || slots != 2 || bonus != 3 {
 		t.Fatal("account metadata lost", err)
 	}
 	active, err := s.GetSubscriptionReissue(ctx, "reissue-test")
@@ -71,5 +71,23 @@ func testSubscriptionReissueStore(t *testing.T, s *Store) {
 	untouched, err := s.GetSubscriptionReissue(ctx, "43")
 	if err != nil || untouched.Generation != "" {
 		t.Fatal("other user changed")
+	}
+	if _, err = s.pool.Exec(ctx, `INSERT INTO users(id) VALUES('reissue-other')`); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.BeginSubscriptionReissue(ctx, "reissue-other", "", map[string]bool{"other-panel": true})
+	if err != nil || second.Generation == r.Generation {
+		t.Fatal("independent user generation", err)
+	}
+	otherJobs, err := s.ClaimSubscriptionReissues(ctx, "other-panel")
+	if err != nil || len(otherJobs) != 1 || otherJobs[0].UserID != "reissue-other" {
+		t.Fatal("other user not queued", err)
+	}
+	if err = s.CompleteSubscriptionReissue(ctx, otherJobs[0]); err != nil {
+		t.Fatal(err)
+	}
+	stillPending, err := s.GetSubscriptionReissue(ctx, "reissue-test")
+	if err != nil || stillPending.Active || stillPending.Generation != next.Generation {
+		t.Fatal("other user completed wrong rotation", err)
 	}
 }

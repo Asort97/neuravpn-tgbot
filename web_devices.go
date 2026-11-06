@@ -96,10 +96,6 @@ func newWebDevicesHandler(primary *xraySettings, secret string) http.HandlerFunc
 			return
 		}
 		if req.Action == "reissue" || req.Action == "reissue_status" {
-			if req.UserID != reissuePilotID {
-				fail(403, "Недоступно")
-				return
-			}
 			if req.Action == "reissue" {
 				if req.ID == "initial" {
 					req.ID = ""
