@@ -7639,16 +7639,11 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 		}
 	}
 
-	startAction := "start"
-	if isNew {
-		startAction = "новый пользователь"
-		if referrerID != "" && referrerID != userID {
-			startAction = "новый пользователь по рефералке"
-		}
-	}
+	adTag := extractAdTag(msg)
+	startAction := startLogAction(isNew, referrerID, userID, adTag)
 	logAction(bot, msg.From.ID, msg.From.UserName, startAction, isNew)
 
-	if adTag := extractAdTag(msg); adTag != "" {
+	if adTag != "" {
 		adStats.record(adTag, userID)
 	}
 
@@ -8441,6 +8436,20 @@ func randomSlug(n int) string {
 		b.WriteByte(letters[rand.Intn(len(letters))])
 	}
 	return b.String()
+}
+
+func startLogAction(isNew bool, referrerID, userID, adTag string) string {
+	action := "start"
+	if isNew {
+		action = "новый пользователь"
+		if referrerID != "" && referrerID != userID {
+			action = "новый пользователь по рефералке"
+		}
+	}
+	if adTag == "tiktok" {
+		action += " · ИЗ ТИКТОКА"
+	}
+	return action
 }
 
 func extractAdTag(msg *tgbotapi.Message) string {
