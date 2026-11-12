@@ -131,7 +131,7 @@ func TestAutoSelectFullIPPoolPreservesProfiles(t *testing.T) {
 	}
 	auto := configs[0]
 	observer := auto["observatory"].(map[string]any)
-	if observer["probeInterval"] != "60s" || observer["enableConcurrency"] != true {
+	if observer["probeInterval"] != "10s" || observer["enableConcurrency"] != true {
 		t.Fatal("incorrect observation interval")
 	}
 	members := auto["outbounds"].([]any)
