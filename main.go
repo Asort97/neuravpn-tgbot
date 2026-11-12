@@ -5809,6 +5809,13 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 		body = mergedBody
 		mergedStatus = fmt.Sprintf("merged:%d", len(links))
 	}
+	if hwidDenial(upstream.headers) == "" {
+		if normalized, normalizeErr := normalizeLVSubscriptionFingerprint(body); normalizeErr != nil {
+			log.Printf("[merged-sub] fingerprint normalization skipped user=%s: %v", targetUserID, normalizeErr)
+		} else {
+			body = normalized
+		}
+	}
 	if converted, headers, convertErr := autoSelectSubscription(targetUserID, variant.userAgent, variant.accept, body, upstream.headers); convertErr != nil {
 		log.Printf("[merged-sub] auto-select skipped user=%s: %v", targetUserID, convertErr)
 	} else {

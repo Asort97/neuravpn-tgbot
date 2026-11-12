@@ -220,7 +220,9 @@ func autoSelectOutbound(u *url.URL) (map[string]any, error) {
 		out["settings"] = map[string]any{"vnext": []any{map[string]any{"address": u.Hostname(), "port": port,
 			"users": []any{map[string]any{"id": u.User.Username(), "encryption": "none", "flow": q.Get("flow")}}}}}
 		fp := q.Get("fp")
-		if fp == "" {
+		if isLVMainBypass(u) {
+			fp = lvSubscriptionFingerprint
+		} else if fp == "" {
 			fp = "chrome"
 		}
 		stream["security"] = "reality"
