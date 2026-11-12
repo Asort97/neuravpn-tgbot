@@ -237,8 +237,12 @@ func TestNoticeDeliveryPersistenceAndFailure(t *testing.T) {
 			if (r.MessageID > 0) != (tc.status == "sent") {
 				t.Fatal("false delivery")
 			}
-			if len(logs) != 1 || strings.HasPrefix(logs[0], "доставлено:") != (tc.status == "sent") {
-				t.Fatal("false admin log", logs)
+			if tc.status == "sent" {
+				if len(logs) != 1 || !strings.HasPrefix(logs[0], "доставлено:") {
+					t.Fatal("missing success admin log", logs)
+				}
+			} else if len(logs) != 0 || r.LastError == "" {
+				t.Fatal("failure must be persisted without an admin chat message", logs)
 			}
 			reopened.deliver("42", s, yesNotice, send, ignoreNotice)
 			if calls != 1 {

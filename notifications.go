@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,6 +27,10 @@ type noticeRecord struct {
 	At, AttemptAt            time.Time
 	MessageID                int
 	Clicks                   map[string]time.Time
+	Attempts                 int
+	NextAttemptAt            time.Time
+	PermanentFailure         bool
+	LastError                string
 }
 type noticeBill struct {
 	ID, Plan, URL string
@@ -187,8 +192,18 @@ func (e *noticeEngine) eligibleLocked(id string, s noticeSpec, now time.Time) bo
 	if u.Blocked || s.Text == "" || (s.Pause && e.state.IncidentActive) || (s.Promo && !noticePromoAllowed(u, now)) {
 		return false
 	}
-	if r := u.Records[s.Key]; r != nil && (r.Status != "failed" || now.Sub(r.AttemptAt) < 5*time.Minute) {
-		return false
+	if r := u.Records[s.Key]; r != nil {
+		if r.Status != "failed" || r.PermanentFailure || r.Attempts >= 3 {
+			return false
+		}
+		next := r.NextAttemptAt
+		if next.IsZero() {
+			// Existing records predate retry counters. Give them the same backoff.
+			next = r.AttemptAt.Add(15 * time.Minute)
+		}
+		if now.Before(next) {
+			return false
+		}
 	}
 	return true
 }
@@ -356,10 +371,19 @@ func (e *noticeEngine) deliver(id string, s noticeSpec, recheck func() bool, sen
 		return false
 	}
 	u := e.user(id)
-	r := &noticeRecord{Key: s.Key, Kind: s.Kind, Token: hex.EncodeToString(raw[:]), Status: "sending", Promo: s.Promo, AttemptAt: now}
+	previous := u.Records[s.Key]
+	attempts := 1
+	if previous != nil {
+		attempts = max(previous.Attempts, 1) + 1
+	}
+	r := &noticeRecord{Key: s.Key, Kind: s.Kind, Token: hex.EncodeToString(raw[:]), Status: "sending", Promo: s.Promo, AttemptAt: now, Attempts: attempts}
 	u.Records[s.Key] = r
 	if err := e.save(); err != nil {
-		delete(u.Records, s.Key)
+		if previous != nil {
+			u.Records[s.Key] = previous
+		} else {
+			delete(u.Records, s.Key)
+		}
 		log.Printf("notification reservation: %v", err)
 		e.mu.Unlock()
 		return false
@@ -369,10 +393,21 @@ func (e *noticeEngine) deliver(id string, s noticeSpec, recheck func() bool, sen
 	e.mu.Lock()
 	if err != nil || msg <= 0 {
 		r.Status = "unknown"
+		r.LastError = noticeDeliveryError(err)
 		var te *tgbotapi.Error
-		// sendMessageRaw returns API descriptions rather than a typed error.
 		if errors.As(err, &te) || isDefiniteTelegramFailure(err) {
 			r.Status = "failed"
+			r.PermanentFailure = noticePermanentFailure(err)
+			if !r.PermanentFailure && attempts < 3 {
+				delay := 15 * time.Minute
+				if attempts > 1 {
+					delay = time.Hour
+				}
+				if te != nil && te.RetryAfter > 0 {
+					delay = max(delay, time.Duration(te.RetryAfter)*time.Second)
+				}
+				r.NextAttemptAt = time.Now().UTC().Add(delay)
+			}
 		}
 		if err != nil && strings.Contains(strings.ToLower(err.Error()), "blocked") {
 			u.Blocked = true
@@ -382,8 +417,10 @@ func (e *noticeEngine) deliver(id string, s noticeSpec, recheck func() bool, sen
 			log.Printf("notification failure persist: %v", saveErr)
 		}
 		status := r.Status
+		reason := r.LastError
 		e.mu.Unlock()
-		audit("ошибка доставки: " + s.Kind + " · " + status)
+		// Delivery failures stay in the server journal, never in the admin chat.
+		log.Printf("notification delivery failed user=%s kind=%s status=%s attempt=%d reason=%q", id, s.Kind, status, attempts, reason)
 		return false
 	}
 	r.Status = "sent"
@@ -396,6 +433,39 @@ func (e *noticeEngine) deliver(id string, s noticeSpec, recheck func() bool, sen
 	audit("доставлено: " + s.Kind)
 	return true
 }
+
+func noticePermanentFailure(err error) bool {
+	var te *tgbotapi.Error
+	if errors.As(err, &te) {
+		return te.Code >= 400 && te.Code < 500 && te.Code != 429 && te.Code != 408
+	}
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "bad request") || strings.Contains(s, "forbidden") || strings.Contains(s, "chat not found") || strings.Contains(s, "bot was blocked")
+}
+
+func noticeDeliveryError(err error) string {
+	if err == nil {
+		return "Telegram response has no message_id"
+	}
+	// HTTP errors include the token-bearing request URL. Keep only the cause.
+	var requestErr *url.Error
+	if errors.As(err, &requestErr) {
+		err = requestErr.Err
+	}
+	s := err.Error()
+	if token := os.Getenv("TG_BOT_TOKEN"); token != "" {
+		s = strings.ReplaceAll(s, token, "[redacted]")
+	}
+	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	if len(s) > 1024 {
+		s = s[:1024]
+	}
+	return s
+}
+
 func isDefiniteTelegramFailure(err error) bool {
 	if err == nil {
 		return false
