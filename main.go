@@ -2556,9 +2556,18 @@ func handleCreatePromocode(bot *tgbotapi.BotAPI, chatID int64, session *UserSess
 	_ = updateSessionText(bot, chatID, session, stateMenu, text, "HTML", mainMenuInlineKeyboard())
 }
 
-func sendBroadcastPayload(bot *tgbotapi.BotAPI, targetID int64, sourceMsg *tgbotapi.Message, broadcastText string, preserveSource bool) error {
+func sendBroadcastPayload(bot *tgbotapi.BotAPI, targetID int64, sourceMsg *tgbotapi.Message, broadcastText string, preserveSource bool, effects ...string) error {
 	if bot == nil || sourceMsg == nil {
 		return fmt.Errorf("broadcast source is empty")
+	}
+	if len(effects) > 0 && effects[0] != "" {
+		method, params, err := broadcastEffectParams(targetID, sourceMsg, broadcastText, preserveSource, effects[0])
+		if err != nil {
+			return err
+		}
+		// Do not retry a potentially delivered message or silently drop its effect.
+		_, err = bot.MakeRequest(method, params)
+		return err
 	}
 
 	broadcastText = strings.TrimSpace(broadcastText)
@@ -6101,6 +6110,8 @@ func handleAdminHelp(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"<code>/sales</code> — текущая акция; <code>/stop_sales BLACKFRIDAY</code> — остановить\n" +
 		"<code>/notify text</code> — массовая рассылка\n" +
 		"<code>/notify_test text</code> — тест рассылки себе\n" +
+		"<code>/notify-test --effect confetti текст</code> — тест конфетти себе\n" +
+		"<code>/notify --effect confetti текст</code> — рассылка с конфетти\n" +
 		"<code>/notify_user userID text</code> — отправить одному пользователю\n" +
 		"<code>/incident open confirm</code> — подтвердить аварию и приостановить предложения\n" +
 		"<code>/incident resolved confirm</code> — подтвердить восстановление\n" +
@@ -7204,6 +7215,11 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 			}
 		}
 
+		broadcastText, effectID, effectErr := parseBroadcastEffect(broadcastText)
+		if effectErr != nil {
+			_ = updateSessionText(bot, chatID, session, stateMenu, html.EscapeString(effectErr.Error()), "HTML", mainMenuInlineKeyboard())
+			return
+		}
 		// Есть ли медиа в исходном сообщении
 		hasPhoto := len(sourceMsg.Photo) > 0
 		hasAnim := sourceMsg.Animation != nil
@@ -7254,7 +7270,7 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 				if err != nil {
 					continue
 				}
-				err = sendBroadcastPayload(bot, id, sourceMsg, broadcastText, preserveSource)
+				err = sendBroadcastPayload(bot, id, sourceMsg, broadcastText, preserveSource, effectID)
 				if err == nil {
 					count++
 				}
