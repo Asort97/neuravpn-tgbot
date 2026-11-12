@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,47 @@ import (
 	"github.com/Asort97/vpnBot/clients/lifecycle"
 	yookassa "github.com/Asort97/vpnBot/clients/yooKassa"
 )
+
+func TestNoticeExpirySnapshotSkipsDeletedInbound(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/panel/api/inbounds/list" {
+			t.Errorf("unexpected per-inbound request: %s", r.URL.Path)
+			w.WriteHeader(500)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "obj": []xray.InboundData{
+			{ID: 5, Enable: true, Protocol: "vless", Settings: `{"clients":[{"tgId":"42","expiryTime":2000000,"enable":false}]}`},
+			{ID: 6, Enable: true, Protocol: "vless", Settings: `{"clients":[{"tgId":"42","expiryTime":3000000}]}`},
+			{ID: 9, Enable: true, Protocol: "vless", Settings: `{"clients":[{"tgId":"42","expiryTime":9000000}]}`},
+		}})
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	cfg := &xraySettings{client: xray.New("", "", u.Hostname(), u.Port(), ""), inboundIDs: []int{5, 6, 21}}
+	expiries, err := notificationExpirySnapshot(cfg)
+	if err != nil || requests != 1 || len(expiries) != 1 || expiries[42].UnixMilli() != 3000000 {
+		t.Fatalf("snapshot=%v requests=%d err=%v", expiries, requests, err)
+	}
+}
+
+func TestNoticeExpirySnapshotFailsClosed(t *testing.T) {
+	for _, body := range []string{
+		`{"success":false,"msg":"unavailable"}`,
+		`{"success":true,"obj":[]}`,
+		`{"success":true,"obj":[{"id":5,"settings":"broken"}]}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) }))
+		u, _ := url.Parse(server.URL)
+		cfg := &xraySettings{client: xray.New("", "", u.Hostname(), u.Port(), ""), inboundIDs: []int{5}}
+		got, err := notificationExpirySnapshot(cfg)
+		server.Close()
+		if err == nil || got != nil {
+			t.Fatalf("untrusted snapshot accepted: %s", body)
+		}
+	}
+}
 
 func testNotices(t *testing.T) *noticeEngine {
 	t.Helper()

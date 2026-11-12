@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
 	"time"
 
+	xray "github.com/Asort97/vpnBot/clients/Xray"
 	"github.com/Asort97/vpnBot/clients/lifecycle"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -250,6 +252,61 @@ func processNoticePayments(bot *tgbotapi.BotAPI) {
 	}
 }
 
+// One authoritative list tolerates deleted configured inbounds without hiding API errors.
+func notificationExpirySnapshot(cfg *xraySettings) (map[int64]time.Time, error) {
+	if cfg == nil || cfg.client == nil {
+		return nil, fmt.Errorf("primary panel unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	scoped, err := cfg.client.WithContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	inbounds, err := scoped.GetAllInbounds()
+	if err != nil {
+		return nil, err
+	}
+	ids := cfg.inboundIDs
+	if len(ids) == 0 && cfg.inboundID > 0 {
+		ids = []int{cfg.inboundID}
+	}
+	allowed := map[int]bool{}
+	for _, id := range ids {
+		allowed[id] = true
+	}
+	result := map[int64]time.Time{}
+	matched := false
+	for _, inbound := range inbounds {
+		if len(allowed) > 0 {
+			if !allowed[inbound.ID] {
+				continue
+			}
+		} else if !inbound.Enable || !strings.EqualFold(inbound.Protocol, "vless") {
+			continue
+		}
+		matched = true
+		var settings xray.InboundSettings
+		if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+			return nil, fmt.Errorf("invalid notification inbound settings: %d", inbound.ID)
+		}
+		for _, client := range settings.Clients {
+			id, err := strconv.ParseInt(strings.TrimSpace(client.TgID), 10, 64)
+			if err != nil || id <= 0 || client.ExpiryTime <= 0 {
+				continue
+			}
+			expiry := time.UnixMilli(client.ExpiryTime)
+			if expiry.After(result[id]) {
+				result[id] = expiry
+			}
+		}
+	}
+	if !matched {
+		return nil, fmt.Errorf("no configured notification inbounds exist")
+	}
+	return result, nil
+}
+
 func processLifecycleNotices(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 	store, ok := userStore.(lifecycle.Store)
 	if !ok || notices.load() != nil {
@@ -260,21 +317,7 @@ func processLifecycleNotices(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 		log.Printf("notification users: %v", err)
 		return
 	}
-	expiries := map[int64]time.Time{}
-	var expiryErr error
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if cfg != nil && cfg.client != nil {
-		scoped, e := cfg.client.WithContext(ctx)
-		expiryErr = e
-		if e == nil {
-			copyCfg := *cfg
-			copyCfg.client = scoped
-			expiries, expiryErr = collectExpiryByTgID(&copyCfg)
-		}
-	} else {
-		expiryErr = fmt.Errorf("primary panel unavailable")
-	}
-	cancel()
+	expiries, expiryErr := notificationExpirySnapshot(cfg)
 	if expiryErr != nil {
 		log.Printf("notification expiry snapshot unavailable")
 	}
