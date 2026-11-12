@@ -36,6 +36,8 @@ go.work.sum
 # .idea/
 # .vscode/
 database/data.json
+database/notifications.json
+database/.notifications-*
 .env-tg.example
 main_tg_backup.go.bak
 deploy/neuravpn-vk.service

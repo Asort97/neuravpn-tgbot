@@ -268,6 +268,15 @@ func (y *YooKassaClient) sendYooKassaPaymentButton(bot *tgbotapi.BotAPI, chatID 
 
 // CreatePaymentAndGetURL creates a YooKassa payment and returns the confirmation URL.
 func (y *YooKassaClient) CreatePaymentAndGetURL(amount float64, productName string, chatID int64, metadata map[string]interface{}, userEmail string, saveCard bool) (string, error) {
+	payment, err := y.CreateTrackedPayment(amount, productName, chatID, metadata, userEmail, saveCard)
+	if err != nil {
+		return "", err
+	}
+	return payment.Confirmation["confirmation_url"].(string), nil
+}
+
+// CreateTrackedPayment keeps the exact invoice ID alongside its redirect URL.
+func (y *YooKassaClient) CreateTrackedPayment(amount float64, productName string, chatID int64, metadata map[string]interface{}, userEmail string, saveCard bool) (*YooKassaPaymentResponse, error) {
 	payment, err := y.CreateYooKassaPayment(
 		amount,
 		productName,
@@ -278,7 +287,7 @@ func (y *YooKassaClient) CreatePaymentAndGetURL(amount float64, productName stri
 		saveCard,
 	)
 	if err != nil {
-		return "", fmt.Errorf("не удалось создать платёж: %v", err)
+		return nil, fmt.Errorf("не удалось создать платёж: %v", err)
 	}
 
 	payMu.Lock()
@@ -292,17 +301,31 @@ func (y *YooKassaClient) CreatePaymentAndGetURL(amount float64, productName stri
 	if confirmation, ok := payment.Confirmation["confirmation_url"].(string); ok {
 		confirmationURL = confirmation
 	} else {
-		return "", fmt.Errorf("не получена ссылка на оплату от YooKassa")
+		return nil, fmt.Errorf("не получена ссылка на оплату от YooKassa")
 	}
 
-	return confirmationURL, nil
+	if confirmationURL == "" || payment.ID == "" {
+		return nil, fmt.Errorf("empty payment ID or confirmation URL")
+	}
+	return payment, nil
 }
 
 func (y *YooKassaClient) SendVPNPayment(bot *tgbotapi.BotAPI, chatID int64, messageID int, amount float64, productName string, metadata map[string]interface{}, userEmail string, saveCard bool) (int, string, error) {
 	return y.sendYooKassaPaymentButton(bot, chatID, messageID, amount, productName, metadata, userEmail, saveCard)
 }
 
-// FindSucceededPayment ищет любой успешный платёж среди последних платежей пользователя.
+// LatestPaymentID returns only the newest invoice, never an earlier successful one.
+func (y *YooKassaClient) LatestPaymentID(chatID int64) string {
+	payMu.Lock()
+	defer payMu.Unlock()
+	ids := userPayments[chatID]
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[len(ids)-1]
+}
+
+// FindSucceededPayment is retained for legacy callers, not invoice reminders.
 // Возвращает платёж и true, если найден успешно оплаченный и ещё не обработанный.
 func (y *YooKassaClient) FindSucceededPayment(chatID int64) (*YooKassaPaymentResponse, bool, error) {
 	payMu.Lock()

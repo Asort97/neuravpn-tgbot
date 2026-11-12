@@ -988,7 +988,7 @@ func collectExpiryByTgID(cfg *xraySettings) (map[int64]time.Time, error) {
 			return nil, err
 		}
 		for _, c := range clients {
-			if !c.Enable || c.ExpiryTime <= 0 {
+			if c.ExpiryTime <= 0 {
 				continue
 			}
 			tgID := strings.TrimSpace(c.TgID)
@@ -1739,6 +1739,9 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 	now := time.Now().UTC()
 
 	for _, u := range users {
+		if notices.load() != nil || notices.snapshot(u.UserID).PendingAutopay != nil {
+			continue
+		}
 		plan, ok := ratePlanByID[u.PlanID]
 		if !ok {
 			log.Printf("autopay unknown plan %q for user %s", u.PlanID, u.UserID)
@@ -1809,14 +1812,14 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 		if checkErr != nil || priceErr != nil || !enabled || method != u.MethodID || savedPlan != plan.ID || latestSurcharge != surcharge {
 			continue
 		}
+		autopayAttemptAt := time.Now().UTC()
 		payment, err := yookassaClient.CreateAutoPayment(u.MethodID, plan.Amount, "Автопродление "+plan.Title, email, meta)
 		if err != nil {
 			log.Printf("autopay charge failed user=%s plan=%s: %v", u.UserID, plan.ID, err)
+			// A failed HTTP response does not prove that the charge failed.
+			// Stop automatic retries and alert an admin, without asking for a second payment.
 			_ = userStore.DisableAutopay(u.UserID)
-
-			failText := fmt.Sprintf("⚠️ не удалось автоматически продлить подписку (%s, %.0f ₽).\nавтопродление отключено. продлите вручную в разделе «оплата».", plan.Title, plan.Amount)
-			failMsg := tgbotapi.NewMessage(chatID, failText)
-			_, _ = bot.Send(failMsg)
+			rememberPendingAutopay(u.UserID, "", info.expireAt, autopayAttemptAt)
 
 			alertText := fmt.Sprintf("⚠️ autopay failed user=%s plan=%s: %v", u.UserID, plan.ID, err)
 			logMsg := tgbotapi.NewMessage(logChatID, alertText)
@@ -1824,13 +1827,20 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 			continue
 		}
 
-		if payment.Status != "succeeded" && !payment.Paid {
+		if payment == nil || payment.Status != "succeeded" || !payment.Paid {
+			if payment == nil {
+				_ = userStore.DisableAutopay(u.UserID)
+				rememberPendingAutopay(u.UserID, "", info.expireAt, autopayAttemptAt)
+				continue
+			}
 			log.Printf("autopay payment not succeeded user=%s status=%s", u.UserID, payment.Status)
-			_ = userStore.DisableAutopay(u.UserID)
-
-			failText := fmt.Sprintf("⚠️ автопродление не прошло (статус: %s).\nавтопродление отключено. продлите вручную в разделе «оплата».", payment.Status)
-			failMsg := tgbotapi.NewMessage(chatID, failText)
-			_, _ = bot.Send(failMsg)
+			if disableErr := userStore.DisableAutopay(u.UserID); disableErr == nil && payment.Status == "canceled" && !payment.Paid {
+				sendAutopayFailureNotice(bot, u.UserID, info.expireAt)
+			}
+			if payment.Status != "canceled" || payment.Paid {
+				rememberPendingAutopay(u.UserID, payment.ID, info.expireAt, autopayAttemptAt)
+				sendUserNotificationAdminLog(bot, chatID, "", "проверка автоплатежа: статус ещё не окончательный, ручная оплата не предложена")
+			}
 			continue
 		}
 
@@ -1881,24 +1891,15 @@ func autopayNotifyUpcoming(bot *tgbotapi.BotAPI, u AutopayUser, plan RatePlan, d
 		return // уже уведомляли для этого expiry
 	}
 
-	chatID, err := strconv.ParseInt(u.UserID, 10, 64)
-	if err != nil {
+	spec := noticeSpec{Kind: "autopay_upcoming", Key: "autopay_upcoming:" + expiry.UTC().Format(time.RFC3339Nano),
+		Text:     noticeEmoji("5345823764720426390", "⏰") + fmt.Sprintf(" <b>скоро автопродление</b>\n\nчерез %d дн. продлим подписку за <b>%.0f ₽</b>. если хотите отменить списание — нажмите кнопку ниже.", daysLeft, plan.Amount),
+		Keyboard: rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{{rawCallbackButton("отключить автопродление", "disable_autopay", "success", "")}}}}
+	if !sendLifecycleNotice(bot, u.UserID, spec, func() bool {
+		method, p, enabled, err := userStore.GetAutopay(u.UserID)
+		return err == nil && enabled && method == u.MethodID && p == u.PlanID
+	}) {
 		return
 	}
-
-	text := fmt.Sprintf(
-		"ℹ️ через %d дн. мы автоматически продлим вашу подписку за <b>%.0f ₽</b> (тариф <b>%s</b>).\nесли хотите отменить — нажмите кнопку ниже.",
-		daysLeft, plan.Amount, plan.Title,
-	)
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("❌ отключить автопродление", "disable_autopay"),
-		),
-	)
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "HTML"
-	msg.ReplyMarkup = kb
-	_, _ = bot.Send(msg)
 
 	autopayNotifiedMu.Lock()
 	autopayNotified[u.UserID] = expKey
@@ -3988,14 +3989,12 @@ func main() {
 
 	loadExpiryReminderState()
 	loadOnboardingFollowupState()
-	startExpiryReminder(bot, xrayCfg)
+	startLifecycleNotices(bot, xrayCfg)
 	startAutopayLoop(bot, xrayCfg)
 	startDevicePlanWorker()
 	startDeviceDeletionWorker()
 	startSubscriptionReissueWorkers()
 	startMergedTrafficLoop(bot)
-	startOnboardingFollowupLoop(bot, xrayCfg)
-	startTrialPaymentReminderLoop(bot)
 	startDailyLogSummary(bot)
 
 	// Профилактический re-login к XRAY раз в час
@@ -4058,6 +4057,7 @@ func main() {
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
+	u.AllowedUpdates = []string{"message", "callback_query", "pre_checkout_query", "my_chat_member"}
 	updates := bot.GetUpdatesChan(u)
 
 	log.Println("🚀 Бот запущен в асинхронном режиме")
@@ -4071,6 +4071,10 @@ func main() {
 				}
 			}()
 
+			if upd.MyChatMember != nil {
+				handleNoticeMembership(bot, upd.MyChatMember)
+				return
+			}
 			if upd.PreCheckoutQuery != nil {
 				handlePreCheckout(bot, upd.PreCheckoutQuery)
 				return
@@ -5805,6 +5809,11 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 		body = mergedBody
 		mergedStatus = fmt.Sprintf("merged:%d", len(links))
 	}
+	if converted, headers, convertErr := autoSelectSubscription(targetUserID, variant.userAgent, variant.accept, body, upstream.headers); convertErr != nil {
+		log.Printf("[merged-sub] auto-select skipped user=%s: %v", targetUserID, convertErr)
+	} else {
+		body, upstream.headers = converted, headers
+	}
 	log.Printf("[merged-sub] built user=%s status=%s duration=%s", targetUserID, mergedStatus, time.Since(startedAt).Round(time.Millisecond))
 	return mergedSubscriptionCacheEntry{
 		body:         body,
@@ -6074,6 +6083,8 @@ func handleAdminHelp(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"<code>/notify text</code> — массовая рассылка\n" +
 		"<code>/notify_test text</code> — тест рассылки себе\n" +
 		"<code>/notify_user userID text</code> — отправить одному пользователю\n" +
+		"<code>/incident open confirm</code> — подтвердить аварию и приостановить предложения\n" +
+		"<code>/incident resolved confirm</code> — подтвердить восстановление\n" +
 		"<code>/notify_sleep</code> — рассылка спящим пользователям\n" +
 		"<code>/compensation_create ID days valid_days</code> — создать компенсацию\n" +
 		"<code>/compensation_set_message ID</code> — сохранить сообщение из reply\n" +
@@ -7056,6 +7067,12 @@ func handleMigrateExpiryFromOld(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 }
 
 func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *xraySettings) {
+	if handleNoticeBillingClear(bot, msg) {
+		return
+	}
+	if handleIncidentCommand(bot, msg) {
+		return
+	}
 	chatID := msg.Chat.ID
 	session := getSession(chatID)
 
@@ -7640,6 +7657,7 @@ func handleStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *UserSessi
 	}
 
 	adTag := extractAdTag(msg)
+	recordNoticeEntry(userID, referrerID != "")
 	startAction := startLogAction(isNew, referrerID, userID, adTag)
 	logAction(bot, msg.From.ID, msg.From.UserName, startAction, isNew)
 
@@ -7838,6 +7856,10 @@ func handleReferralStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xraySettings) {
 	if cq == nil {
+		return
+	}
+	if strings.HasPrefix(cq.Data, "notice:") {
+		handleNoticeCallback(bot, cq, xrCfg)
 		return
 	}
 	if strings.HasPrefix(cq.Data, "device_plan:") {
@@ -8557,7 +8579,7 @@ func sendUserNotificationAdminLog(bot *tgbotapi.BotAPI, userID int64, username, 
 		notificationLogs[notificationType] = batch
 	}
 	batch.Last = now
-	batch.Users = append(batch.Users, userLink)
+	batch.Users = append(batch.Users, userLink+" · "+now.Format("02.01.2006 15:04:05 MST"))
 	notificationLogMu.Unlock()
 
 	for {
@@ -8840,9 +8862,13 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	}
 
 	email, _ := userStore.GetEmail(userID)
-	confirmationURL, err := yookassaClient.CreatePaymentAndGetURL(finalAmount, plan.Title, chatID, metadata, email, saveCard)
+	payment, err := yookassaClient.CreateTrackedPayment(finalAmount, plan.Title, chatID, metadata, email, saveCard)
 	if err != nil {
 		return err
+	}
+	confirmationURL := payment.Confirmation["confirmation_url"].(string)
+	if err := rememberNoticeBill(userID, noticeBill{ID: payment.ID, Plan: plan.ID, URL: confirmationURL, CreatedAt: time.Now().UTC()}); err != nil {
+		return fmt.Errorf("cannot persist current invoice: %w", err)
 	}
 
 	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">💳</tg-emoji> <b>%s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.0f ₽</b>\n\nспособы оплаты:\n• SberPay\n• T-Pay\n• СБП\n• ЮMoney\n• MirPay\n• Банковская карта\n\nнажмите «оплатить», чтобы открыть страницу оплаты.",
@@ -8880,52 +8906,7 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 	session.PaymentGen++
 	logAction(bot, chatID, "", "🔗 счёт создан → ожидание оплаты", false)
 
-	// Напоминание через 5 минут
-	go func(chatID int64, planID string, gen int64) {
-		time.Sleep(5 * time.Minute)
-
-		s := getSession(chatID)
-
-		// Если после этого счёта был создан новый — не напоминаем
-		if s.PaymentGen != gen {
-			return
-		}
-
-		// Не более одного напоминания в час
-		if !s.LastReminderAt.IsZero() && time.Since(s.LastReminderAt) < time.Hour {
-			return
-		}
-
-		// Проверяем, оплатил ли пользователь
-		_, found, _ := yookassaClient.FindSucceededPayment(chatID)
-		if found {
-			return
-		}
-
-		// Проверяем, что пользователь всё ещё на экране оплаты этого плана
-		if s.State != stateTopUp || s.PendingPlanID != planID {
-			return
-		}
-
-		s.LastReminderAt = time.Now()
-		logAction(bot, chatID, "", "⚠️ не оплатил (5 мин)", false)
-
-		// Удаляем предыдущее сообщение со счётом
-		if oldMsgID := s.MessageID; oldMsgID > 0 {
-			_, _ = bot.Send(tgbotapi.NewDeleteMessage(chatID, oldMsgID))
-		}
-
-		text := "<tg-emoji emoji-id=\"5344015205531686528\">⚠️</tg-emoji><b>вы не завершили оплату.</b>\nвернитесь и активируйте доступ чтобы оставаться на связи"
-		kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
-			{rawCallbackButton("оплатить", "retry_payment", "", "")},
-			{rawCallbackButton("✅ я оплатил", "check_payment", "", "")},
-		}}
-		reminderMsgID, _ := sendMessageRaw(bot, chatID, text, "HTML", kbRaw)
-		if reminderMsgID != 0 {
-			s.MessageID = reminderMsgID
-			s.State = stateTopUp
-		}
-	}(chatID, plan.ID, session.PaymentGen)
+	// Durable reminders are scheduled by startLifecycleNotices for this invoice ID.
 
 	return nil
 }
@@ -8940,8 +8921,12 @@ func startPaymentForTrafficPack(bot *tgbotapi.BotAPI, chatID int64, session *Use
 	}
 
 	email, _ := userStore.GetEmail(userID)
-	confirmationURL, err := yookassaClient.CreatePaymentAndGetURL(pack.Amount, "Докупка трафика "+pack.Title, chatID, metadata, email, false)
+	payment, err := yookassaClient.CreateTrackedPayment(pack.Amount, "Докупка трафика "+pack.Title, chatID, metadata, email, false)
 	if err != nil {
+		return err
+	}
+	confirmationURL := payment.Confirmation["confirmation_url"].(string)
+	if err := rememberNoticeBill(userID, noticeBill{ID: payment.ID, Plan: pack.ID, URL: confirmationURL, CreatedAt: time.Now().UTC()}); err != nil {
 		return err
 	}
 
@@ -8983,13 +8968,23 @@ func handleCheckPayment(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessio
 	userID := int64(cq.From.ID)
 	userIDStr := strconv.FormatInt(userID, 10)
 
-	payment, ok, err := yookassaClient.FindSucceededPayment(chatID)
+	bill := currentNoticeBill(userIDStr)
+	if bill == nil {
+		if latest := yookassaClient.LatestPaymentID(chatID); latest != "" {
+			bill = &noticeBill{ID: latest}
+		}
+	}
+	if bill == nil {
+		ackCallback(bot, cq, "текущий счёт не найден. откройте раздел оплаты или обратитесь в поддержку")
+		return
+	}
+	payment, err := yookassaClient.GetYooKassaPaymentStatus(bill.ID)
 	if err != nil {
-		log.Printf("FindSucceededPayment error: %v", err)
+		log.Printf("current payment lookup failed user=%s", userIDStr)
 		ackCallback(bot, cq, "Ошибка проверки платежа")
 		return
 	}
-	if !ok || payment == nil {
+	if payment == nil || payment.ID != bill.ID || paymentUserID(payment.Metadata["chat_id"]) != userIDStr || payment.Status != "succeeded" || !payment.Paid {
 		ackCallback(bot, cq, "Платеж не найден, попробуй позже (5-10 сек)")
 		return
 	}
