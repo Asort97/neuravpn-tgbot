@@ -179,6 +179,7 @@ type RatePlan struct {
 	Amount      float64
 	Days        int
 	DeviceExtra int
+	SalePercent int
 }
 
 type TrafficPack struct {
@@ -1813,6 +1814,12 @@ func processAutopayTick(bot *tgbotapi.BotAPI, cfg *xraySettings) {
 			continue
 		}
 		autopayAttemptAt := time.Now().UTC()
+		plan.Amount, priceErr = salePrice(plan.Amount)
+		if priceErr != nil {
+			log.Printf("autopay sale price unavailable user=%s", u.UserID)
+			continue
+		}
+		meta["plan_amount"] = plan.Amount
 		payment, err := yookassaClient.CreateAutoPayment(u.MethodID, plan.Amount, "Автопродление "+plan.Title, email, meta)
 		if err != nil {
 			log.Printf("autopay charge failed user=%s plan=%s: %v", u.UserID, plan.ID, err)
@@ -3440,6 +3447,9 @@ func minutesLabel(mins int) string {
 
 func starsAmountForPlan(plan RatePlan) int {
 	n := int(math.Round(plan.Amount*0.9)) + plan.DeviceExtra*50
+	if plan.SalePercent > 0 {
+		n = min(n, int(math.Round(pgstore.SaleAmount(plan.Amount+float64(plan.DeviceExtra*50), plan.SalePercent))))
+	}
 	if n < 1 {
 		n = 1
 	}
@@ -3466,14 +3476,9 @@ func getActivePromoDiscount(userID string) (discountPct int, ok bool) {
 
 func choosePayKeyboardRaw(plan RatePlan, discountPct int) rawInlineKeyboardMarkup {
 	stars := starsAmountForPlan(plan)
-	total := plan.Amount + float64(plan.DeviceExtra*50)
-	cardLabel := fmt.Sprintf("💳 картой с автопродлением (%.0f ₽)", total)
-	anyLabel := fmt.Sprintf("💲 любым способом (%.0f ₽)", total)
-	if discountPct > 0 {
-		discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100)/100 + float64(plan.DeviceExtra*50)
-		cardLabel = fmt.Sprintf("💳 картой с автопродлением (%.0f ₽ −%d%%)", discounted, discountPct)
-		anyLabel = fmt.Sprintf("💲 любым способом (%.0f ₽ −%d%%)", discounted, discountPct)
-	}
+	total := planPaymentAmount(plan, discountPct)
+	cardLabel := fmt.Sprintf("💳 картой с автопродлением (%.2f ₽)", total)
+	anyLabel := fmt.Sprintf("💲 любым способом (%.2f ₽)", total)
 	return rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawCallbackButton(fmt.Sprintf("⭐ звёздами (%d ⭐)", stars), "pay_stars_"+plan.ID, "", "")},
 		{rawCallbackButton(cardLabel, "pay_card_"+plan.ID, "", "")},
@@ -3487,6 +3492,11 @@ func choosePayKeyboardRaw(plan RatePlan, discountPct int) rawInlineKeyboardMarku
 }
 
 func sendStarsInvoice(bot *tgbotapi.BotAPI, chatID int64, plan RatePlan) error {
+	var priceErr error
+	plan, priceErr = loadPlanSale(plan)
+	if priceErr != nil {
+		return priceErr
+	}
 	stars := starsAmountForPlan(plan)
 	prices := []tgbotapi.LabeledPrice{
 		{Label: plan.Title, Amount: stars},
@@ -6086,7 +6096,9 @@ func handleAdminHelp(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"<code>/merged_traffic_sync</code> — проверить и восстановить безлимит БС\n" +
 		"<code>/merged_attach_inbounds</code> — привязать merged-клиентов к inbound\n" +
 		"<code>/create alias</code> — создать бессрочную подписку-алиас\n" +
-		"<code>/create_promocode CODE discount hours</code> — создать промокод\n" +
+		"<code>/create_promocode CODE hours discount</code> — создать промокод\n" +
+		"<code>/create_sales BLACKFRIDAY 50% 2026-11-30 23:59</code> — акция для всех (мск)\n" +
+		"<code>/sales</code> — текущая акция; <code>/stop_sales BLACKFRIDAY</code> — остановить\n" +
 		"<code>/notify text</code> — массовая рассылка\n" +
 		"<code>/notify_test text</code> — тест рассылки себе\n" +
 		"<code>/notify_user userID text</code> — отправить одному пользователю\n" +
@@ -7124,6 +7136,10 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		return
 	}
 
+	if cmdName, cmdArgs := parseLeadingSlashCommand(msg.Text); cmdName == "create_sales" || cmdName == "stop_sales" || cmdName == "sales" {
+		handleSalesCommand(bot, msg, session, cmdName, cmdArgs)
+		return
+	}
 	if cmdName, cmdArgs := parseLeadingSlashCommand(msg.Text); cmdName == "create_promocode" {
 		if !isAdmin(msg.From.ID) {
 			_ = updateSessionText(bot, chatID, session, stateMenu, "⛔️ Только для админа", "HTML", mainMenuInlineKeyboard())
@@ -8146,6 +8162,11 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			return
 		}
 		p.DeviceExtra = surcharge / 50
+		p, err = loadPlanSale(p)
+		if err != nil {
+			ackCallback(bot, cq, "не удалось проверить цену")
+			return
+		}
 		session.PendingPlanID = p.ID
 		link, err := createStarsInvoiceLink(bot, p)
 		if err != nil {
@@ -8785,7 +8806,12 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 	userID := strconv.FormatInt(chatID, 10)
 	session.PendingPlanID = ""
 	session.PendingTrafficPackID = ""
-	discountPct, hasDiscount := getActivePromoDiscount(userID)
+	discountPct, promoErr := activePaymentPromo(userID)
+	sale, saleErr := currentSale()
+	if promoErr != nil || saleErr != nil {
+		ackCallback(bot, cq, "не удалось проверить стоимость")
+		return
+	}
 	surcharge, priceErr := deviceSurcharge(userID)
 	if priceErr != nil {
 		ackCallback(bot, cq, "не удалось проверить стоимость")
@@ -8793,12 +8819,18 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 	}
 	var builder strings.Builder
 	builder.WriteString("<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\nчем больше период — тем выгоднее!\n\nвыберите период ниже.\nоплата ⭐ звездами - <b>скидка 10%.</b>\n\nтарифы:\n")
+	if sale != nil {
+		fmt.Fprintf(&builder, "<b>акция %s · %d%%</b>\nдо %s мск. скидки не суммируются; для звёзд выбирается более выгодная цена.\n\n", html.EscapeString(sale.Name), sale.Percent, sale.EndsAt.In(saleZone).Format("02.01.2006 15:04"))
+	}
 	for _, plan := range ratePlans {
 		plan.DeviceExtra = surcharge / 50
+		if sale != nil {
+			plan.SalePercent = sale.Percent
+		}
 		stars := starsAmountForPlan(plan)
-		if hasDiscount {
-			discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100)/100 + float64(surcharge)
-			builder.WriteString(fmt.Sprintf("• %d дней — <s>%.0f ₽</s> %.0f ₽ (-%d%% на тариф) или %d⭐\n", plan.Days, plan.Amount+float64(surcharge), discounted, discountPct, stars))
+		if discountPct > 0 || sale != nil {
+			discounted := planPaymentAmount(plan, discountPct)
+			builder.WriteString(fmt.Sprintf("• %d дней — <s>%.2f ₽</s> %.2f ₽ или %d⭐\n", plan.Days, plan.Amount+float64(surcharge), discounted, stars))
 		} else {
 			builder.WriteString(fmt.Sprintf("• %d дней — %.0f ₽ или %d⭐\n", plan.Days, plan.Amount+float64(surcharge), stars))
 		}
@@ -8807,7 +8839,7 @@ func handleTopUp(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, session *User
 		builder.WriteString(fmt.Sprintf("• %s — %.0f ₽ (тест)\n", testPlan.Title, testPlan.Amount))
 	}
 	if surcharge > 0 {
-		fmt.Fprintf(&builder, "\nВ ценах учтено дополнительных мест: %d (+%d ₽ за выбранный срок).\n", surcharge/50, surcharge)
+		fmt.Fprintf(&builder, "\nВ ценах учтено дополнительных мест: %d.\n", surcharge/50)
 	}
 	header := strings.TrimSuffix(builder.String(), "\n")
 	_ = updateSessionTextRaw(bot, chatID, session, stateTopUp, header, "HTML", rateKeyboardRaw(chatID))
@@ -8823,14 +8855,15 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 		return
 	}
 	plan.DeviceExtra = surcharge / 50
+	plan, priceErr = loadPlanSale(plan)
+	discountPct, promoErr := activePaymentPromo(userID)
+	if priceErr != nil || promoErr != nil {
+		ackCallback(bot, cq, "не удалось проверить стоимость")
+		return
+	}
 
 	stars := starsAmountForPlan(plan)
-	discountPct, hasDiscount := getActivePromoDiscount(userID)
-	priceStr := fmt.Sprintf("%.0f ₽", plan.Amount+float64(surcharge))
-	if hasDiscount {
-		discounted := math.Round(plan.Amount*(1-float64(discountPct)/100)*100)/100 + float64(surcharge)
-		priceStr = fmt.Sprintf("%.0f ₽ (−%d%% на тариф, итого %.0f ₽)", plan.Amount+float64(surcharge), discountPct, discounted)
-	}
+	priceStr := fmt.Sprintf("%.2f ₽", planPaymentAmount(plan, discountPct))
 	text := fmt.Sprintf(
 		"<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> покупка доступа\n\nсрок: %d дней\nцена: %s или %d ⭐\n\nвыберите способ оплаты:",
 		plan.Days, priceStr, stars,
@@ -8840,26 +8873,21 @@ func handleRateSelection(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, sessi
 }
 func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, plan RatePlan, saveCard bool) error {
 	userID := strconv.FormatInt(chatID, 10)
-	finalAmount := plan.Amount
 	surcharge, priceErr := deviceSurcharge(userID)
 	if priceErr != nil {
 		return fmt.Errorf("device price unavailable: %w", priceErr)
 	}
 
-	// Применяем скидку по активному промокоду
-	if pg, ok := userStore.(interface {
-		GetActivePromocode(userID string) (*struct {
-			Code          string
-			Discount      int
-			DiscountUntil time.Time
-		}, error)
-	}); ok {
-		if promo, err := pg.GetActivePromocode(userID); err == nil && promo != nil {
-			finalAmount = math.Round(plan.Amount*(1-float64(promo.Discount)/100)*100) / 100
-		}
+	plan.DeviceExtra = surcharge / 50
+	plan, priceErr = loadPlanSale(plan)
+	discount, promoErr := activePaymentPromo(userID)
+	if priceErr != nil || promoErr != nil {
+		return fmt.Errorf("не удалось проверить скидку")
 	}
-
-	finalAmount += float64(surcharge)
+	finalAmount := planPaymentAmount(plan, discount)
+	if finalAmount < 1 {
+		return fmt.Errorf("для бесплатного продления обратитесь в поддержку")
+	}
 	metadata := map[string]interface{}{
 		"plan_id":            plan.ID,
 		"plan_title":         plan.Title,
@@ -8878,10 +8906,10 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 		return fmt.Errorf("cannot persist current invoice: %w", err)
 	}
 
-	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">💳</tg-emoji> <b>%s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.0f ₽</b>\n\nспособы оплаты:\n• SberPay\n• T-Pay\n• СБП\n• ЮMoney\n• MirPay\n• Банковская карта\n\nнажмите «оплатить», чтобы открыть страницу оплаты.",
+	text := fmt.Sprintf("<tg-emoji emoji-id=\"5346325906526868503\">💳</tg-emoji> <b>%s</b>\n\n<tg-emoji emoji-id=\"5344015205531686528\">💰</tg-emoji> сумма к оплате: <b>%.2f ₽</b>\n\nспособы оплаты:\n• SberPay\n• T-Pay\n• СБП\n• ЮMoney\n• MirPay\n• Банковская карта\n\nнажмите «оплатить», чтобы открыть страницу оплаты.",
 		plan.Title, finalAmount)
 	if surcharge > 0 {
-		text += fmt.Sprintf("\n\nВключено дополнительных мест: %d · %d ₽ за выбранный срок.", surcharge/50, surcharge)
+		text += fmt.Sprintf("\n\nВключено дополнительных мест: %d.", surcharge/50)
 	}
 	kbRaw := rawInlineKeyboardMarkup{InlineKeyboard: [][]rawInlineKeyboardButton{
 		{rawURLButton("оплатить", confirmationURL, "5344015205531686528")},
@@ -8919,6 +8947,11 @@ func startPaymentForPlan(bot *tgbotapi.BotAPI, chatID int64, session *UserSessio
 }
 
 func startPaymentForTrafficPack(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, pack TrafficPack) error {
+	var priceErr error
+	pack.Amount, priceErr = salePrice(pack.Amount)
+	if priceErr != nil {
+		return priceErr
+	}
 	userID := strconv.FormatInt(chatID, 10)
 	metadata := map[string]interface{}{
 		"product_type":    "traffic",
@@ -9205,7 +9238,8 @@ func handlePreCheckout(bot *tgbotapi.BotAPI, pcq *tgbotapi.PreCheckoutQuery) {
 			errMsg = "неверная валюта"
 		}
 		surcharge, err := deviceSurcharge(strconv.FormatInt(pcq.From.ID, 10))
-		if err != nil || plan.DeviceExtra*50 != surcharge || pcq.TotalAmount != starsAmountForPlan(plan) {
+		plan, priceErr := loadPlanSale(plan)
+		if err != nil || priceErr != nil || plan.DeviceExtra*50 != surcharge || pcq.TotalAmount != starsAmountForPlan(plan) {
 			ok = false
 			errMsg = "Цена или число устройств изменились. Создайте новый счёт в боте."
 		}

@@ -49,9 +49,13 @@ func TestDevicePlansIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err = s.initSales(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err = s.initDevicePlans(ctx); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("global sales", func(t *testing.T) { testSalesIntegration(t, s) })
 	t.Run("durable device deletion queue", func(t *testing.T) { testDeviceDeletionQueue(t, s) })
 	t.Run("persistent device revocations", func(t *testing.T) { testDeviceRevocations(t, s) })
 	t.Run("permanent bonus slots", func(t *testing.T) { testDeviceBonus(t, s) })

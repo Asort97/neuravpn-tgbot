@@ -22,11 +22,12 @@ type DevicePlan struct {
 func (p DevicePlan) Limit() int { return 5 + p.ExtraSlots + p.BonusSlots }
 
 type DeviceSlotOrder struct {
-	ID        string `json:"id"`
-	UserID    string `json:"-"`
-	PaymentID string `json:"-"`
-	URL       string `json:"confirmation_url,omitempty"`
-	Applied   bool   `json:"applied"`
+	ID        string  `json:"id"`
+	UserID    string  `json:"-"`
+	PaymentID string  `json:"-"`
+	URL       string  `json:"confirmation_url,omitempty"`
+	Applied   bool    `json:"applied"`
+	Amount    float64 `json:"amount"`
 }
 
 func (s *Store) initDevicePlans(ctx context.Context) error {
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS device_slot_orders (
  applied_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS device_slot_orders_user ON device_slot_orders(user_id,created_at);
+ALTER TABLE device_slot_orders ADD COLUMN IF NOT EXISTS amount NUMERIC(12,2) NOT NULL DEFAULT 50 CHECK(amount>=1 AND amount<=50);
 ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS synced_extra_slots INTEGER;
 ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
 ALTER TABLE device_plans ADD COLUMN IF NOT EXISTS bonus_slots INTEGER NOT NULL DEFAULT 0 CHECK(bonus_slots BETWEEN 0 AND 95);
@@ -107,10 +109,11 @@ func (s *Store) CreateDeviceSlotOrder(userID string) (DeviceSlotOrder, error) {
 		return DeviceSlotOrder{}, errors.New("purchase unavailable")
 	}
 	o := DeviceSlotOrder{UserID: userID}
-	err = tx.QueryRow(ctx, `SELECT id,COALESCE(payment_id,''),confirmation_url FROM device_slot_orders WHERE user_id=$1 AND applied_at IS NULL AND created_at>NOW()-INTERVAL '20 minutes' ORDER BY created_at DESC LIMIT 1`, userID).Scan(&o.ID, &o.PaymentID, &o.URL)
+	err = tx.QueryRow(ctx, `SELECT id,COALESCE(payment_id,''),confirmation_url,amount FROM device_slot_orders WHERE user_id=$1 AND applied_at IS NULL AND created_at>NOW()-INTERVAL '20 minutes' ORDER BY created_at DESC LIMIT 1`, userID).Scan(&o.ID, &o.PaymentID, &o.URL, &o.Amount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		o.ID = uuid.NewString()
-		_, err = tx.Exec(ctx, `INSERT INTO device_slot_orders(id,user_id) VALUES($1,$2)`, o.ID, userID)
+		err = tx.QueryRow(ctx, `INSERT INTO device_slot_orders(id,user_id,amount) VALUES($1,$2,
+ GREATEST(1,ROUND(50*(100-COALESCE((SELECT percent FROM global_sale WHERE singleton AND stopped_at IS NULL AND ends_at>NOW()),0))/100.0,2))) RETURNING amount`, o.ID, userID).Scan(&o.Amount)
 	}
 	if err != nil {
 		return o, err
@@ -132,7 +135,7 @@ func (s *Store) GetDeviceSlotOrder(orderID, userID string) (DeviceSlotOrder, err
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	o := DeviceSlotOrder{ID: orderID, UserID: userID}
-	err := s.pool.QueryRow(ctx, `SELECT COALESCE(payment_id,''),confirmation_url,applied_at IS NOT NULL FROM device_slot_orders WHERE id=$1 AND user_id=$2`, orderID, userID).Scan(&o.PaymentID, &o.URL, &o.Applied)
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(payment_id,''),confirmation_url,applied_at IS NOT NULL,amount FROM device_slot_orders WHERE id=$1 AND user_id=$2`, orderID, userID).Scan(&o.PaymentID, &o.URL, &o.Applied, &o.Amount)
 	return o, err
 }
 
@@ -151,7 +154,8 @@ func (s *Store) ApplyDeviceSlotOrder(orderID, userID, paymentID string) (bool, e
 	}
 	var savedID string
 	var applied bool
-	err = tx.QueryRow(ctx, `SELECT COALESCE(payment_id,''),applied_at IS NOT NULL FROM device_slot_orders WHERE id=$1 AND user_id=$2 FOR UPDATE`, orderID, userID).Scan(&savedID, &applied)
+	var amount float64
+	err = tx.QueryRow(ctx, `SELECT COALESCE(payment_id,''),applied_at IS NOT NULL,amount FROM device_slot_orders WHERE id=$1 AND user_id=$2 FOR UPDATE`, orderID, userID).Scan(&savedID, &applied, &amount)
 	if err != nil {
 		return false, err
 	}
@@ -176,7 +180,7 @@ func (s *Store) ApplyDeviceSlotOrder(orderID, userID, paymentID string) (bool, e
 	if err != nil {
 		return false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO applied_payments(payment_id,user_id,provider,plan_id,amount_value,currency) VALUES($1,$2,'yookassa','device_slot',50,'RUB')`, "yookassa:"+paymentID, userID)
+	_, err = tx.Exec(ctx, `INSERT INTO applied_payments(payment_id,user_id,provider,plan_id,amount_value,currency) VALUES($1,$2,'yookassa','device_slot',$3,'RUB')`, "yookassa:"+paymentID, userID, amount)
 	if err != nil {
 		return false, err
 	}

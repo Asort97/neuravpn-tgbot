@@ -215,6 +215,9 @@ CREATE TABLE IF NOT EXISTS users (
 	if err != nil {
 		return err
 	}
+	if err := s.initSales(ctx); err != nil {
+		return err
+	}
 	if err := s.initDevicePlans(ctx); err != nil {
 		return err
 	}

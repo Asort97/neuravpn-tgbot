@@ -274,7 +274,10 @@ func createDeviceSlotPayment(userID string) (postgres.DeviceSlotOrder, error) {
 		email = fallbackEmail(userID)
 	}
 	meta := map[string]any{"product_type": "device_slot", "device_order_id": o.ID}
-	payment, err := yookassaClient.CreatePaymentWithKey(50, "Дополнительное устройство до окончания VPN-подписки", uid, "device_slot", meta, email, false, "device-slot-"+o.ID)
+	if o.Amount < 1 || o.Amount > 50 {
+		return o, errors.New("неверная стоимость заказа")
+	}
+	payment, err := yookassaClient.CreatePaymentWithKey(o.Amount, "Дополнительное устройство до окончания VPN-подписки", uid, "device_slot", meta, email, false, "device-slot-"+o.ID)
 	if err != nil {
 		return o, errors.New("не удалось создать платёж; повторите попытку")
 	}
@@ -309,7 +312,7 @@ func applyDeviceSlotPayment(orderID, userID, paymentID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if !validDeviceSlotPayment(paid, orderID, userID, paymentID) {
+	if !validDeviceSlotPayment(paid, orderID, userID, paymentID, o.Amount) {
 		return false, errors.New("payment is not a confirmed device slot purchase")
 	}
 	applied, err := s.ApplyDeviceSlotOrder(orderID, userID, paymentID)
@@ -319,8 +322,8 @@ func applyDeviceSlotPayment(orderID, userID, paymentID string) (bool, error) {
 	return applied, err
 }
 
-func validDeviceSlotPayment(p *yookassa.YooKassaPaymentResponse, orderID, userID, paymentID string) bool {
-	return p != nil && p.ID == paymentID && p.Paid && p.Status == "succeeded" && fmt.Sprint(p.Amount["value"]) == "50.00" && fmt.Sprint(p.Amount["currency"]) == "RUB" && fmt.Sprint(p.Metadata["product_type"]) == "device_slot" && fmt.Sprint(p.Metadata["device_order_id"]) == orderID && paymentUserID(p.Metadata["chat_id"]) == userID
+func validDeviceSlotPayment(p *yookassa.YooKassaPaymentResponse, orderID, userID, paymentID string, amount float64) bool {
+	return amount >= 1 && amount <= 50 && p != nil && p.ID == paymentID && p.Paid && p.Status == "succeeded" && fmt.Sprint(p.Amount["value"]) == fmt.Sprintf("%.2f", amount) && fmt.Sprint(p.Amount["currency"]) == "RUB" && fmt.Sprint(p.Metadata["product_type"]) == "device_slot" && fmt.Sprint(p.Metadata["device_order_id"]) == orderID && paymentUserID(p.Metadata["chat_id"]) == userID
 }
 
 func paymentUserID(value any) string {
@@ -370,7 +373,7 @@ func devicePlanSummary(userID string) (string, postgres.DevicePlan) {
 	if !p.Enabled {
 		return "\nДля вас лимит устройств пока не включён. Доплачивать не нужно.\n", p
 	}
-	return fmt.Sprintf("\nЛимит: <b>%d устройств</b> (5 включено).\nБесплатных мест навсегда: %d.\nПлатных мест: %d · +%d ₽ при каждом продлении.\n", p.Limit(), p.BonusSlots, p.ExtraSlots, p.ExtraSlots*50), p
+	return fmt.Sprintf("\nЛимит: <b>%d устройств</b> (5 включено).\nБесплатных мест навсегда: %d.\nПлатных мест: %d · обычная доплата при продлении: %d ₽ (до скидок).\n", p.Limit(), p.BonusSlots, p.ExtraSlots, p.ExtraSlots*50), p
 }
 
 func handleDevicePlanCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery) {
@@ -389,7 +392,12 @@ func handleDevicePlanCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery) 
 	text := "<b>Дополнительные устройства</b>\n" + summary
 	var rows [][]tgbotapi.InlineKeyboardButton
 	if p.Enabled {
-		text += "\nОдно место: 50 ₽ до окончания текущей подписки. При каждом продлении +50 ₽ за место, независимо от срока тарифа. Дни не добавляются. После изменения числа мест автопродление отключится; его можно включить заново."
+		price, priceErr := salePrice(50)
+		if priceErr != nil {
+			_ = updateSessionText(bot, cq.From.ID, session, stateDevices, "не удалось проверить стоимость. повторите позже.", "HTML", mainMenuInlineKeyboard())
+			return
+		}
+		text += fmt.Sprintf("\nОдно место сейчас: %.2f ₽ до окончания текущей подписки. Обычная цена при продлении: +50 ₽ за место; во время акции применяется скидка. Дни не добавляются. После изменения числа мест автопродление отключится; его можно включить заново.", price)
 		if cq.Data == "device_plan:reduce_confirm" {
 			err := reduceDeviceSlots(uid)
 			if err != nil {
@@ -405,11 +413,11 @@ func handleDevicePlanCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery) 
 			if err != nil {
 				text += "\n\nНе удалось создать платёж. Попробуйте позже или проверьте срок подписки."
 			} else {
-				rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL("Оплатить 50 ₽", o.URL)))
+				rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(fmt.Sprintf("Оплатить %.2f ₽", o.Amount), o.URL)))
 				text += "\n\nПосле оплаты место добавится автоматически. Нажмите «Устройства», чтобы обновить список."
 			}
 		} else {
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Добавить место · 50 ₽", "device_plan:buy")))
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("Добавить место · %.2f ₽", price), "device_plan:buy")))
 		}
 		if p.ExtraSlots > 0 && cq.Data == "device_plan:show" {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Убрать дополнительное место", "device_plan:reduce")))

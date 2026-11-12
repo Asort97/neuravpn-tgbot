@@ -157,7 +157,7 @@ func TestDevicePaymentMustBeVerifiedForExactOwnerOrderAndPrice(t *testing.T) {
 		case "product":
 			p.Metadata["product_type"] = "vpn"
 		}
-		if validDeviceSlotPayment(&p, "o1", "623290294", "p1") != (field == "valid") {
+		if validDeviceSlotPayment(&p, "o1", "623290294", "p1", 50) != (field == "valid") {
 			t.Fatal(field)
 		}
 	}
