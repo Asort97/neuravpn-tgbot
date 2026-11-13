@@ -88,6 +88,19 @@ func addHysteriaVariantSelection(body []byte) ([]byte, error) {
 			}
 			candidates = append(candidates, member)
 		}
+		// Verified on the pilot owner's mobile network; the pilot plain listener
+		// also binds this assigned IP. Keep the existing .218 candidates intact.
+		data, err := json.Marshal(candidates[1])
+		if err != nil {
+			return nil, err
+		}
+		var alternate map[string]any
+		if err := json.Unmarshal(data, &alternate); err != nil {
+			return nil, err
+		}
+		alternate["tag"] = "auto-hy-plain-ip-213.21.215.131"
+		alternate["settings"].(map[string]any)["address"] = "213.21.215.131"
+		candidates = append(candidates, alternate)
 		candidates = append(candidates, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
 		profile["outbounds"] = candidates
 		profile["observatory"] = map[string]any{"subjectSelector": []string{"auto-hy-"}, "probeUrl": "https://www.google.com/generate_204", "probeInterval": "45s", "enableConcurrency": true}

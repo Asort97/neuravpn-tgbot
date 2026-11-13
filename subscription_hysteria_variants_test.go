@@ -31,8 +31,12 @@ func TestHysteriaVariantsPilot(t *testing.T) {
 				continue
 			}
 			outs := b[i]["outbounds"].([]any)
-			if len(outs) != 4 {
-				t.Fatal("expected three variants and fail-closed fallback")
+			if len(outs) != 5 {
+				t.Fatal("expected three variants, verified alternate IP and fail-closed fallback")
+			}
+			alt := outs[3].(map[string]any)
+			if alt["settings"].(map[string]any)["address"] != "213.21.215.131" || alt["settings"].(map[string]any)["port"] != float64(10011) || alt["streamSettings"].(map[string]any)["finalmask"] != nil {
+				t.Fatal("invalid alternate UDP endpoint")
 			}
 			src := a[i]["outbounds"].([]any)[0].(map[string]any)["streamSettings"].(map[string]any)
 			for j := 0; j < 3; j++ {
