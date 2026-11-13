@@ -61,6 +61,9 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 		return body, headers, nil
 	}
 	converted, err := buildAutoSelectSubscription(body)
+	if err == nil && userID == autoSelectPilotUser {
+		converted, err = addPerBypassIPSelection(converted)
+	}
 	if err != nil {
 		return body, headers, err
 	}
@@ -76,6 +79,53 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 	h.Add("Vary", "Accept")
 	h.Add("Vary", "User-Agent")
 	return converted, h, nil
+}
+
+// Owner-only pilot: keep each ordinary LV profile's transport and credentials,
+// but select its entrance IP using the same client-side health checks.
+func addPerBypassIPSelection(body []byte) ([]byte, error) {
+	var profiles []map[string]any
+	if err := json.Unmarshal(body, &profiles); err != nil || len(profiles) == 0 {
+		return nil, errors.New("invalid per-bypass subscription")
+	}
+	for _, profile := range profiles[1:] {
+		outs, ok := profile["outbounds"].([]any)
+		if !ok || len(outs) != 1 {
+			continue
+		}
+		out, ok := outs[0].(map[string]any)
+		if !ok || out["protocol"] != "vless" {
+			continue
+		}
+		settings, _ := out["settings"].(map[string]any)
+		vnext, _ := settings["vnext"].([]any)
+		if len(vnext) != 1 {
+			continue
+		}
+		endpoint, _ := vnext[0].(map[string]any)
+		if endpoint["address"] != "lv.staticdeliverycdn.com" {
+			continue
+		}
+		port, _ := endpoint["port"].(float64)
+		tag := map[float64]string{10001: "auto-bypass-1", 10002: "auto-bypass-2", 443: "auto-bypass-3"}[port]
+		if tag == "" {
+			continue
+		}
+		out["tag"] = tag
+		candidates := make([]map[string]any, 0, len(autoSelectPilotIPs)+1)
+		for _, ip := range autoSelectPilotIPs {
+			candidate, err := autoSelectIPMember(out, ip)
+			if err != nil {
+				return nil, err
+			}
+			candidates = append(candidates, candidate)
+		}
+		candidates = append(candidates, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
+		profile["outbounds"] = candidates
+		profile["observatory"] = profiles[0]["observatory"]
+		profile["routing"] = profiles[0]["routing"]
+	}
+	return json.Marshal(profiles)
 }
 
 func autoSelectClient(remarks string, outbounds []map[string]any) map[string]any {
