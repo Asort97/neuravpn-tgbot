@@ -134,7 +134,7 @@ func addPerBypassIPSelection(body []byte) ([]byte, error) {
 		for key, value := range profiles[0]["observatory"].(map[string]any) {
 			observer[key] = value
 		}
-		observer["probeInterval"] = "45s"
+		observer["probeInterval"] = "3m"
 		profile["observatory"] = observer
 		profile["routing"] = profiles[0]["routing"]
 	}
@@ -231,7 +231,7 @@ func buildAutoSelectSubscription(body []byte) ([]byte, error) {
 	}
 	outbounds = append(outbounds, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
 	auto := autoSelectClient("⚡ Автоматический выбор", outbounds)
-	auto["observatory"] = map[string]any{"subjectSelector": []string{"auto-"}, "probeUrl": "https://www.google.com/generate_204", "probeInterval": "10s", "enableConcurrency": true}
+	auto["observatory"] = map[string]any{"subjectSelector": []string{"auto-"}, "probeUrl": "https://www.google.com/generate_204", "probeInterval": "3m", "enableConcurrency": true}
 	auto["routing"] = map[string]any{"domainStrategy": "AsIs",
 		"rules":     []any{map[string]any{"type": "field", "network": "tcp,udp", "balancerTag": "auto"}},
 		"balancers": []any{map[string]any{"tag": "auto", "selector": []string{"auto-"}, "strategy": map[string]any{"type": "leastPing"}, "fallbackTag": "unavailable"}},

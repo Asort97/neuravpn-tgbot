@@ -115,7 +115,7 @@ func addHysteriaVariantSelection(body []byte) ([]byte, error) {
 		candidates = pool
 		candidates = append(candidates, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
 		profile["outbounds"] = candidates
-		profile["observatory"] = map[string]any{"subjectSelector": []string{"auto-hy-"}, "probeUrl": "https://www.google.com/generate_204", "probeInterval": "45s", "enableConcurrency": true}
+		profile["observatory"] = map[string]any{"subjectSelector": []string{"auto-hy-"}, "probeUrl": "https://www.google.com/generate_204", "probeInterval": "3m", "enableConcurrency": true}
 		profile["routing"] = profiles[0]["routing"]
 	}
 	return json.Marshal(profiles)

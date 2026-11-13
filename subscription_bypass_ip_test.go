@@ -60,14 +60,14 @@ func TestPerBypassIPSelectionOwnerOnly(t *testing.T) {
 				}
 			}
 			observer := got[i]["observatory"].(map[string]any)
-			if observer["probeInterval"] != "45s" || observer["enableConcurrency"] != true {
+			if observer["probeInterval"] != "3m" || observer["enableConcurrency"] != true {
 				t.Fatal("incorrect per-bypass probe interval")
 			}
 			expectedObserver := make(map[string]any)
 			for key, value := range original[0]["observatory"].(map[string]any) {
 				expectedObserver[key] = value
 			}
-			expectedObserver["probeInterval"] = "45s"
+			expectedObserver["probeInterval"] = "3m"
 			if outs[7].(map[string]any)["protocol"] != "blackhole" || !reflect.DeepEqual(got[i]["routing"], original[0]["routing"]) || !reflect.DeepEqual(observer, expectedObserver) {
 				t.Fatal("incorrect health checks or fallback")
 			}
