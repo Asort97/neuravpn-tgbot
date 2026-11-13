@@ -59,7 +59,16 @@ func TestPerBypassIPSelectionOwnerOnly(t *testing.T) {
 					t.Fatal("parameters changed beyond IP")
 				}
 			}
-			if outs[7].(map[string]any)["protocol"] != "blackhole" || !reflect.DeepEqual(got[i]["routing"], original[0]["routing"]) || !reflect.DeepEqual(got[i]["observatory"], original[0]["observatory"]) {
+			observer := got[i]["observatory"].(map[string]any)
+			if observer["probeInterval"] != "45s" || observer["enableConcurrency"] != true {
+				t.Fatal("incorrect per-bypass probe interval")
+			}
+			expectedObserver := make(map[string]any)
+			for key, value := range original[0]["observatory"].(map[string]any) {
+				expectedObserver[key] = value
+			}
+			expectedObserver["probeInterval"] = "45s"
+			if outs[7].(map[string]any)["protocol"] != "blackhole" || !reflect.DeepEqual(got[i]["routing"], original[0]["routing"]) || !reflect.DeepEqual(observer, expectedObserver) {
 				t.Fatal("incorrect health checks or fallback")
 			}
 		}

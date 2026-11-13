@@ -122,7 +122,12 @@ func addPerBypassIPSelection(body []byte) ([]byte, error) {
 		}
 		candidates = append(candidates, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
 		profile["outbounds"] = candidates
-		profile["observatory"] = profiles[0]["observatory"]
+		observer := make(map[string]any)
+		for key, value := range profiles[0]["observatory"].(map[string]any) {
+			observer[key] = value
+		}
+		observer["probeInterval"] = "45s"
+		profile["observatory"] = observer
 		profile["routing"] = profiles[0]["routing"]
 	}
 	return json.Marshal(profiles)
