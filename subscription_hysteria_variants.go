@@ -11,14 +11,16 @@ import (
 // Keep them inside the primary profile instead of importing Gecko as a URI.
 func withoutHysteriaPilotAuxiliaryLinks(body []byte) []byte {
 	text := strings.TrimSpace(string(body))
+	var encode func([]byte) string
 	if !looksLikeSubscriptionText(text) {
 		var err error
-		text, _, err = decodeSubscriptionPayload(text)
+		text, encode, err = decodeSubscriptionPayload(text)
 		if err != nil {
 			return body
 		}
 	}
 	primary := false
+	removed := false
 	var kept []string
 	for _, line := range strings.Split(text, "\n") {
 		u, err := url.Parse(strings.TrimSpace(line))
@@ -27,15 +29,20 @@ func withoutHysteriaPilotAuxiliaryLinks(body []byte) []byte {
 				primary = true
 			}
 			if u.Port() == "10011" || u.Port() == "10012" {
+				removed = true
 				continue
 			}
 		}
 		kept = append(kept, line)
 	}
-	if !primary {
+	if !primary || !removed {
 		return body
 	}
-	return []byte(strings.Join(kept, "\n"))
+	result := []byte(strings.Join(kept, "\n"))
+	if encode != nil {
+		return []byte(encode(result))
+	}
+	return result
 }
 
 // Pilot listeners share the owner's existing auth, TLS and Salamander password.
@@ -88,19 +95,24 @@ func addHysteriaVariantSelection(body []byte) ([]byte, error) {
 			}
 			candidates = append(candidates, member)
 		}
-		// Verified on the pilot owner's mobile network; the pilot plain listener
-		// also binds this assigned IP. Keep the existing .218 candidates intact.
-		data, err := json.Marshal(candidates[1])
-		if err != nil {
-			return nil, err
+		// All three listeners bind the assigned pool and share canonical clients.
+		var pool []map[string]any
+		for _, variant := range candidates {
+			for _, ip := range autoSelectPilotIPs {
+				data, err := json.Marshal(variant)
+				if err != nil {
+					return nil, err
+				}
+				var member map[string]any
+				if err := json.Unmarshal(data, &member); err != nil {
+					return nil, err
+				}
+				member["tag"] = variant["tag"].(string) + "-ip-" + ip
+				member["settings"].(map[string]any)["address"] = ip
+				pool = append(pool, member)
+			}
 		}
-		var alternate map[string]any
-		if err := json.Unmarshal(data, &alternate); err != nil {
-			return nil, err
-		}
-		alternate["tag"] = "auto-hy-plain-ip-213.21.215.131"
-		alternate["settings"].(map[string]any)["address"] = "213.21.215.131"
-		candidates = append(candidates, alternate)
+		candidates = pool
 		candidates = append(candidates, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
 		profile["outbounds"] = candidates
 		profile["observatory"] = map[string]any{"subjectSelector": []string{"auto-hy-"}, "probeUrl": "https://www.google.com/generate_204", "probeInterval": "45s", "enableConcurrency": true}

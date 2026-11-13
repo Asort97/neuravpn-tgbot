@@ -57,18 +57,19 @@ func supportsAutoSelect(userAgent, accept string) bool {
 // Convert only an already-authorized response. Unsupported formats retain the
 // original subscription instead of dropping profiles or bypassing HWID checks.
 func autoSelectSubscription(userID, userAgent, accept string, body []byte, headers http.Header) ([]byte, http.Header, error) {
+	if hwidDenial(headers) == "" {
+		body = withoutHysteriaPilotAuxiliaryLinks(body)
+		headers = headers.Clone()
+		headers.Del("Content-Length")
+	}
 	if !autoSelectEnabled(userID) || !supportsAutoSelect(userAgent, accept) || hwidDenial(headers) != "" {
 		return body, headers, nil
 	}
-	input := body
-	if userID == autoSelectPilotUser {
-		input = withoutHysteriaPilotAuxiliaryLinks(body)
-	}
-	converted, err := buildAutoSelectSubscription(input)
-	if err == nil && userID == autoSelectPilotUser {
+	converted, err := buildAutoSelectSubscription(body)
+	if err == nil && (userID == autoSelectPilotUser || os.Getenv("SUBSCRIPTION_PER_BYPASS_IP_ENABLED") == "true") {
 		converted, err = addPerBypassIPSelection(converted)
 	}
-	if err == nil && userID == autoSelectPilotUser && os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_PILOT") == "true" {
+	if err == nil && (os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_ENABLED") == "true" || userID == autoSelectPilotUser && os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_PILOT") == "true") {
 		converted, err = addHysteriaVariantSelection(converted)
 	}
 	if err != nil {
