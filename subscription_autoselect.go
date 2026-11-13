@@ -60,7 +60,11 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 	if !autoSelectEnabled(userID) || !supportsAutoSelect(userAgent, accept) || hwidDenial(headers) != "" {
 		return body, headers, nil
 	}
-	converted, err := buildAutoSelectSubscription(body)
+	input := body
+	if userID == autoSelectPilotUser {
+		input = withoutHysteriaPilotAuxiliaryLinks(body)
+	}
+	converted, err := buildAutoSelectSubscription(input)
 	if err == nil && userID == autoSelectPilotUser {
 		converted, err = addPerBypassIPSelection(converted)
 	}

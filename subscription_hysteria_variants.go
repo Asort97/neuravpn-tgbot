@@ -3,7 +3,40 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
+	"strings"
 )
+
+// The collector can include pilot listeners by owner identity, not just subId.
+// Keep them inside the primary profile instead of importing Gecko as a URI.
+func withoutHysteriaPilotAuxiliaryLinks(body []byte) []byte {
+	text := strings.TrimSpace(string(body))
+	if !looksLikeSubscriptionText(text) {
+		var err error
+		text, _, err = decodeSubscriptionPayload(text)
+		if err != nil {
+			return body
+		}
+	}
+	primary := false
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		u, err := url.Parse(strings.TrimSpace(line))
+		if err == nil && (u.Scheme == "hysteria2" || u.Scheme == "hy2") && u.Hostname() == "213.21.200.218" {
+			if u.Port() == "10010" {
+				primary = true
+			}
+			if u.Port() == "10011" || u.Port() == "10012" {
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	if !primary {
+		return body
+	}
+	return []byte(strings.Join(kept, "\n"))
+}
 
 // Pilot listeners share the owner's existing auth, TLS and Salamander password.
 // Never synthesize credentials or include these endpoints for another account.

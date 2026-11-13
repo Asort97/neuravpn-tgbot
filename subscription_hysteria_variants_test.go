@@ -70,3 +70,18 @@ func TestHysteriaVariantsPilot(t *testing.T) {
 		}
 	}
 }
+
+func TestHysteriaAuxiliaryCollectorLinks(t *testing.T) {
+	t.Setenv("SUBSCRIPTION_AUTOSELECT_ENABLED", "true")
+	t.Setenv("SUBSCRIPTION_HYSTERIA_VARIANTS_PILOT", "true")
+	base := pilotURIs()
+	want, _, err := autoSelectSubscription(autoSelectPilotUser, "Happ", "", base, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := append(append([]byte{}, base...), []byte("hysteria2://secret@213.21.200.218:10011?sni=example.org#plain\nhysteria2://secret@213.21.200.218:10012?sni=example.org&obfs=gecko#gecko\n")...)
+	got, _, err := autoSelectSubscription(autoSelectPilotUser, "Happ", "", input, nil)
+	if err != nil || string(got) != string(want) {
+		t.Fatal("auxiliary exports broke JSON selection", err)
+	}
+}
