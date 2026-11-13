@@ -64,6 +64,9 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 	if err == nil && userID == autoSelectPilotUser {
 		converted, err = addPerBypassIPSelection(converted)
 	}
+	if err == nil && userID == autoSelectPilotUser && os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_PILOT") == "true" {
+		converted, err = addHysteriaVariantSelection(converted)
+	}
 	if err != nil {
 		return body, headers, err
 	}

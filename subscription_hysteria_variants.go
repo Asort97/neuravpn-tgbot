@@ -1,0 +1,64 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+)
+
+// Pilot listeners share the owner's existing auth, TLS and Salamander password.
+// Never synthesize credentials or include these endpoints for another account.
+func addHysteriaVariantSelection(body []byte) ([]byte, error) {
+	var profiles []map[string]any
+	if err := json.Unmarshal(body, &profiles); err != nil || len(profiles) == 0 {
+		return nil, errors.New("invalid Hysteria pilot subscription")
+	}
+	for _, profile := range profiles[1:] {
+		outs, _ := profile["outbounds"].([]any)
+		if len(outs) != 1 {
+			continue
+		}
+		out, _ := outs[0].(map[string]any)
+		settings, _ := out["settings"].(map[string]any)
+		if out["protocol"] != "hysteria" || settings["address"] != "213.21.200.218" || settings["port"] != float64(10010) {
+			continue
+		}
+		stream, _ := out["streamSettings"].(map[string]any)
+		mask, _ := stream["finalmask"].(map[string]any)
+		udp, _ := mask["udp"].([]any)
+		if len(udp) != 1 {
+			continue
+		}
+		entry, _ := udp[0].(map[string]any)
+		ms, _ := entry["settings"].(map[string]any)
+		password, _ := ms["password"].(string)
+		if entry["type"] != "salamander" || password == "" || ms["packetSize"] != nil {
+			continue
+		}
+		candidates := make([]map[string]any, 0, 4)
+		for i, kind := range []string{"salamander", "plain", "gecko"} {
+			data, err := json.Marshal(out)
+			if err != nil {
+				return nil, err
+			}
+			var member map[string]any
+			if err := json.Unmarshal(data, &member); err != nil {
+				return nil, err
+			}
+			member["tag"] = "auto-hy-" + kind
+			member["settings"].(map[string]any)["port"] = 10010 + i
+			st := member["streamSettings"].(map[string]any)
+			if kind == "plain" {
+				delete(st, "finalmask")
+			}
+			if kind == "gecko" {
+				st["finalmask"] = map[string]any{"udp": []any{map[string]any{"type": "salamander", "settings": map[string]any{"password": password, "packetSize": "512-1200"}}}}
+			}
+			candidates = append(candidates, member)
+		}
+		candidates = append(candidates, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
+		profile["outbounds"] = candidates
+		profile["observatory"] = map[string]any{"subjectSelector": []string{"auto-hy-"}, "probeUrl": "https://www.google.com/generate_204", "probeInterval": "45s", "enableConcurrency": true}
+		profile["routing"] = profiles[0]["routing"]
+	}
+	return json.Marshal(profiles)
+}
