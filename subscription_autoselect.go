@@ -35,7 +35,9 @@ func autoSelectEnabled(userID string) bool {
 }
 
 func supportsAutoSelect(userAgent, accept string) bool {
-	if strings.Contains(strings.ToLower(userAgent), "happ") {
+	ua := strings.ToLower(strings.TrimSpace(userAgent))
+	// INCY imports full Xray JSON, including observatory and balancers.
+	if strings.Contains(ua, "happ") || ua == "incy" || strings.HasPrefix(ua, "incy/") {
 		return true
 	}
 	for _, part := range strings.Split(accept, ",") {
