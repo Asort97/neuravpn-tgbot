@@ -54,7 +54,7 @@ func TestHysteriaVariantsPilot(t *testing.T) {
 					}
 				}
 			}
-			if b[i]["observatory"].(map[string]any)["probeInterval"] != "3m" {
+			if b[i]["observatory"].(map[string]any)["probeInterval"] != "10s" {
 				t.Fatal("wrong interval")
 			}
 		}

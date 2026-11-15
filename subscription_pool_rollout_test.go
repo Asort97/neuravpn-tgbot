@@ -38,7 +38,7 @@ func TestGlobalPerProfilePools(t *testing.T) {
 				if len(profiles[i]["outbounds"].([]any)) != want {
 					t.Fatal("incorrect candidate count", uid, i)
 				}
-				if profiles[i]["observatory"].(map[string]any)["probeInterval"] != "3m" {
+				if profiles[i]["observatory"].(map[string]any)["probeInterval"] != "10s" {
 					t.Fatal("incorrect interval")
 				}
 			}
