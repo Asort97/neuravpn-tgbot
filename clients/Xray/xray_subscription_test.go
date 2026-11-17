@@ -6,6 +6,16 @@ import (
 	"testing"
 )
 
+func TestWSUsesSubscriberIdentityAndInboundTLS(t *testing.T) {
+	ib := InboundData{Port: 19447, StreamSettings: `{"network":"ws","security":"tls","tlsSettings":{"serverName":"ws.example"},"wsSettings":{"path":"/sample"}}`}
+	c := &Client{ID: "individual", Flow: "xtls-rprx-vision"}
+	link := (&XRayClient{}).GenerateVLESSLinkForInboundData(c, ib, "192.0.2.1", 443, "other.example", "otherkey", "sid", "/", "chrome")
+	u, err := url.Parse(link)
+	if err != nil || u.User.Username() != c.ID || u.Port() != "19447" || u.Query().Get("security") != "tls" || u.Query().Get("sni") != "ws.example" || u.Query().Get("path") != "/sample" || u.Query().Has("flow") || u.Query().Has("pbk") {
+		t.Fatal("incorrect secure WS link")
+	}
+}
+
 func TestGenerateVLESSLinkForInboundDataUsesInboundRealityAndTransport(t *testing.T) {
 	client := &XRayClient{}
 	inbound := InboundData{

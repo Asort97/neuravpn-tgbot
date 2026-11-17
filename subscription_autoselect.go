@@ -67,7 +67,7 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 	if !autoSelectEnabled(userID) || !supportsAutoSelect(userAgent, accept) || hwidDenial(headers) != "" {
 		return body, headers, nil
 	}
-	converted, err := buildAutoSelectSubscription(body)
+	converted, err := buildAutoSelectProfiles(body, os.Getenv("SUBSCRIPTION_BS_AUTOSELECT_DISABLED") != "true")
 	if err == nil && (userID == autoSelectPilotUser || os.Getenv("SUBSCRIPTION_PER_BYPASS_IP_ENABLED") == "true") {
 		converted, err = addPerBypassIPSelection(converted)
 	}
@@ -162,6 +162,10 @@ func autoSelectClient(remarks string, outbounds []map[string]any) map[string]any
 }
 
 func buildAutoSelectSubscription(body []byte) ([]byte, error) {
+	return buildAutoSelectProfiles(body, false)
+}
+
+func buildAutoSelectProfiles(body []byte, groupBS bool) ([]byte, error) {
 	text := strings.TrimSpace(string(body))
 	if !looksLikeSubscriptionText(text) {
 		var err error
@@ -185,8 +189,12 @@ func buildAutoSelectSubscription(body []byte) ([]byte, error) {
 		if u.Scheme == "vpn" {
 			continue
 		}
-		out, err := autoSelectOutbound(u)
+		isWhitelistWS := whitelistTitle(u.Fragment) == "Белые списки WS"
+		out, err := autoSelectOutbound(u, isWhitelistWS)
 		if err != nil {
+			if isWhitelistWS {
+				continue // A broken optional WS member must not suppress the other profiles.
+			}
 			return nil, err
 		}
 		tag := fmt.Sprintf("profile-%d", len(profiles)+1)
@@ -238,7 +246,77 @@ func buildAutoSelectSubscription(body []byte) ([]byte, error) {
 		"rules":     []any{map[string]any{"type": "field", "network": "tcp,udp", "balancerTag": "auto"}},
 		"balancers": []any{map[string]any{"tag": "auto", "selector": []string{"auto-"}, "strategy": map[string]any{"type": "leastPing"}, "fallbackTag": "unavailable"}},
 	}
+	if groupBS {
+		profiles = groupWhitelistProfiles(profiles)
+	}
 	return json.Marshal(append([]map[string]any{auto}, profiles...))
+}
+
+func whitelistTitle(title string) string {
+	return strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(title), "🔓🔒\ufe0f "))
+}
+
+// Only group an unambiguous pair from this subscriber's authorized profiles.
+func groupWhitelistProfiles(profiles []map[string]any) []map[string]any {
+	indices := [2]int{-1, -1}
+	var candidates [2]map[string]any
+	wsIndex := -1
+	var ws map[string]any
+	for i, profile := range profiles {
+		title, _ := profile["remarks"].(string)
+		title = whitelistTitle(title)
+		var slot int
+		switch title {
+		case "Белые списки WS":
+			outs, ok := profile["outbounds"].([]map[string]any)
+			if wsIndex >= 0 || !ok || len(outs) != 1 {
+				return profiles
+			}
+			stream, _ := outs[0]["streamSettings"].(map[string]any)
+			if outs[0]["protocol"] != "vless" || stream["network"] != "ws" || stream["security"] != "tls" {
+				return profiles
+			}
+			wsIndex, ws = i, outs[0]
+			continue
+		case "Белые списки 1":
+			slot = 0
+		case "Белые списки 2":
+			slot = 1
+		default:
+			continue
+		}
+		outs, ok := profile["outbounds"].([]map[string]any)
+		if indices[slot] != -1 || !ok || len(outs) != 1 || outs[0]["protocol"] != "vless" {
+			return profiles
+		}
+		indices[slot], candidates[slot] = i, outs[0]
+	}
+	if indices[0] < 0 || indices[1] < 0 {
+		return profiles
+	}
+	candidates[0]["tag"], candidates[1]["tag"] = "bs-1", "bs-2"
+	first := profiles[indices[0]]
+	first["outbounds"] = candidates[:]
+	if ws != nil {
+		ws["tag"] = "bs-ws"
+		first["outbounds"] = append(candidates[:], ws)
+	}
+	first["burstObservatory"] = map[string]any{
+		"subjectSelector": []string{"bs-"},
+		"pingConfig":      map[string]any{"destination": "https://www.gstatic.com/generate_204", "interval": "1m", "timeout": "5s", "sampling": 2},
+	}
+	first["routing"] = map[string]any{
+		"domainStrategy": "AsIs",
+		"rules":          []any{map[string]any{"type": "field", "network": "tcp,udp", "balancerTag": "bs"}},
+		"balancers":      []any{map[string]any{"tag": "bs", "selector": []string{"bs-"}, "strategy": map[string]any{"type": "leastLoad"}, "fallbackTag": "bs-2"}},
+	}
+	kept := profiles[:0]
+	for i, profile := range profiles {
+		if i != indices[1] && i != wsIndex {
+			kept = append(kept, profile)
+		}
+	}
+	return kept
 }
 
 func autoSelectIPMember(template map[string]any, ip string) (map[string]any, error) {
@@ -268,7 +346,7 @@ func autoSelectIPMember(template map[string]any, ip string) (map[string]any, err
 	return member, nil
 }
 
-func autoSelectOutbound(u *url.URL) (map[string]any, error) {
+func autoSelectOutbound(u *url.URL, allowWS bool) (map[string]any, error) {
 	port, err := strconv.Atoi(u.Port())
 	if err != nil || port < 1 || port > 65535 || u.Hostname() == "" || u.User == nil || u.User.Username() == "" {
 		return nil, errors.New("pilot URI endpoint missing")
@@ -278,7 +356,8 @@ func autoSelectOutbound(u *url.URL) (map[string]any, error) {
 	out := map[string]any{"streamSettings": stream, "mux": map[string]any{"enabled": false}}
 	switch u.Scheme {
 	case "vless":
-		if q.Get("security") != "reality" || q.Get("pbk") == "" || q.Get("sni") == "" || q.Get("encryption") != "none" {
+		wsTLS := allowWS && q.Get("security") == "tls" && q.Get("type") == "ws"
+		if (!wsTLS && (q.Get("security") != "reality" || q.Get("pbk") == "")) || q.Get("sni") == "" || q.Get("encryption") != "none" {
 			return nil, errors.New("pilot requires supported REALITY VLESS")
 		}
 		out["protocol"] = "vless"
@@ -289,6 +368,15 @@ func autoSelectOutbound(u *url.URL) (map[string]any, error) {
 			fp = lvSubscriptionFingerprint
 		} else if fp == "" {
 			fp = "chrome"
+		}
+		if wsTLS {
+			if q.Get("flow") != "" || !strings.HasPrefix(q.Get("path"), "/") {
+				return nil, errors.New("unsupported VLESS WebSocket settings")
+			}
+			stream["network"], stream["security"] = "ws", "tls"
+			stream["tlsSettings"] = map[string]any{"serverName": q.Get("sni"), "fingerprint": fp, "allowInsecure": false, "alpn": []string{"http/1.1"}}
+			stream["wsSettings"] = map[string]any{"host": q.Get("host"), "path": q.Get("path")}
+			break
 		}
 		stream["security"] = "reality"
 		stream["realitySettings"] = map[string]any{"serverName": q.Get("sni"), "publicKey": q.Get("pbk"), "shortId": q.Get("sid"), "spiderX": q.Get("spx"), "fingerprint": fp}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -1115,12 +1116,48 @@ func parseTransportParams(streamSettings string) string {
 	}
 }
 
+// wsTLSLink uses the inbound's certificate name and never inherits REALITY keys or Vision flow.
+func wsTLSLink(client *Client, inbound InboundData, address string) (string, bool) {
+	var stream struct {
+		Network, Security string
+		TLSSettings       struct{ ServerName string }
+		WSSettings        struct {
+			Path, Host string
+			Headers    map[string]string
+		}
+	}
+	if json.Unmarshal([]byte(inbound.StreamSettings), &stream) != nil || stream.Network != "ws" || stream.Security != "tls" {
+		return "", false
+	}
+	sni := strings.TrimSpace(stream.TLSSettings.ServerName)
+	if client == nil || client.ID == "" || address == "" || inbound.Port < 1 || inbound.Port > 65535 || sni == "" {
+		return "", true
+	}
+	path := stream.WSSettings.Path
+	if path == "" {
+		path = "/"
+	}
+	host := stream.WSSettings.Host
+	if host == "" {
+		host = stream.WSSettings.Headers["Host"]
+	}
+	if host == "" {
+		host = sni
+	}
+	q := url.Values{"type": {"ws"}, "security": {"tls"}, "encryption": {"none"}, "sni": {sni}, "host": {host}, "path": {path}, "alpn": {"http/1.1"}, "fp": {"firefox"}}
+	u := url.URL{Scheme: "vless", User: url.User(client.ID), Host: net.JoinHostPort(address, strconv.Itoa(inbound.Port)), RawQuery: q.Encode(), Fragment: client.Email}
+	return u.String(), true
+}
+
 // GenerateVLESSLinkForInboundData generates a VLESS link from an inbound that
 // has already been loaded. This avoids another full /inbounds/list request for
 // every link in a subscription.
 func (x *XRayClient) GenerateVLESSLinkForInboundData(client *Client, inbound InboundData, serverAddress string, port int, serverName string, publicKey string, shortID string, spiderX string, fingerprint string) string {
 	if client == nil {
 		return ""
+	}
+	if link, ok := wsTLSLink(client, inbound, serverAddress); ok {
+		return link
 	}
 	if reality := parseRealityParams(inbound.StreamSettings, inbound.Port); reality != nil {
 		if strings.TrimSpace(reality.ServerName) != "" {
@@ -1189,7 +1226,9 @@ func (x *XRayClient) GenerateVLESSLinkForInbound(client *Client, inboundID int, 
 	if err == nil {
 		for _, ib := range inbounds {
 			if ib.ID == inboundID {
-				log.Printf("[GenerateVLESSLinkForInbound] inbound=%d streamSettings=%s", inboundID, ib.StreamSettings)
+				if link, ok := wsTLSLink(client, ib, serverAddress); ok {
+					return link
+				}
 				transportParams = parseTransportParams(ib.StreamSettings)
 				log.Printf("[GenerateVLESSLinkForInbound] transportParams=%s", transportParams)
 				break
