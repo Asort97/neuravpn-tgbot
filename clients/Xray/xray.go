@@ -1475,6 +1475,36 @@ func (x *XRayClient) GetClientRecordByEmail(email string) (*Client, []int, error
 	return c, raw.Obj.InboundIDs, nil
 }
 
+// Multi-transport panels have one client record attached to many inbounds.
+// Use the panel index instead of walking all inbounds on a cold subscription.
+func (x *XRayClient) GetIndexedClientByTelegram(userID string) (*Client, []int, error) {
+	code, body, err := x.doAPIRequest("GET", x.serverURL+"/panel/api/clients/get/tgId/"+url.PathEscape(userID), nil, map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return nil, nil, err
+	}
+	if code == http.StatusNotFound {
+		return nil, nil, nil
+	}
+	var r struct {
+		Success bool
+		Obj     []struct{ Client struct{ Email string } }
+	}
+	if code != 200 || json.Unmarshal(body, &r) != nil || !r.Success {
+		return nil, nil, fmt.Errorf("indexed Telegram lookup unsuccessful (%d)", code)
+	}
+	if len(r.Obj) == 0 {
+		return nil, nil, nil
+	}
+	if len(r.Obj) != 1 {
+		return nil, nil, fmt.Errorf("ambiguous merged Telegram identity")
+	}
+	c, ids, err := x.GetClientRecordByEmail(r.Obj[0].Client.Email)
+	if err == nil && (c == nil || c.TgID != userID || len(ids) == 0) {
+		return nil, nil, fmt.Errorf("indexed Telegram record mismatch")
+	}
+	return c, ids, err
+}
+
 func (x *XRayClient) AddClientToInbounds(client Client, inboundIDs []int) error {
 	if len(inboundIDs) == 0 {
 		return fmt.Errorf("no inbound IDs provided")

@@ -4362,6 +4362,13 @@ func missingInboundIDs(current []int, required []int) []int {
 }
 
 func findMergedProviderClient(cfg *xraySettings, userID, subID string) (*xray.Client, int, error) {
+	if cfg != nil && cfg.balancedJSONURL != "" {
+		c, ids, err := cfg.client.GetIndexedClientByTelegram(userID)
+		if err != nil || c == nil {
+			return nil, 0, err
+		}
+		return c, ids[0], nil
+	}
 	inboundIDs, err := mergedInboundIDs(cfg)
 	if err != nil {
 		return nil, 0, err
@@ -5034,6 +5041,9 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 	if err := cfg.client.AddClientToInbounds(clientData, inboundIDs); err != nil {
 		if strings.TrimSpace(clientData.Email) != "" {
 			if record, linkedInboundIDs, recordErr := cfg.client.GetClientRecordByEmail(clientData.Email); recordErr == nil && record != nil {
+				if cfg.balancedJSONURL != "" && (record.TgID != userID || record.SubID != stableSubID) {
+					return nil, 0, errors.New("existing balanced account belongs to another subscription")
+				}
 				if missing := missingInboundIDs(linkedInboundIDs, inboundIDs); len(missing) > 0 {
 					if attachErr := cfg.client.AttachClientToInbounds(record.Email, missing); attachErr != nil {
 						return nil, 0, fmt.Errorf("add merged client failed: %v; attach existing failed: %v", err, attachErr)
@@ -5268,7 +5278,15 @@ func buildMergedProviderLinksReadOnly(cfg *xraySettings, userID, subID string) (
 	var client *xray.Client
 	var linkedInboundIDs []int
 	email := strings.TrimSpace(fallbackEmail(userID))
-	if email != "" {
+	if cfg.balancedJSONURL != "" {
+		client, linkedInboundIDs, err = cfg.client.GetIndexedClientByTelegram(userID)
+		if err != nil {
+			return nil, err
+		}
+		if client == nil {
+			return nil, errMergedProviderClientNotFound
+		}
+	} else if email != "" {
 		client, linkedInboundIDs, err = cfg.client.GetClientRecordByEmail(email)
 		if err != nil {
 			log.Printf("[merged-sub] direct client lookup failed user=%s email=%s err=%v", userID, email, err)
