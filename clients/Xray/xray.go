@@ -23,6 +23,8 @@ import (
 
 // Client describes a single VLESS client entry in 3X-UI/Xray.
 type Client struct {
+	Password   string `json:"password,omitempty"`
+	Auth       string `json:"auth,omitempty"`
 	ID         string `json:"id"`
 	Email      string `json:"email"`
 	Enable     bool   `json:"enable"`

@@ -423,6 +423,8 @@ type notificationLogBatch struct {
 }
 
 type xraySettings struct {
+	balancedJSONURL   string
+	balancedRemark    string
 	client            *xray.XRayClient
 	inboundID         int
 	inboundIDs        []int
@@ -444,6 +446,8 @@ type xraySettings struct {
 // Example MERGED_XRAY_NODES_JSON value:
 // [{"name":"de","panel_url":"https://panel.example.com/secret/","api_token":"...","inbound_ids":[3,4],"server_address":"de.example.com","server_port":443}]
 type mergedXrayNodeDefinition struct {
+	BalancedJSONURL   string `json:"balanced_json_url"`
+	BalancedRemark    string `json:"balanced_remark"`
 	Name              string `json:"name"`
 	PanelURL          string `json:"panel_url"`
 	Host              string `json:"host"`
@@ -3631,6 +3635,9 @@ func parseMergedXrayNodeDefinitions(raw string) ([]mergedXrayNodeDefinition, err
 		node.Password = strings.TrimSpace(node.Password)
 		node.APIToken = strings.TrimSpace(node.APIToken)
 		node.ServerAddress = strings.TrimSpace(node.ServerAddress)
+		if err := validateBalancedNode(*node); err != nil {
+			return nil, err
+		}
 		node.ServerName = strings.TrimSpace(node.ServerName)
 		node.PublicKey = strings.TrimSpace(node.PublicKey)
 		node.ShortID = strings.TrimSpace(node.ShortID)
@@ -3713,6 +3720,7 @@ func connectMergedXrayNode(node mergedXrayNodeDefinition, allowDynamicInbounds b
 	}
 
 	cfg := &xraySettings{
+		balancedJSONURL: node.BalancedJSONURL, balancedRemark: node.BalancedRemark,
 		client:            client,
 		inboundID:         node.InboundID,
 		inboundIDs:        inboundIDs,
@@ -4922,6 +4930,9 @@ func setVLESSLinkDisplayName(link, title string) string {
 }
 
 func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primaryInfo *accessInfo) (*xray.Client, int, error) {
+	if cfg != nil && cfg.balancedJSONURL != "" && (primaryInfo == nil || primaryInfo.client == nil || !primaryInfo.client.Enable || (!primaryInfo.expireAt.IsZero() && !primaryInfo.expireAt.After(time.Now()))) {
+		return nil, 0, fmt.Errorf("no active primary subscription for balanced node")
+	}
 	unlock := lockReissuePanel(userID, cfg)
 	defer unlock()
 	if cfg != nil && cfg.client != nil {
@@ -4989,6 +5000,11 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 			updated.Comment = "tg:" + userID
 		}
 		updated.Reset = 0
+		if cfg.balancedJSONURL != "" {
+			updated.Flow = "xtls-rprx-vision"
+			updated.Auth = updated.ID
+			updated.Password = updated.ID
+		}
 		if err := cfg.client.UpdateClient(foundInboundID, updated); err != nil {
 			return nil, 0, err
 		}
@@ -5009,6 +5025,11 @@ func ensureMergedProviderClient(cfg *xraySettings, userID, subID string, primary
 		SubID:      stableSubID,
 		Comment:    "tg:" + userID,
 		Reset:      0,
+	}
+	if cfg.balancedJSONURL != "" {
+		clientData.Flow = "xtls-rprx-vision"
+		clientData.Auth = stableUUID
+		clientData.Password = stableUUID
 	}
 	if err := cfg.client.AddClientToInbounds(clientData, inboundIDs); err != nil {
 		if strings.TrimSpace(clientData.Email) != "" {
@@ -5192,6 +5213,12 @@ func buildMergedProviderLinksWithPrimaryInfo(cfg *xraySettings, userID, subID st
 	if len(linkInboundIDs) == 0 && inboundID > 0 {
 		linkInboundIDs = []int{inboundID}
 	}
+	if cfg.balancedJSONURL != "" {
+		if _, ok := linked[configuredInboundIDs[0]]; !ok {
+			return nil, errMergedProviderClientIncomplete
+		}
+		linkInboundIDs = configuredInboundIDs[:1]
+	}
 
 	seenLinks := make(map[string]struct{})
 	var links []string
@@ -5202,6 +5229,9 @@ func buildMergedProviderLinksWithPrimaryInfo(cfg *xraySettings, userID, subID st
 		}
 		if remark := mergedInboundRemark(cfg, id); remark != "" {
 			link = setVLESSLinkDisplayName(link, remark)
+		}
+		if cfg.balancedJSONURL != "" {
+			link = balancedFallbackLink(link, cfg.balancedRemark)
 		}
 		if _, seen := seenLinks[link]; seen {
 			continue
@@ -5276,6 +5306,9 @@ func buildMergedProviderLinksReadOnly(cfg *xraySettings, userID, subID string) (
 		// inbound is attached before links are returned.
 		return nil, errMergedProviderClientIncomplete
 	}
+	if cfg.balancedJSONURL != "" && (!client.Enable || (client.ExpiryTime > 0 && client.ExpiryTime <= time.Now().UnixMilli()) || client.SubID != subID || client.TgID != userID) {
+		return nil, errors.New("balanced node subscription not active for account")
+	}
 	var linkInboundIDs []int
 	for _, inboundID := range configuredInboundIDs {
 		if _, ok := linked[inboundID]; ok {
@@ -5296,6 +5329,9 @@ func buildMergedProviderLinksReadOnly(cfg *xraySettings, userID, subID string) (
 	inboundByID := make(map[int]xray.InboundData, len(inbounds))
 	for _, inbound := range inbounds {
 		inboundByID[inbound.ID] = inbound
+	}
+	if cfg.balancedJSONURL != "" {
+		linkInboundIDs = configuredInboundIDs[:1]
 	}
 
 	seenLinks := make(map[string]struct{}, len(linkInboundIDs))
@@ -5321,6 +5357,9 @@ func buildMergedProviderLinksReadOnly(cfg *xraySettings, userID, subID string) (
 		}
 		if remark := strings.TrimSpace(inbound.Remark); remark != "" {
 			link = setVLESSLinkDisplayName(link, remark)
+		}
+		if cfg.balancedJSONURL != "" {
+			link = balancedFallbackLink(link, cfg.balancedRemark)
 		}
 		if _, seen := seenLinks[link]; seen {
 			continue
@@ -5839,6 +5878,9 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 		log.Printf("[merged-sub] auto-select skipped user=%s: %v", targetUserID, convertErr)
 	} else {
 		body, upstream.headers = converted, headers
+		if upstream.headers.Get("X-Neura-Autoselect") == "enabled" && hwidDenial(upstream.headers) == "" {
+			body = enrichBalancedNodes(ctx, body, subID, mergedProviderConfigsForSubscription())
+		}
 	}
 	log.Printf("[merged-sub] built user=%s status=%s duration=%s", targetUserID, mergedStatus, time.Since(startedAt).Round(time.Millisecond))
 	return mergedSubscriptionCacheEntry{
