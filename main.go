@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -5455,6 +5456,21 @@ func buildAllMergedProviderLinksContext(ctx context.Context, userID, subID strin
 		links, err := buildMergedProviderLinksReadOnly(cfg, userID, subID)
 		if !errors.Is(err, errMergedProviderClientNotFound) && !errors.Is(err, errMergedProviderClientIncomplete) {
 			return links, err
+		}
+		// A newly enrolled balanced node needs only the primary account and
+		// expiry. Avoid scanning every primary inbound when the index is exact.
+		if cfg.balancedJSONURL != "" && primaryInfo == nil && xrayCfg != nil {
+			primary, scopeErr := scopedXraySettings(ctx, xrayCfg)
+			if scopeErr == nil && reissuePanelReady(userID, primary) == nil {
+				c, ids, lookupErr := primary.client.GetIndexedClientByTelegram(userID)
+				if lookupErr == nil && c != nil && c.Enable && c.SubID == subID && c.ExpiryTime > time.Now().UnixMilli() {
+					for _, id := range ids {
+						if id == primary.inboundID || slices.Contains(primary.inboundIDs, id) {
+							return buildMergedProviderLinksWithPrimaryInfo(cfg, userID, subID, &accessInfo{client: c, expireAt: time.UnixMilli(c.ExpiryTime)})
+						}
+					}
+				}
+			}
 		}
 		// Repair this node immediately, rather than waiting for unrelated nodes.
 		primaryOnce.Do(func() {
