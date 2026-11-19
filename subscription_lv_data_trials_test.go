@@ -15,7 +15,7 @@ func TestHappLVDataTrials(t *testing.T) {
 	}
 	out := appendHappLVDataTrials(body, autoSelectPilotUser, "Happ/4")
 	var docs []json.RawMessage
-	if json.Unmarshal(out, &docs) != nil || len(docs) != 2 || !bytes.Equal(docs[0], body[1:len(body)-1]) {
+	if json.Unmarshal(out, &docs) != nil || len(docs) != 3 || !bytes.Equal(docs[0], body[1:len(body)-1]) {
 		t.Fatal("original modified or copy missing")
 	}
 	var p map[string]any
@@ -26,6 +26,23 @@ func TestHappLVDataTrials(t *testing.T) {
 	if pc["httpMethod"] != "GET" || pc["destination"] != recoveryProbeURL || pc["timeout"] != "2s" || p["observatory"] != nil ||
 		!bytes.Equal(appendHappLVDataTrials(out, autoSelectPilotUser, "Happ"), out) {
 		t.Fatal("wrong trial or duplicate")
+	}
+	var fast map[string]any
+	if err := json.Unmarshal(docs[2], &fast); err != nil {
+		t.Fatal(err)
+	}
+	ping := obj(obj(fast["burstObservatory"])["pingConfig"])
+	if fast["remarks"] != "Латвия · Обход 2 · быстрый старт" || ping["httpMethod"] != "GET" ||
+		ping["destination"] != "https://speed.cloudflare.com/__down?bytes=4096" ||
+		ping["interval"] != "15s" || ping["timeout"] != "4s" || ping["sampling"] != float64(1) {
+		t.Fatal("wrong fast-start probe")
+	}
+	for _, key := range []string{"routing", "outbounds"} {
+		a, _ := json.Marshal(p[key])
+		b, _ := json.Marshal(fast[key])
+		if !bytes.Equal(a, b) {
+			t.Fatalf("fast start changed %s", key)
+		}
 	}
 	for _, other := range []string{"Германия ТЕСТ", "Обход HYSTERIA 🇱🇻 Латвия", "Белые списки 1"} {
 		b := bytes.ReplaceAll(body, []byte("Обход 2 🇱🇻 Латвия"), []byte(other))

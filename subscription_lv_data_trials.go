@@ -44,11 +44,11 @@ func appendHappLVDataTrials(body []byte, user, agent string) []byte {
 		if idx == 0 {
 			continue
 		}
-		title := "Латвия · Обход " + strconv.Itoa(idx) + " · тест данных"
+		prefix := "Латвия · Обход " + strconv.Itoa(idx) + " · "
 		selector := "auto-bypass-" + strconv.Itoa(idx) + "-ip-"
 		outs, _ := p["outbounds"].([]any)
 		bal, _ := obj(p["routing"])["balancers"].([]any)
-		if names[title] || len(outs) < 3 || len(bal) != 1 || obj(bal[0])["fallbackTag"] != "unavailable" || p["observatory"] == nil {
+		if len(outs) < 3 || len(bal) != 1 || obj(bal[0])["fallbackTag"] != "unavailable" || p["observatory"] == nil {
 			continue
 		}
 		valid, blocked := true, false
@@ -65,17 +65,26 @@ func appendHappLVDataTrials(body []byte, user, agent string) []byte {
 			continue
 		}
 		delete(p, "observatory")
-		p["remarks"] = title
-		p["burstObservatory"] = map[string]any{"subjectSelector": []string{selector}, "pingConfig": map[string]any{
-			"destination": recoveryProbeURL, "httpMethod": "GET", "interval": "1m", "timeout": "2s", "sampling": 1,
-		}}
 		obj(bal[0])["strategy"] = map[string]any{"type": "leastLoad", "settings": map[string]any{"expected": 1}}
-		data, err := json.Marshal(p)
-		if err != nil {
-			return body
+		for _, trial := range []struct{ label, url, interval, timeout string }{
+			{"тест данных", recoveryProbeURL, "1m", "2s"},
+			{"быстрый старт", "https://speed.cloudflare.com/__down?bytes=4096", "15s", "4s"},
+		} {
+			title := prefix + trial.label
+			if names[title] {
+				continue
+			}
+			p["remarks"] = title
+			p["burstObservatory"] = map[string]any{"subjectSelector": []string{selector}, "pingConfig": map[string]any{
+				"destination": trial.url, "httpMethod": "GET", "interval": trial.interval, "timeout": trial.timeout, "sampling": 1,
+			}}
+			data, err := json.Marshal(p)
+			if err != nil {
+				return body
+			}
+			docs = append(docs, data)
+			names[title] = true
 		}
-		docs = append(docs, data)
-		names[title] = true
 	}
 	if len(docs) == n {
 		return body
