@@ -5915,6 +5915,7 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 		if upstream.headers.Get("X-Neura-Autoselect") == "enabled" && hwidDenial(upstream.headers) == "" {
 			body = enrichBalancedNodes(ctx, body, subID, mergedProviderConfigsForSubscription())
 			body = applyHappHelloProfile(body, targetUserID, variant.userAgent)
+			body = appendHappRecoveryPilot(body, targetUserID, variant.userAgent)
 			body = appendIncyAWGPilot(body, targetUserID, variant.userAgent, "/run/neuravpn-pilots/incy-awg.json", time.Now())
 		}
 	}

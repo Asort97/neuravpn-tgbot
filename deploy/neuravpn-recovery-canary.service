@@ -1,0 +1,18 @@
+[Unit]
+Description=Check owner pilot subscription and data transfer independently of the phone
+After=network-online.target vpnbot.service
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+StateDirectory=neuravpn-recovery-canary
+StateDirectoryMode=0700
+LoadCredential=pilot:/etc/neuravpn-pilots/recovery-canary.json
+ExecStart=/usr/bin/python3 -I /usr/local/lib/neuravpn-recovery/canary.py
+TimeoutStartSec=100
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
