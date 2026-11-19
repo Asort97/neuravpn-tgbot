@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -59,18 +60,7 @@ func TestPerBypassIPSelectionOwnerOnly(t *testing.T) {
 					t.Fatal("parameters changed beyond IP")
 				}
 			}
-			observer := got[i]["observatory"].(map[string]any)
-			if observer["probeInterval"] != "10s" || observer["enableConcurrency"] != true {
-				t.Fatal("incorrect per-bypass probe interval")
-			}
-			expectedObserver := make(map[string]any)
-			for key, value := range original[0]["observatory"].(map[string]any) {
-				expectedObserver[key] = value
-			}
-			expectedObserver["probeInterval"] = "10s"
-			if outs[7].(map[string]any)["protocol"] != "blackhole" || !reflect.DeepEqual(got[i]["routing"], original[0]["routing"]) || !reflect.DeepEqual(observer, expectedObserver) {
-				t.Fatal("incorrect health checks or fallback")
-			}
+			assertHappFastStart(t, got[i])
 		}
 	}
 	for _, tc := range []struct {
@@ -83,5 +73,26 @@ func TestPerBypassIPSelectionOwnerOnly(t *testing.T) {
 		if err != nil || !bytes.Equal(body, pilotURIs()) {
 			t.Fatal("unsupported or denied response changed")
 		}
+	}
+}
+
+func assertHappFastStart(t *testing.T, p map[string]any) {
+	t.Helper()
+	observer := obj(p["burstObservatory"])
+	want := map[string]any{"destination": "https://speed.cloudflare.com/__down?bytes=4096", "httpMethod": "GET", "interval": "15s", "timeout": "4s", "sampling": float64(1)}
+	if p["observatory"] != nil || !reflect.DeepEqual(observer["pingConfig"], want) {
+		t.Fatal("wrong startup checks", p["remarks"])
+	}
+	sel := observer["subjectSelector"].([]any)[0].(string)
+	outs := p["outbounds"].([]any)
+	for _, o := range outs[:7] {
+		if !strings.HasPrefix(obj(o)["tag"].(string), sel) || obj(o)["protocol"] != "vless" {
+			t.Fatal("untested candidate")
+		}
+	}
+	b := obj(obj(p["routing"])["balancers"].([]any)[0])
+	if b["fallbackTag"] != obj(outs[7])["tag"] || obj(outs[7])["protocol"] != "blackhole" ||
+		!reflect.DeepEqual(b["strategy"], map[string]any{"type": "leastLoad", "settings": map[string]any{"expected": float64(1)}}) {
+		t.Fatal("wrong strategy or fallback")
 	}
 }

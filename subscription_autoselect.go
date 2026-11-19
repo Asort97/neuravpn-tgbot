@@ -69,7 +69,8 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 	}
 	converted, err := buildAutoSelectProfiles(body, os.Getenv("SUBSCRIPTION_BS_AUTOSELECT_DISABLED") != "true")
 	if err == nil && (userID == autoSelectPilotUser || os.Getenv("SUBSCRIPTION_PER_BYPASS_IP_ENABLED") == "true") {
-		converted, err = addPerBypassIPSelection(converted)
+		ua := strings.ToLower(strings.TrimSpace(userAgent))
+		converted, err = addPerBypassIPSelection(converted, ua == "happ" || strings.HasPrefix(ua, "happ/"))
 	}
 	if err == nil && (os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_ENABLED") == "true" || userID == autoSelectPilotUser && os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_PILOT") == "true") {
 		converted, err = addHysteriaVariantSelection(converted)
@@ -91,9 +92,8 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 	return converted, h, nil
 }
 
-// Owner-only pilot: keep each ordinary LV profile's transport and credentials,
-// but select its entrance IP using the same client-side health checks.
-func addPerBypassIPSelection(body []byte) ([]byte, error) {
+// Keep each LV profile's identity and transport; only choose its entrance IP.
+func addPerBypassIPSelection(body []byte, fastStart bool) ([]byte, error) {
 	var profiles []map[string]any
 	if err := json.Unmarshal(body, &profiles); err != nil || len(profiles) == 0 {
 		return nil, errors.New("invalid per-bypass subscription")
@@ -132,6 +132,14 @@ func addPerBypassIPSelection(body []byte) ([]byte, error) {
 		}
 		candidates = append(candidates, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
 		profile["outbounds"] = candidates
+		if fastStart {
+			delete(profile, "observatory")
+			profile["burstObservatory"] = map[string]any{"subjectSelector": []string{tag + "-ip-"}, "pingConfig": map[string]any{
+				"destination": "https://speed.cloudflare.com/__down?bytes=4096", "httpMethod": "GET", "interval": "15s", "timeout": "4s", "sampling": 1,
+			}}
+			profile["routing"] = autoSelectRouting(map[string]any{"type": "leastLoad", "settings": map[string]any{"expected": 1}})
+			continue
+		}
 		observer := make(map[string]any)
 		for key, value := range profiles[0]["observatory"].(map[string]any) {
 			observer[key] = value
@@ -242,14 +250,18 @@ func buildAutoSelectProfiles(body []byte, groupBS bool) ([]byte, error) {
 	outbounds = append(outbounds, map[string]any{"tag": "unavailable", "protocol": "blackhole", "settings": map[string]any{}})
 	auto := autoSelectClient("⚡ Автоматический выбор", outbounds)
 	auto["observatory"] = map[string]any{"subjectSelector": []string{"auto-"}, "probeUrl": "https://www.google.com/generate_204", "probeInterval": "10s", "enableConcurrency": true}
-	auto["routing"] = map[string]any{"domainStrategy": "AsIs",
-		"rules":     []any{map[string]any{"type": "field", "network": "tcp,udp", "balancerTag": "auto"}},
-		"balancers": []any{map[string]any{"tag": "auto", "selector": []string{"auto-"}, "strategy": map[string]any{"type": "leastPing"}, "fallbackTag": "unavailable"}},
-	}
+	auto["routing"] = autoSelectRouting(map[string]any{"type": "leastPing"})
 	if groupBS {
 		profiles = groupWhitelistProfiles(profiles)
 	}
 	return json.Marshal(append([]map[string]any{auto}, profiles...))
+}
+
+func autoSelectRouting(strategy map[string]any) map[string]any {
+	return map[string]any{"domainStrategy": "AsIs",
+		"rules":     []any{map[string]any{"type": "field", "network": "tcp,udp", "balancerTag": "auto"}},
+		"balancers": []any{map[string]any{"tag": "auto", "selector": []string{"auto-"}, "strategy": strategy, "fallbackTag": "unavailable"}},
+	}
 }
 
 func whitelistTitle(title string) string {

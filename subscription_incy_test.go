@@ -29,18 +29,18 @@ func TestINCYAutoSelectUserAgents(t *testing.T) {
 	}
 }
 
-func TestINCYReceivesSameAutoSelectProfilesAsHapp(t *testing.T) {
+func TestINCYReceivesStandardAutoSelectProfiles(t *testing.T) {
 	t.Setenv("SUBSCRIPTION_AUTOSELECT_ENABLED", "true")
 	t.Setenv("SUBSCRIPTION_PER_BYPASS_IP_ENABLED", "true")
 	t.Setenv("SUBSCRIPTION_HYSTERIA_VARIANTS_ENABLED", "true")
 	input := pilotURIs()
-	want, _, err := autoSelectSubscription("5550418384", "Happ/5.9", "*/*", input, nil)
+	want, _, err := autoSelectSubscription("5550418384", "NeuraVPN", autoSelectMediaType, input, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, headers, err := autoSelectSubscription("5550418384", "INCY/2.7.2/ios", "*/*", input, nil)
 	if err != nil || !bytes.Equal(got, want) {
-		t.Fatalf("INCY and Happ profiles differ: %v", err)
+		t.Fatalf("INCY differs from the standard JSON subscription: %v", err)
 	}
 	if headers.Get("X-Neura-Autoselect") != "enabled" || headers.Get("Content-Type") != "application/json; charset=utf-8" {
 		t.Fatal("INCY did not receive the JSON subscription")

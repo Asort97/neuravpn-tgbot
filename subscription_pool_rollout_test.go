@@ -20,14 +20,14 @@ func TestGlobalPerProfilePools(t *testing.T) {
 	var original []map[string]any
 	json.Unmarshal(baseline, &original)
 	for _, uid := range []string{autoSelectPilotUser, "5550418384"} {
-		for _, ua := range []string{"Happ/4.8", "NeuraVPN/1"} {
+		for _, ua := range []string{"Happ/4.8", "NeuraVPN/1", "Incy/4"} {
 			body, _, err := autoSelectSubscription(uid, ua, autoSelectMediaType, pilotURIs(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var profiles []map[string]any
 			json.Unmarshal(body, &profiles)
-			if !reflect.DeepEqual(profiles[0], original[0]) || !reflect.DeepEqual(profiles[5], original[5]) {
+			if len(profiles) != len(original) || !reflect.DeepEqual(profiles[0], original[0]) || !reflect.DeepEqual(profiles[5], original[5]) {
 				t.Fatal("global auto or merged node changed")
 			}
 			for i := 1; i <= 4; i++ {
@@ -38,7 +38,12 @@ func TestGlobalPerProfilePools(t *testing.T) {
 				if len(profiles[i]["outbounds"].([]any)) != want {
 					t.Fatal("incorrect candidate count", uid, i)
 				}
-				if profiles[i]["observatory"].(map[string]any)["probeInterval"] != "10s" {
+				if profiles[i]["remarks"] != original[i]["remarks"] {
+					t.Fatal("profile renamed")
+				}
+				if i <= 3 && ua == "Happ/4.8" {
+					assertHappFastStart(t, profiles[i])
+				} else if profiles[i]["burstObservatory"] != nil || profiles[i]["observatory"].(map[string]any)["probeInterval"] != "10s" {
 					t.Fatal("incorrect interval")
 				}
 			}
