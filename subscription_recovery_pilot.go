@@ -90,6 +90,10 @@ func appendHappRecoveryPilot(body []byte, user, agent string) []byte {
 	}}
 	p["routing"] = map[string]any{"domainStrategy": "AsIs", "rules": []any{map[string]any{"type": "field", "network": "tcp,udp", "balancerTag": "trial"}},
 		"balancers": []any{map[string]any{"tag": "trial", "selector": []string{"trial-"}, "strategy": map[string]any{"type": "leastLoad", "settings": map[string]any{"expected": 1}}, "fallbackTag": "unavailable"}}}
+	return appendHappProfile(body, p)
+}
+
+func appendHappProfile(body []byte, p map[string]any) []byte {
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return body
