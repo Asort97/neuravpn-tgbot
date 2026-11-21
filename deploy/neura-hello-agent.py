@@ -12,6 +12,7 @@ Config (/etc/neura-hello-agent.conf, KEY=VALUE):
   PORTS="443 10001 10002"
   HELLO_CSV=/var/log/neura-hello.csv          (optional)
   HELLO_ASN_CSV=/var/log/neura-hello-asn.csv  (optional)
+  CONNTRACK_DST=89.40.6.125  (relays: count kernel-forwarded connections)
 """
 import collections
 import csv
@@ -60,6 +61,29 @@ def established(ports):
         if local_port in conns:
             conns[local_port] += 1
             peers.add(parts[3].rsplit(":", 1)[0])
+    return dict(conns), len(peers)
+
+
+def forwarded(ports, dst):
+    """Connections a relay forwards in the kernel: they have no local socket,
+    so count conntrack entries addressed to this host on the relayed ports."""
+    out = subprocess.run(["conntrack", "-L"], capture_output=True, text=True, timeout=20).stdout
+    conns = collections.Counter({p: 0 for p in ports})
+    peers = set()
+    for line in out.splitlines():
+        fields = line.split()
+        if not fields or fields[0] not in ("tcp", "udp"):
+            continue
+        if fields[0] == "tcp" and "ESTABLISHED" not in fields:
+            continue
+        orig = {}
+        for f in fields:
+            if "=" in f:
+                k, v = f.split("=", 1)
+                orig.setdefault(k, v)  # first occurrence is the original direction
+        if orig.get("dst") == dst and orig.get("dport") in conns:
+            conns[orig["dport"]] += 1
+            peers.add(orig.get("src"))
     return dict(conns), len(peers)
 
 
@@ -159,7 +183,10 @@ def scans(path):
 
 def build_report(conf):
     ports = conf.get("PORTS", "").split()
-    conns, clients = established(ports)
+    if conf.get("CONNTRACK_DST"):
+        conns, clients = forwarded(ports, conf["CONNTRACK_DST"])
+    else:
+        conns, clients = established(ports)
     rx, tx = net_mbps()
     disk = shutil.disk_usage("/")
     report = {

@@ -25,6 +25,9 @@ type nodeRole struct {
 
 var defaultNodeLayout = []nodeGroup{
 	{Title: "🇱🇻 Латвия — обходы", Nodes: []nodeRole{{Name: "lv"}}},
+	// Relays forward clients to Latvia in the kernel: their connections are
+	// real people, they just enter through another country's address.
+	{Title: "🔀 Входы в Латвию", Nodes: []nodeRole{{Name: "relay-lt", Label: "🇱🇹 Литва → lv"}}},
 	{Title: "🔗 Каскад 🇷🇺 → 🇳🇱", Cascade: true, Nodes: []nodeRole{{Name: "ru-entry", Label: "вход 🇷🇺"}, {Name: "nl-exit", Label: "выход 🇳🇱"}}},
 	{Title: "🔓 Белые списки", Nodes: []nodeRole{{Name: "bs"}}},
 	{Title: "🤖 Бот и подписки", Nodes: []nodeRole{{Name: "bot"}}},
