@@ -4077,6 +4077,10 @@ func main() {
 			if mergedSubSecret != "" {
 				mux.HandleFunc("/merged-sub/", handleMergedSubscription)
 			}
+			if secret := strings.TrimSpace(os.Getenv("NEURA_HELLO_SECRET")); secret != "" {
+				mux.HandleFunc("/neura-hello/report", handleNeuraHelloReport([]byte(secret), neuraNodes, time.Now))
+				startNeuraHello(bot, xrayCfg)
+			}
 			log.Printf("🌐 Webhook server listening on :%s", webhookPort)
 			if err := http.ListenAndServe(":"+webhookPort, mux); err != nil {
 				log.Printf("webhook server error: %v", err)
@@ -7190,6 +7194,9 @@ func handleIncomingMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, xrCfg *x
 		return
 	}
 	if handleIncidentCommand(bot, msg) {
+		return
+	}
+	if handleNodesCommand(bot, msg) {
 		return
 	}
 	chatID := msg.Chat.ID

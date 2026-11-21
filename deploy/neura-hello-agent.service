@@ -1,0 +1,10 @@
+[Unit]
+Description=neura-hello agent: push node health summary to the bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/neura-hello-agent
+Nice=10
+TimeoutStartSec=50
