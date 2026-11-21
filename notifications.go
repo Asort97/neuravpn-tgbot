@@ -325,7 +325,7 @@ func noticeTemplate(kind, key string) noticeSpec {
 	return s
 }
 
-var noticeActions = map[string]string{"nav_support": "s", "nav_topup": "p", "nav_instructions": "i", "nav_referral": "r", "nav_get_vpn": "v", "claim_sub_bonus": "b", "notice_optout": "o", "notice_retry": "t", "notice_check": "c", "android": "a", "ios": "j", "windows": "w", "macos": "m", "disable_autopay": "d"}
+var noticeActions = map[string]string{"nav_support": "s", "nav_topup": "p", "nav_instructions": "i", "nav_referral": "r", "nav_get_vpn": "v", "claim_sub_bonus": "b", "notice_optout": "o", "notice_retry": "t", "notice_check": "c", "android": "a", "ios": "j", "windows": "w", "macos": "m", "linux": "l", "disable_autopay": "d"}
 
 func noticeTrackedKeyboard(k rawInlineKeyboardMarkup, token string) rawInlineKeyboardMarkup {
 	out := rawInlineKeyboardMarkup{}
