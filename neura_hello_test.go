@@ -154,17 +154,36 @@ func TestNeuraAlerterDetectsConnectionDrop(t *testing.T) {
 	}
 }
 
-func TestRenderNodesShowsKeyNumbers(t *testing.T) {
-	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+func TestRenderNodesGroupsCascadeAndHighlightsProblems(t *testing.T) {
+	now := time.Date(2026, 11, 21, 15, 8, 0, 0, time.UTC)
 	text := renderNodes(map[string]nodeState{
-		"lv": {Last: nodeReport{Node: "lv", Time: now.Add(-30 * time.Second), CPUs: 4, Load1: 0.7, MemPct: 45, DiskPct: 63,
-			RxMbps: 120, TxMbps: 118, Clients: 2100, Conns: map[string]int{"443": 3000, "10001": 1200},
-			HelloAt: "2026-11-21T11:08:06Z", Hello: map[string]helloPort{"443": {Flows: 600, Stalled: 6, Frag: 570, NoData: 18}}},
-			History: []nodePoint{{T: now.Unix(), Conns: 14200}}},
-	}, map[string]int{"lv": 1500}, now, now)
-	for _, want := range []string{"🟢 lv · только что", "онлайн 1500", "соединений 4200", "443:3000", "диск 63%", "пик за сутки: 14200", "443: завис 1% фраг 95%"} {
+		"lv": {Last: nodeReport{Node: "lv", Time: now.Add(-30 * time.Second), CPUs: 4, Load1: 2.4, MemPct: 38, DiskPct: 15,
+			RxMbps: 80, TxMbps: 78, Clients: 352, Conns: map[string]int{"443": 11078, "10001": 524, "10002": 350},
+			HelloAt: "2026-11-21T15:08:06Z", Hello: map[string]helloPort{"443": {Flows: 478, Stalled: 5, Frag: 400}, "10002": {Flows: 300, Stalled: 120}}},
+			History: []nodePoint{{T: now.Unix(), Conns: 12006}}},
+		"ru-entry": {Last: nodeReport{Node: "ru-entry", Time: now, CPUs: 1, Clients: 20, Conns: map[string]int{"8443": 336}}},
+		"nl-exit":  {Last: nodeReport{Node: "nl-exit", Time: now, CPUs: 1, Clients: 1, Conns: map[string]int{"443": 39}}},
+		"bot":      {Last: nodeReport{Node: "bot", Time: now.Add(-9 * time.Minute), CPUs: 1, DiskPct: 88, Conns: map[string]int{"443": 1}}},
+		"de-relay": {Last: nodeReport{Node: "de-relay", Time: now, CPUs: 1}},
+	}, map[string]int{"lv": 57, "ru-entry": 2}, now, now)
+	for _, want := range []string{
+		"👥 онлайн 59 · 🔴 на связи 4 из 5 нод",
+		"<b>🇱🇻 Латвия — обходы</b>",
+		"онлайн 57 · 11 952 соединения · 352 клиента",
+		"🔌 443 · 11 078 │ 10001 · 524 │ 10002 · 350",
+		"📈 пик за сутки 12 006",
+		"🧊 зависают (18:08): 443 1% · 10002 40% ⚠️",
+		"<b>🔗 Каскад 🇷🇺 → 🇳🇱</b>\n🟢 вход 🇷🇺 · ru-entry\n   онлайн 2 · 336 соединений · 20 клиентов",
+		"   ↓\n🟢 выход 🇳🇱 · nl-exit\n   39 туннелей от входа",
+		"🔴 bot · 9 мин назад",
+		"💾 88% ⚠️",
+		"<b>Прочие</b>\n🟢 de-relay",
+	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in:\n%s", want, text)
 		}
+	}
+	if strings.Index(text, "Латвия") > strings.Index(text, "Каскад") || strings.Index(text, "Каскад") > strings.Index(text, "Бот") {
+		t.Fatalf("groups out of order:\n%s", text)
 	}
 }

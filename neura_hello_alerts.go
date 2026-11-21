@@ -185,92 +185,6 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-func renderNodes(nodes map[string]nodeState, online map[string]int, onlineAt, now time.Time) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "🛰 neura-hello · %s\n", now.In(neuraMSK).Format("02.01 15:04 МСК"))
-	if len(nodes) == 0 {
-		b.WriteString("\nпока ни одна нода не прислала отчёт")
-		return b.String()
-	}
-	totalOnline := 0
-	for _, n := range online {
-		totalOnline += n
-	}
-	if len(online) > 0 && now.Sub(onlineAt) < 10*time.Minute {
-		fmt.Fprintf(&b, "онлайн по панелям: %d\n", totalOnline)
-	}
-	for _, name := range sortedNodeNames(nodes) {
-		st := nodes[name]
-		r := st.Last
-		age := now.Sub(r.Time)
-		mark := "🟢"
-		if age > alertSilentAfter {
-			mark = "🔴"
-		}
-		fmt.Fprintf(&b, "\n%s %s · %s\n", mark, name, agoText(age))
-		line := fmt.Sprintf("соединений %d · клиентов %d", r.totalConns(), r.Clients)
-		if n, ok := online[name]; ok {
-			line = fmt.Sprintf("онлайн %d · ", n) + line
-		}
-		b.WriteString(line + "\n")
-		if len(r.Conns) > 1 {
-			parts := []string{}
-			for _, port := range sortedKeys(r.Conns) {
-				if r.Conns[port] > 0 {
-					parts = append(parts, fmt.Sprintf("%s:%d", port, r.Conns[port]))
-				}
-			}
-			if len(parts) > 0 {
-				b.WriteString("  порты " + strings.Join(parts, " ") + "\n")
-			}
-		}
-		fmt.Fprintf(&b, "  нагрузка %.1f/%d · память %.0f%% · диск %.0f%% · ↓%.0f ↑%.0f Мбит/с\n", r.Load1, r.CPUs, r.MemPct, r.DiskPct, r.RxMbps, r.TxMbps)
-		peak := 0
-		for _, p := range st.History {
-			peak = max(peak, p.Conns)
-		}
-		if peak > 0 {
-			fmt.Fprintf(&b, "  пик за сутки: %d соединений\n", peak)
-		}
-		if r.HelloAt != "" && len(r.Hello) > 0 {
-			parts := []string{}
-			for _, port := range sortedKeys(r.Hello) {
-				h := r.Hello[port]
-				if h.Flows == 0 {
-					continue
-				}
-				parts = append(parts, fmt.Sprintf("%s: завис %d%% фраг %d%% пуст %d%%", port, h.Stalled*100/h.Flows, h.Frag*100/h.Flows, h.NoData*100/h.Flows))
-			}
-			if len(parts) > 0 {
-				b.WriteString("  hello " + helloTimeText(r.HelloAt) + ": " + strings.Join(parts, " · ") + "\n")
-			}
-		}
-		for _, sc := range r.Scans {
-			fmt.Fprintf(&b, "  🕵️ скан AS%s %s: %d пустых с %d IP\n", sc.ASN, sc.Name, sc.Flows, sc.IPs)
-		}
-	}
-	return b.String()
-}
-
-func agoText(d time.Duration) string {
-	switch {
-	case d < time.Minute:
-		return "только что"
-	case d < time.Hour:
-		return fmt.Sprintf("%d мин назад", int(d.Minutes()))
-	default:
-		return fmt.Sprintf("%d ч назад", int(d.Hours()))
-	}
-}
-
-func helloTimeText(at string) string {
-	t, err := time.Parse(time.RFC3339, at)
-	if err != nil {
-		return at
-	}
-	return t.In(neuraMSK).Format("15:04")
-}
-
 func handleNodesCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) bool {
 	if msg == nil || !msg.IsCommand() || msg.Command() != "nodes" {
 		return false
@@ -279,7 +193,9 @@ func handleNodesCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) bool {
 		return false
 	}
 	nodes, online, onlineAt := neuraNodes.snapshot()
-	_, _ = bot.Send(tgbotapi.NewMessage(msg.Chat.ID, renderNodes(nodes, online, onlineAt, time.Now())))
+	reply := tgbotapi.NewMessage(msg.Chat.ID, renderNodes(nodes, online, onlineAt, time.Now()))
+	reply.ParseMode = "HTML"
+	_, _ = bot.Send(reply)
 	return true
 }
 
