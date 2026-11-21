@@ -123,9 +123,9 @@ func TestLVFingerprintAllUsersAndAutoCandidates(t *testing.T) {
 				}
 			}
 		}
-		want := 24
+		want := 3*len(autoSelectPilotIPs) + 3
 		if user == autoSelectPilotUser {
-			want = 42 // 21 global candidates plus seven for each owner-only bypass.
+			want = 6 * len(autoSelectPilotIPs) // global candidates plus one pool per owner-only bypass.
 		}
 		if count != want {
 			t.Fatalf("expected %d LV candidates, got %d", want, count)

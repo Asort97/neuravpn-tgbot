@@ -5902,6 +5902,11 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 		mergedStatus = fmt.Sprintf("merged:%d", len(links))
 	}
 	if hwidDenial(upstream.headers) == "" {
+		if withStatic, staticErr := appendStaticSubscriptionLinks(body); staticErr != nil {
+			log.Printf("[merged-sub] static links skipped user=%s: %v", targetUserID, staticErr)
+		} else {
+			body = withStatic
+		}
 		if normalized, normalizeErr := normalizeLVSubscriptionFingerprint(body); normalizeErr != nil {
 			log.Printf("[merged-sub] fingerprint normalization skipped user=%s: %v", targetUserID, normalizeErr)
 		} else {
@@ -5915,6 +5920,7 @@ func buildMergedSubscriptionEntry(targetUserID string, variant mergedSubscriptio
 		if upstream.headers.Get("X-Neura-Autoselect") == "enabled" && hwidDenial(upstream.headers) == "" {
 			body = enrichBalancedNodes(ctx, body, subID, mergedProviderConfigsForSubscription())
 			body = applyHappHelloProfile(body, targetUserID, variant.userAgent)
+			body = applyProbeTuning(body, targetUserID, variant.userAgent)
 			body = appendHappRecoveryPilot(body, targetUserID, variant.userAgent)
 			body = appendHappFixedLVPilot(body, targetUserID, variant.userAgent)
 			body = appendIncyAWGPilot(body, targetUserID, variant.userAgent, "/run/neuravpn-pilots/incy-awg.json", time.Now())

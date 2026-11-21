@@ -73,7 +73,7 @@ func appendHappRecoveryPilot(body []byte, user, agent string) []byte {
 			switch {
 			case p.Remarks == profiles[0].Remarks && o["protocol"] == "hysteria" && e["address"] == "213.21.200.218" && e["port"] == float64(10010):
 				add(o, "udp", false)
-			case p.Remarks == "Германия ТЕСТ" && o["protocol"] == "vless" && e["address"] == "217.60.27.166" && e["port"] == float64(444):
+			case p.Remarks == "Обход 🇩🇪 Германия" && o["protocol"] == "vless" && e["address"] == "217.60.27.166" && e["port"] == float64(444):
 				add(o, "de", false)
 			case strings.Contains(p.Remarks, "Белые списки") && tag == "bs-ws" && o["protocol"] == "vless":
 				add(o, "bs", false)

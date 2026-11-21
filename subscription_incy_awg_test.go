@@ -59,7 +59,9 @@ func TestIncyLatviaPilotIndependentOfGermany(t *testing.T) {
 			t.Fatal(err)
 		}
 		out := appendIncyAWGPilot(body, autoSelectPilotUser, "Incy/4 Android", de, now)
-		var items []struct{ Servers []struct{ Name, Config string } }
+		var items []struct {
+			Servers []struct{ Name, Config string }
+		}
 		if json.Unmarshal(out, &items) != nil || len(items) != 2 || len(items[1].Servers) != i+1 ||
 			items[1].Servers[i].Name != "Латвия · AmneziaWG (тест)" || items[1].Servers[i].Config != cfg {
 			t.Fatal("missing or unexpected trial servers")

@@ -48,7 +48,7 @@ func TestPerBypassIPSelectionOwnerOnly(t *testing.T) {
 				t.Fatal("name changed")
 			}
 			outs := got[i]["outbounds"].([]any)
-			if len(outs) != 8 {
+			if len(outs) != len(autoSelectPilotIPs)+1 {
 				t.Fatal("expected seven IPs and blackhole")
 			}
 			src := original[i]["outbounds"].([]any)[0].(map[string]any)
@@ -85,13 +85,13 @@ func assertHappFastStart(t *testing.T, p map[string]any) {
 	}
 	sel := observer["subjectSelector"].([]any)[0].(string)
 	outs := p["outbounds"].([]any)
-	for _, o := range outs[:7] {
+	for _, o := range outs[:len(autoSelectPilotIPs)] {
 		if !strings.HasPrefix(obj(o)["tag"].(string), sel) || obj(o)["protocol"] != "vless" {
 			t.Fatal("untested candidate")
 		}
 	}
 	b := obj(obj(p["routing"])["balancers"].([]any)[0])
-	if b["fallbackTag"] != obj(outs[7])["tag"] || obj(outs[7])["protocol"] != "blackhole" ||
+	if b["fallbackTag"] != obj(outs[len(autoSelectPilotIPs)])["tag"] || obj(outs[len(autoSelectPilotIPs)])["protocol"] != "blackhole" ||
 		!reflect.DeepEqual(b["strategy"], map[string]any{"type": "leastLoad", "settings": map[string]any{"expected": float64(1)}}) {
 		t.Fatal("wrong strategy or fallback")
 	}

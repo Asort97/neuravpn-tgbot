@@ -31,23 +31,23 @@ func TestHysteriaVariantsPilot(t *testing.T) {
 				continue
 			}
 			outs := b[i]["outbounds"].([]any)
-			if len(outs) != 22 {
+			if len(outs) != 3*len(autoSelectPilotIPs)+1 {
 				t.Fatal("expected 21 variants and fail-closed fallback")
 			}
 			src := a[i]["outbounds"].([]any)[0].(map[string]any)["streamSettings"].(map[string]any)
-			for j := 0; j < 21; j++ {
+			for j := 0; j < 3*len(autoSelectPilotIPs); j++ {
 				out := outs[j].(map[string]any)
 				st := out["streamSettings"].(map[string]any)
-				if out["settings"].(map[string]any)["port"] != float64(10010+j/7) || out["settings"].(map[string]any)["address"] != autoSelectPilotIPs[j%7] {
+				if out["settings"].(map[string]any)["port"] != float64(10010+j/len(autoSelectPilotIPs)) || out["settings"].(map[string]any)["address"] != autoSelectPilotIPs[j%len(autoSelectPilotIPs)] {
 					t.Fatal("port mismatch")
 				}
 				if !reflect.DeepEqual(st["tlsSettings"], src["tlsSettings"]) || !reflect.DeepEqual(st["hysteriaSettings"], src["hysteriaSettings"]) {
 					t.Fatal("TLS or auth changed")
 				}
-				if j/7 == 1 && st["finalmask"] != nil {
+				if j/len(autoSelectPilotIPs) == 1 && st["finalmask"] != nil {
 					t.Fatal("plain variant has mask")
 				}
-				if j/7 == 2 {
+				if j/len(autoSelectPilotIPs) == 2 {
 					m := st["finalmask"].(map[string]any)["udp"].([]any)[0].(map[string]any)["settings"].(map[string]any)
 					if m["packetSize"] != "512-1200" || m["password"] != "mask" {
 						t.Fatal("bad gecko mask")

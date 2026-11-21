@@ -10,9 +10,9 @@ import (
 )
 
 func TestBalancedMergedNode(t *testing.T) {
-	const name = "Германия ТЕСТ"
+	const name = "Обход 🇩🇪 Германия"
 	const ip = "192.0.2.4"
-	const anchor = `[{"remarks":"Германия ТЕСТ","outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"192.0.2.4","users":[{"id":"alice"}]}]}}]}]`
+	const anchor = `[{"remarks":"Обход 🇩🇪 Германия","outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"192.0.2.4","users":[{"id":"alice"}]}]}}]}]`
 	owner := "alice"
 	hits := 0
 	sv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

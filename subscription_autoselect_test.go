@@ -94,7 +94,7 @@ func TestAutoSelectProfilesAndFreshCredentials(t *testing.T) {
 		}
 		auto := configs[0]
 		members := auto["outbounds"].([]any)
-		if len(members) != 23 || members[22].(map[string]any)["protocol"] != "blackhole" {
+		if len(members) != 3*len(autoSelectPilotIPs)+2 || members[3*len(autoSelectPilotIPs)+1].(map[string]any)["protocol"] != "blackhole" {
 			t.Fatal("bad fallback")
 		}
 		if bytes.Contains(out, []byte(`"freedom"`)) {
@@ -126,8 +126,8 @@ func TestAutoSelectFullIPPoolPreservesProfiles(t *testing.T) {
 		}
 		pool[ip] = true
 	}
-	if len(pool) != 7 {
-		t.Fatal("expected approved seven-address pool")
+	if len(pool) != 6 {
+		t.Fatal("expected approved six-address pool")
 	}
 	auto := configs[0]
 	observer := auto["observatory"].(map[string]any)
@@ -136,7 +136,7 @@ func TestAutoSelectFullIPPoolPreservesProfiles(t *testing.T) {
 	}
 	members := auto["outbounds"].([]any)
 	seen := make(map[string]bool)
-	for i, value := range members[:21] {
+	for i, value := range members[:3*len(autoSelectPilotIPs)] {
 		member := value.(map[string]any)
 		tag := member["tag"].(string)
 		if seen[tag] {
@@ -148,7 +148,7 @@ func TestAutoSelectFullIPPoolPreservesProfiles(t *testing.T) {
 		if !pool[ip] || !strings.HasSuffix(tag, "-ip-"+ip) {
 			t.Fatal("unapproved address or missing IP in tag")
 		}
-		original := configs[1+i/7]["outbounds"].([]any)[0].(map[string]any)
+		original := configs[1+i/len(autoSelectPilotIPs)]["outbounds"].([]any)[0].(map[string]any)
 		originalEndpoint := original["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
 		if originalEndpoint["address"] != "lv.staticdeliverycdn.com" {
 			t.Fatal("ordinary profile address changed")
@@ -158,7 +158,7 @@ func TestAutoSelectFullIPPoolPreservesProfiles(t *testing.T) {
 			t.Fatal("credentials, SNI, transport or port changed")
 		}
 	}
-	hy := members[21].(map[string]any)
+	hy := members[3*len(autoSelectPilotIPs)].(map[string]any)
 	if hy["protocol"] != "hysteria" || hy["settings"].(map[string]any)["address"] != "213.21.200.218" || hy["tag"] != "auto-hysteria2-ip-213.21.200.218" {
 		t.Fatal("Hysteria endpoint changed")
 	}
@@ -199,13 +199,13 @@ func TestAutoSelectGlobalCapabilityAndKillSwitch(t *testing.T) {
 	}{
 		{"customer-happ", "true", "10001", "Happ/4.3", "text/plain", true},
 		{"future-customer", "true", "90000000000", "Happ/4.3", "", true},
-		{"custom-client", "true", "10002", "NeuraVPN/1.0", autoSelectMediaType, true},
-		{"custom-weight", "true", "10002", "NeuraVPN/1.0", "text/plain, " + autoSelectMediaType + ";q=0.8", true},
+		{"custom-client", "true", "10002", "NeuraVPN/1.0", autoSelectMediaTypeV2, true},
+		{"custom-weight", "true", "10002", "NeuraVPN/1.0", "text/plain, " + autoSelectMediaTypeV2 + ";q=0.8", true},
 		{"no-capability", "true", "10002", "NeuraVPN/1.0", "application/json", false},
 		{"legacy-client", "true", "10002", "v2rayNG/1.10", "*/*", false},
-		{"disabled-type", "true", "10002", "NeuraVPN/1.0", autoSelectMediaType + ";q=0", false},
-		{"invalid-weight", "true", "10002", "NeuraVPN/1.0", autoSelectMediaType + ";q=invalid", false},
-		{"nan-weight", "true", "10002", "NeuraVPN/1.0", autoSelectMediaType + ";q=NaN", false},
+		{"disabled-type", "true", "10002", "NeuraVPN/1.0", autoSelectMediaTypeV2 + ";q=0", false},
+		{"invalid-weight", "true", "10002", "NeuraVPN/1.0", autoSelectMediaTypeV2 + ";q=invalid", false},
+		{"nan-weight", "true", "10002", "NeuraVPN/1.0", autoSelectMediaTypeV2 + ";q=NaN", false},
 		{"kill-switch-owner", "false", autoSelectPilotUser, "Happ", "", false},
 		{"invalid-switch", "typo", autoSelectPilotUser, "Happ", "", false},
 		{"no-user", "true", "", "Happ", "", false},
@@ -236,9 +236,9 @@ func TestAutoSelectPartialEntitlements(t *testing.T) {
 		indexes    []int
 		candidates int
 	}{
-		{"no-hysteria", []int{0, 1, 2, 4}, 21},
-		{"no-xhttp", []int{0, 1, 3, 4}, 15},
-		{"one-main-route", []int{2, 4}, 7},
+		{"no-hysteria", []int{0, 1, 2, 4}, 3 * len(autoSelectPilotIPs)},
+		{"no-xhttp", []int{0, 1, 3, 4}, 2*len(autoSelectPilotIPs) + 1},
+		{"one-main-route", []int{2, 4}, len(autoSelectPilotIPs)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var input []string
@@ -294,7 +294,7 @@ func TestAutoSelectCapabilityAndUserSeparateCache(t *testing.T) {
 	r.Header.Set("User-Agent", "NeuraVPN/1.0")
 	r.Header.Set("X-HWID", "test-install-id")
 	legacy := mergedSubscriptionCacheKey("111111", mergedSubscriptionVariantFromRequest(r))
-	r.Header.Set("Accept", autoSelectMediaType)
+	r.Header.Set("Accept", autoSelectMediaTypeV2)
 	jsonKey := mergedSubscriptionCacheKey("111111", mergedSubscriptionVariantFromRequest(r))
 	otherUser := mergedSubscriptionCacheKey("222222", mergedSubscriptionVariantFromRequest(r))
 	if legacy == jsonKey || jsonKey == otherUser {

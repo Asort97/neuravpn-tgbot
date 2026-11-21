@@ -34,7 +34,7 @@ func TestINCYReceivesStandardAutoSelectProfiles(t *testing.T) {
 	t.Setenv("SUBSCRIPTION_PER_BYPASS_IP_ENABLED", "true")
 	t.Setenv("SUBSCRIPTION_HYSTERIA_VARIANTS_ENABLED", "true")
 	input := pilotURIs()
-	want, _, err := autoSelectSubscription("5550418384", "NeuraVPN", autoSelectMediaType, input, nil)
+	want, _, err := autoSelectSubscription("5550418384", "NeuraVPN", autoSelectMediaTypeV2, input, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

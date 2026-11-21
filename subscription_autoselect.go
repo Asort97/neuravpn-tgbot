@@ -15,11 +15,18 @@ import (
 const autoSelectPilotUser = "623290294"
 const autoSelectMediaType = "application/vnd.neuravpn.xray+json"
 
+// NeuraVPN builds up to Android 1.0.19 / Windows 1.0.14 ask for the bare media
+// type but reject balancers this server now emits (leastLoad, burstObservatory,
+// proxy fallbacks) and then lose the whole subscription. Only clients that
+// declare v=2 can import every profile; everyone else keeps plain links.
+const autoSelectMediaTypeV2 = autoSelectMediaType + ";v=2"
+const autoSelectMinVersion = 2
+
 // Explicitly approved, assigned LV addresses. Do not derive endpoints from
 // subscriber input or add unverified addresses when the DNS pool changes.
 var autoSelectPilotIPs = [...]string{
 	"213.21.208.254", "213.21.200.223", "213.21.200.218",
-	"213.21.201.167", "213.21.215.131", "213.21.217.252", "193.68.78.66",
+	"213.21.201.167", "213.21.217.252", "193.68.78.66",
 }
 
 func autoSelectEnabled(userID string) bool {
@@ -51,6 +58,9 @@ func supportsAutoSelect(userAgent, accept string) bool {
 				continue
 			}
 		}
+		if version, err := strconv.Atoi(params["v"]); err != nil || version < autoSelectMinVersion {
+			continue
+		}
 		return true
 	}
 	return false
@@ -69,8 +79,7 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 	}
 	converted, err := buildAutoSelectProfiles(body, os.Getenv("SUBSCRIPTION_BS_AUTOSELECT_DISABLED") != "true")
 	if err == nil && (userID == autoSelectPilotUser || os.Getenv("SUBSCRIPTION_PER_BYPASS_IP_ENABLED") == "true") {
-		ua := strings.ToLower(strings.TrimSpace(userAgent))
-		converted, err = addPerBypassIPSelection(converted, ua == "happ" || strings.HasPrefix(ua, "happ/"))
+		converted, err = addPerBypassIPSelection(converted, isTunedJSONAgent(userAgent, userID))
 	}
 	if err == nil && (os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_ENABLED") == "true" || userID == autoSelectPilotUser && os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_PILOT") == "true") {
 		converted, err = addHysteriaVariantSelection(converted)
