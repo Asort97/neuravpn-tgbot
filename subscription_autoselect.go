@@ -84,6 +84,9 @@ func autoSelectSubscription(userID, userAgent, accept string, body []byte, heade
 	if err == nil && (os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_ENABLED") == "true" || userID == autoSelectPilotUser && os.Getenv("SUBSCRIPTION_HYSTERIA_VARIANTS_PILOT") == "true") {
 		converted, err = addHysteriaVariantSelection(converted)
 	}
+	if err == nil && relayEnabledFor(userID) {
+		converted, err = addRelayCandidates(converted, subscriptionRelayIPs())
+	}
 	if err != nil {
 		return body, headers, err
 	}
