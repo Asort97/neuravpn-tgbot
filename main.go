@@ -1291,6 +1291,9 @@ func onboardingInstructionKeyboardRaw() rawInlineKeyboardMarkup {
 			rawCallbackButton("ios", "ios", "", ""),
 			rawCallbackButton("macos", "macos", "", ""),
 		},
+		{
+			rawCallbackButton("linux", "linux", "", ""),
+		},
 	}}
 }
 
@@ -8007,7 +8010,7 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			strings.HasPrefix(data, "ios_prev_") || strings.HasPrefix(data, "ios_next_") ||
 			strings.HasPrefix(data, "macos_prev_") || strings.HasPrefix(data, "macos_next_") ||
 			strings.HasPrefix(data, "chregion_prev_") || strings.HasPrefix(data, "chregion_next_") ||
-			strings.HasSuffix(data, "_current") || data == "copy_key" || data == "nav_menu") {
+			strings.HasSuffix(data, "_current") || instruct.IsGuideStepCallback(data) || data == "copy_key" || data == "nav_menu") {
 		logAction(bot, userID, username, actionName, false)
 	}
 
@@ -8083,29 +8086,23 @@ func handleCallback(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, xrCfg *xra
 			ackCallback(bot, cq, "нажми на моноспейс, чтобы скопировать")
 			return
 		}
-	case data == "windows":
+	case instruct.IsGuidePlatform(data):
 		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
-		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.Windows, 0); err != nil {
-			log.Printf("windows instruction error: %v", err)
+		if err := startGuideFlow(bot, chatID, session, xrCfg, data); err != nil {
+			log.Printf("%s instruction error: %v", data, err)
 			ackText = "Не удалось открыть инструкцию"
 		}
-	case data == "android":
-		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
-		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.Android, 0); err != nil {
-			log.Printf("android instruction error: %v", err)
+	case instruct.IsGuideCallback(data):
+		if msgID, err := instruct.HandleGuideCallback(chatID, bot, data); err != nil {
+			log.Printf("guide callback %s error: %v", data, err)
 			ackText = "Не удалось открыть инструкцию"
-		}
-	case data == "ios":
-		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
-		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.IOS, 0); err != nil {
-			log.Printf("ios instruction error: %v", err)
-			ackText = "Не удалось открыть инструкцию"
-		}
-	case data == "macos":
-		markOnboardingInstructionOpened(strconv.FormatInt(cq.From.ID, 10))
-		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.MacOS, 0); err != nil {
-			log.Printf("macos instruction error: %v", err)
-			ackText = "Не удалось открыть инструкцию"
+		} else {
+			session.MessageID = msgID
+			session.State = stateInstructions
+			session.ContentType = "text"
+			if instruct.GuideOnScreenHasMedia(chatID) {
+				session.ContentType = "photo"
+			}
 		}
 	case data == "change_region_ios":
 		if err := startInstructionFlow(bot, chatID, session, xrCfg, instruct.ChangeRegionIOS, 0); err != nil {
@@ -9818,6 +9815,9 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 				rawCallbackButton("macos", "macos", "", ""),
 			},
 			{
+				rawCallbackButton("linux", "linux", "", ""),
+			},
+			{
 				rawCallbackButton("меню", "nav_menu", "", "5264852846527941278"),
 			},
 		},
@@ -9825,6 +9825,30 @@ func handleInstructionsMenu(bot *tgbotapi.BotAPI, cq *tgbotapi.CallbackQuery, se
 	if err := updateSessionTextRaw(bot, chatID, session, stateInstructions, text, "HTML", kbRaw); err != nil {
 		log.Printf("handleInstructionsMenu raw keyboard error: %v", err)
 	}
+}
+
+// startGuideFlow opens the app picker for a platform in place of the current message.
+func startGuideFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, xrCfg *xraySettings, platform string) error {
+	instruct.ResetState(chatID)
+	userIDStr := strconv.FormatInt(chatID, 10)
+	key := ""
+	if xrCfg != nil {
+		if info, _ := ensureXrayAccess(xrCfg, userIDStr, fallbackEmail(userIDStr), 0, true); info != nil {
+			key = publicSubscriptionURLForUser(xrCfg, userIDStr, info)
+		}
+	}
+	instruct.SetInstructionKey(chatID, key)
+	if session.MessageID != 0 {
+		instruct.SetGuideMessage(chatID, session.MessageID, session.ContentType == "photo")
+	}
+	msgID, err := instruct.ShowGuideApps(chatID, bot, platform)
+	if err != nil {
+		return err
+	}
+	session.MessageID = msgID
+	session.State = stateInstructions
+	session.ContentType = "text"
+	return nil
 }
 
 func startInstructionFlow(bot *tgbotapi.BotAPI, chatID int64, session *UserSession, xrCfg *xraySettings, platform instruct.InstructType, step int) error {
@@ -10317,6 +10341,7 @@ func getActionName(data string) string {
 		"android":          "инструкция Android",
 		"ios":              "инструкция iOS",
 		"macos":            "инструкция MacOS",
+		"linux":            "инструкция Linux",
 		"copy_key":         "копировать ключ",
 		"check_payment":    "проверить оплату",
 		"retry_payment":    "повторить оплату",
