@@ -167,7 +167,8 @@ def build_report(conf):
         "load1": round(os.getloadavg()[0], 2),
         "cpus": os.cpu_count() or 1,
         "mem_pct": round(mem_pct(), 1),
-        "disk_pct": round(100.0 * disk.used / disk.total, 1),
+        # Same as df: blocks reserved for root count as unavailable.
+        "disk_pct": round(100.0 * disk.used / (disk.used + disk.free), 1),
         "rx_mbps": round(rx, 1),
         "tx_mbps": round(tx, 1),
         "conns": conns,
