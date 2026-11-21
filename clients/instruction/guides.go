@@ -145,10 +145,11 @@ func desktopGuide(device, app string) []guideStep {
 }
 
 var neuravpnAndroidGuide = []guideStep{
-	{media: "InstructionPhotos/Android/0.MP4", caption: "<b>установите neuravpn</b>\n\nскачайте приложение neuravpn из Google Play.",
+	{caption: "<b>установите neuravpn</b>\n\nскачайте приложение neuravpn из Google Play.",
 		buttons: []guideButton{{text: "открыть Google Play", url: linkNeuravpnAndroid}}},
-	{media: "InstructionPhotos/Android/1.MP4", caption: "<b>вставьте ключ</b>\n\nскопируйте ключ ниже и вставьте его в приложении из буфера обмена.", key: true},
-	{media: "InstructionPhotos/Android/2.MP4", caption: "<b>включите VPN</b>\n\nнажмите на кнопку включения — VPN начнёт работать."},
+	keyStep(),
+	{media: clipPath("android", "neuravpn", "add"), caption: "<b>добавьте ключ</b>\n\nоткройте neuravpn и нажмите <b>«Вставить из буфера обмена»</b>. подключение появится на главном экране."},
+	{media: clipPath("android", "neuravpn", "connect"), caption: "<b>подключитесь</b>\n\nнажмите на большую кнопку с логотипом и подтвердите запрос на подключение. когда кнопка станет красной, VPN работает."},
 }
 
 var neuravpnWindowsGuide = []guideStep{
